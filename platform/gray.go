@@ -14,6 +14,13 @@ import (
 	"strings"
 )
 
+// ConfigVersionSelection is the deterministic routing decision for one session.
+type ConfigVersionSelection struct {
+	Version     AppConfigVersion
+	Bucket      int
+	InCandidate bool
+}
+
 // SessionGrayBucket returns the stable 0-99 release bucket for one session.
 func SessionGrayBucket(tenantID, appID, sessionID string) (int, error) {
 	tenantID = strings.TrimSpace(tenantID)
@@ -47,4 +54,36 @@ func SessionInGrayRelease(app AgentApp, sessionID string) (bool, int, error) {
 		return false, 0, err
 	}
 	return bucket < app.GrayPercent, bucket, nil
+}
+
+// SelectAppConfigVersionForSession chooses the active or released gray config version for one session.
+func SelectAppConfigVersionForSession(active, candidate AppConfigVersion, sessionID string) (ConfigVersionSelection, error) {
+	var selection ConfigVersionSelection
+	if err := active.Validate(); err != nil {
+		return selection, fmt.Errorf("active config version: %w", err)
+	}
+	if active.Status != AppConfigVersionStatusActive {
+		return selection, fmt.Errorf("active config version status must be active")
+	}
+	if err := candidate.Validate(); err != nil {
+		return selection, fmt.Errorf("candidate config version: %w", err)
+	}
+	if candidate.Status != AppConfigVersionStatusReleased {
+		return selection, fmt.Errorf("candidate config version status must be released")
+	}
+	if strings.TrimSpace(active.TenantID) != strings.TrimSpace(candidate.TenantID) {
+		return selection, fmt.Errorf("candidate tenant_id must match active tenant_id")
+	}
+	if strings.TrimSpace(active.AppID) != strings.TrimSpace(candidate.AppID) {
+		return selection, fmt.Errorf("candidate app_id must match active app_id")
+	}
+
+	bucket, err := SessionGrayBucket(active.TenantID, active.AppID, sessionID)
+	if err != nil {
+		return selection, err
+	}
+	if bucket < candidate.GrayPercent {
+		return ConfigVersionSelection{Version: candidate, Bucket: bucket, InCandidate: true}, nil
+	}
+	return ConfigVersionSelection{Version: active, Bucket: bucket}, nil
 }
