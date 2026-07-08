@@ -164,6 +164,9 @@ func (p StorageProfile) Validate() error {
 	if err := validateSecretReference("dsn_ref", p.DSNRef); err != nil {
 		return err
 	}
+	if _, err := NormalizeStorageMigrationMode(p.MigrationMode); err != nil {
+		return err
+	}
 	return nil
 }
 
