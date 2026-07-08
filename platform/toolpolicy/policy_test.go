@@ -185,6 +185,8 @@ func TestPolicyNilRedactorStillDoesNotLeakArguments(t *testing.T) {
 	p := newPolicy(
 		t,
 		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
 			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
 			HighRiskTools:       []string{"http_post"},
 		},

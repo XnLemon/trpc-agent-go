@@ -35,6 +35,9 @@ func (s *InMemoryAuditSink) WriteAudit(ctx context.Context, record AuditRecord) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := record.Validate(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.records = append(s.records, record)

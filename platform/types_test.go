@@ -282,3 +282,39 @@ func TestAuditSinkStoresSnapshot(t *testing.T) {
 		t.Fatalf("Records should return a defensive copy")
 	}
 }
+
+func TestAuditSinkRejectsInvalidRecord(t *testing.T) {
+	sink := NewInMemoryAuditSink()
+	record := AuditRecord{
+		TenantID: "tenant",
+	}
+
+	err := sink.WriteAudit(context.Background(), record)
+	if err == nil || !strings.Contains(err.Error(), "audit_id is required") {
+		t.Fatalf("expected audit_id validation, got %v", err)
+	}
+	if got := sink.Records(); len(got) != 0 {
+		t.Fatalf("expected invalid record to be rejected, got %+v", got)
+	}
+}
+
+func TestAuditSinkRejectsSensitiveRecord(t *testing.T) {
+	sink := NewInMemoryAuditSink()
+	record := AuditRecord{
+		TenantID:       "tenant",
+		AuditID:        "audit",
+		UserID:         "internal",
+		InternalUserID: "usr",
+		UserIDHash:     UserIDHash("tenant", "telegram", "external"),
+		TraceID:        "trace",
+		DecisionReason: "Authorization: Bearer raw-token",
+	}
+
+	err := sink.WriteAudit(context.Background(), record)
+	if err == nil || !strings.Contains(err.Error(), "decision_reason") {
+		t.Fatalf("expected sensitive record validation, got %v", err)
+	}
+	if got := sink.Records(); len(got) != 0 {
+		t.Fatalf("expected sensitive record to be rejected, got %+v", got)
+	}
+}
