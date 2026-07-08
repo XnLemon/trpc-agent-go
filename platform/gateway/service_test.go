@@ -1,0 +1,449 @@
+//
+// Tencent is pleased to support the open source community by making trpc-agent-go available.
+//
+// Copyright (C) 2025 Tencent.  All rights reserved.
+//
+// trpc-agent-go is licensed under the Apache License Version 2.0.
+//
+
+package gateway
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
+)
+
+func TestServiceHandleInboundIsolatesTenants(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerA := &recordingRunner{response: "alpha"}
+	runnerB := &recordingRunner{response: "beta"}
+	registerRuntime(t, registry, "tenant-a", runnerA)
+	registerRuntime(t, registry, "tenant-b", runnerB)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	resultA, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "shared-user", "hello"))
+	require.NoError(t, err)
+	resultB, err := svc.HandleInbound(ctx, inbound("tenant-b", "msg-1", "shared-user", "hello"))
+	require.NoError(t, err)
+
+	assert.NotEqual(t, resultA.SessionID, resultB.SessionID)
+	assert.NotEqual(t, runnerA.calls[0].userID, runnerB.calls[0].userID)
+	assert.Equal(t, "alpha", resultA.Outbound.Content)
+	assert.Equal(t, "beta", resultB.Outbound.Content)
+}
+
+func TestServiceHandleInboundDeduplicatesPlatformMessage(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "first"}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	first, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	second, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	assert.False(t, first.Duplicate)
+	assert.True(t, second.Duplicate)
+	assert.False(t, second.Processing)
+	assert.Equal(t, first.Outbound, second.Outbound)
+	assert.Len(t, r.calls, 1)
+}
+
+func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &blockingRunner{started: make(chan struct{})}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleInbound(ctx, msg)
+		errCh <- err
+	}()
+	<-r.started
+
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	assert.True(t, dup.Duplicate)
+	assert.True(t, dup.Processing)
+	assert.Len(t, r.calls, 1)
+	r.finish("done")
+	require.NoError(t, <-errCh)
+}
+
+func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	registerRuntime(t, registry, "tenant-a", r)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeImage
+	msg.ContentParts = []platform.ContentPart{{Type: platform.ContentPartTypeImage, FileRef: "artifact://image@1"}}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrUnsupportedMessageType)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.NotEqual(t, "user-1", audit.Records()[0].UserID)
+}
+
+func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("runner failed")
+	r := &recordingRunner{runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	store := platform.NewInMemoryIdempotencyStore()
+	svc := NewService(registry, store, NewInMemoryOutboundStore())
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, runnerErr)
+	record, ok, err := store.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusProcessing, record.Status)
+	assert.Empty(t, record.ResultRef)
+}
+
+func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{chunks: []string{"hel", "lo"}}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.TraceContext = map[string]string{"request_id": "req-123"}
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, "req-123", r.calls[0].requestID)
+	assert.Equal(t, "hello", result.Outbound.Content)
+	assert.Equal(t, "req-123", result.Outbound.TraceID)
+}
+
+func TestRuntimeValidateRejectsIdentifierMismatch(t *testing.T) {
+	runtime := validRuntime("tenant-a", &recordingRunner{response: "unused"})
+	runtime.Binding.TenantID = "tenant-b"
+
+	err := runtime.Validate()
+
+	require.ErrorIs(t, err, ErrRuntimeMismatch)
+}
+
+func TestServiceHandleInboundRejectsRegistryMismatch(t *testing.T) {
+	ctx := context.Background()
+	r := &recordingRunner{response: "unused"}
+	registry := staticRegistry{runtime: Runtime{
+		Tenant: platform.Tenant{
+			TenantID: "tenant-b",
+			Status:   platform.TenantStatusActive,
+		},
+		App: platform.AgentApp{
+			TenantID: "tenant-b",
+			AppID:    "app",
+			AppName:  "app",
+			Status:   platform.AppStatusActive,
+		},
+		Binding: platform.ChannelBinding{
+			TenantID:    "tenant-b",
+			AppID:       "app",
+			BindingID:   "binding",
+			Channel:     "wecom",
+			AccountID:   "acct",
+			WebhookPath: "/webhook",
+			TokenRef:    "secret://token",
+			SecretRef:   "secret://secret",
+			Status:      platform.BindingStatusActive,
+		},
+		Runner: r,
+	}}
+	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, ErrRuntimeMismatch)
+	assert.Empty(t, r.calls)
+}
+
+func TestCollectAssistantTextStopsAtRunnerCompletion(t *testing.T) {
+	ch := make(chan *event.Event, 2)
+	ch <- responseEvent("done", true)
+	ch <- event.NewResponseEvent(
+		"invocation",
+		"assistant",
+		&model.Response{ID: "rc", Object: model.ObjectTypeRunnerCompletion, Done: true},
+	)
+
+	content, err := collectAssistantText(ch)
+
+	require.NoError(t, err)
+	assert.Equal(t, "done", content)
+}
+
+func TestCollectAssistantTextPrefersFinalFullMessage(t *testing.T) {
+	ch := make(chan *event.Event, 3)
+	ch <- chunkEvent("hel", true)
+	ch <- chunkEvent("lo", true)
+	ch <- responseEvent("hello", true)
+	close(ch)
+
+	content, err := collectAssistantText(ch)
+
+	require.NoError(t, err)
+	assert.Equal(t, "hello", content)
+}
+
+func registerRuntime(t *testing.T, registry *InMemoryRegistry, tenantID string, r runnerStub) {
+	t.Helper()
+	err := registry.Register(validRuntime(tenantID, r))
+	require.NoError(t, err)
+}
+
+func validRuntime(tenantID string, r runnerStub) Runtime {
+	return Runtime{
+		Tenant: platform.Tenant{
+			TenantID: tenantID,
+			Status:   platform.TenantStatusActive,
+		},
+		App: platform.AgentApp{
+			TenantID: tenantID,
+			AppID:    "app",
+			AppName:  "app",
+			Status:   platform.AppStatusActive,
+		},
+		Binding: platform.ChannelBinding{
+			TenantID:      tenantID,
+			AppID:         "app",
+			BindingID:     "binding",
+			Channel:       "wecom",
+			AccountID:     "acct",
+			WebhookPath:   "/webhook",
+			TokenRef:      "secret://token",
+			SecretRef:     "secret://secret",
+			Status:        platform.BindingStatusActive,
+			ChannelLimits: platform.ChannelLimits{MaxTextLength: 4096},
+		},
+		Runner: r,
+	}
+}
+
+func inbound(tenantID, messageID, userID, text string) platform.InboundMessage {
+	return platform.InboundMessage{
+		TenantID:          tenantID,
+		AppID:             "app",
+		BindingID:         "binding",
+		Channel:           "wecom",
+		ChannelAccountID:  "acct",
+		PlatformMessageID: messageID,
+		ExternalUserID:    userID,
+		ConversationType:  platform.ConversationTypeDM,
+		MessageType:       platform.MessageTypeText,
+		ContentParts: []platform.ContentPart{
+			{Type: platform.ContentPartTypeText, Text: text},
+		},
+		ReceivedAt: time.Unix(100, 0),
+	}
+}
+
+type runnerStub interface {
+	Run(
+		ctx context.Context,
+		userID string,
+		sessionID string,
+		message model.Message,
+		runOpts ...agent.RunOption,
+	) (<-chan *event.Event, error)
+	Close() error
+}
+
+type runnerCall struct {
+	userID    string
+	sessionID string
+	message   model.Message
+	requestID string
+}
+
+type recordingRunner struct {
+	response string
+	chunks   []string
+	runErr   error
+	calls    []runnerCall
+}
+
+func (r *recordingRunner) Run(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	runOpts ...agent.RunOption,
+) (<-chan *event.Event, error) {
+	if r.runErr != nil {
+		return nil, r.runErr
+	}
+	r.calls = append(r.calls, runnerCall{
+		userID:    userID,
+		sessionID: sessionID,
+		message:   message,
+		requestID: requestIDFromOptions(runOpts...),
+	})
+	out := make(chan *event.Event, 2)
+	go func() {
+		defer close(out)
+		if len(r.chunks) > 0 {
+			for i, chunk := range r.chunks {
+				out <- chunkEvent(chunk, i != len(r.chunks)-1)
+			}
+			return
+		}
+		out <- responseEvent(r.response, true)
+	}()
+	return out, nil
+}
+
+func (r *recordingRunner) Close() error {
+	return nil
+}
+
+type blockingRunner struct {
+	mu      sync.Mutex
+	started chan struct{}
+	done    chan string
+	calls   []runnerCall
+}
+
+type staticRegistry struct {
+	runtime Runtime
+}
+
+func (r staticRegistry) Lookup(
+	ctx context.Context,
+	msg platform.InboundMessage,
+) (Runtime, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return Runtime{}, false, err
+	}
+	return r.runtime, true, nil
+}
+
+func (r *blockingRunner) Run(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	runOpts ...agent.RunOption,
+) (<-chan *event.Event, error) {
+	r.mu.Lock()
+	if r.done == nil {
+		r.done = make(chan string, 1)
+	}
+	r.calls = append(r.calls, runnerCall{
+		userID:    userID,
+		sessionID: sessionID,
+		message:   message,
+		requestID: requestIDFromOptions(runOpts...),
+	})
+	close(r.started)
+	done := r.done
+	r.mu.Unlock()
+	out := make(chan *event.Event, 1)
+	go func() {
+		defer close(out)
+		select {
+		case content := <-done:
+			out <- responseEvent(content, true)
+		case <-ctx.Done():
+		}
+	}()
+	return out, nil
+}
+
+func (r *blockingRunner) Close() error {
+	return nil
+}
+
+func (r *blockingRunner) finish(content string) {
+	r.done <- content
+}
+
+func responseEvent(content string, done bool) *event.Event {
+	return event.NewResponseEvent(
+		"invocation",
+		"assistant",
+		&model.Response{
+			ID:     content,
+			Object: model.ObjectTypeChatCompletion,
+			Done:   done,
+			Choices: []model.Choice{
+				{Index: 0, Message: model.Message{Role: model.RoleAssistant, Content: content}},
+			},
+		},
+	)
+}
+
+func chunkEvent(content string, partial bool) *event.Event {
+	return event.NewResponseEvent(
+		"invocation",
+		"assistant",
+		&model.Response{
+			ID:        content,
+			Object:    model.ObjectTypeChatCompletionChunk,
+			Done:      !partial,
+			IsPartial: partial,
+			Choices: []model.Choice{
+				{Index: 0, Delta: model.Message{Role: model.RoleAssistant, Content: content}},
+			},
+		},
+	)
+}
+
+func requestIDFromOptions(opts ...agent.RunOption) string {
+	var runOptions agent.RunOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&runOptions)
+		}
+	}
+	return runOptions.RequestID
+}
