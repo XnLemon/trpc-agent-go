@@ -9,6 +9,7 @@
 package platform
 
 import (
+	"context"
 	"errors"
 	"math"
 	"strings"
@@ -94,6 +95,52 @@ func TestUsageRecordValidateRejectsSensitiveDimensions(t *testing.T) {
 	record.ToolName = "http_post Authorization: Bearer raw-token"
 	if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "tool_name") {
 		t.Fatalf("expected sensitive tool name rejection, got %v", err)
+	}
+}
+
+func TestUsageSinkStoresSnapshot(t *testing.T) {
+	sink := NewInMemoryUsageSink()
+	record := validUsageRecord()
+	record.TotalCost = 0.25
+
+	if err := sink.WriteUsage(context.Background(), record); err != nil {
+		t.Fatalf("WriteUsage: %v", err)
+	}
+	records := sink.Records()
+	if len(records) != 1 {
+		t.Fatalf("expected one usage record, got %d", len(records))
+	}
+	records[0].TenantID = "changed"
+	if sink.Records()[0].TenantID != "tenant" {
+		t.Fatalf("Records should return a defensive copy")
+	}
+}
+
+func TestUsageSinkRejectsInvalidRecord(t *testing.T) {
+	sink := NewInMemoryUsageSink()
+	record := validUsageRecord()
+	record.PromptTokens = -1
+
+	err := sink.WriteUsage(context.Background(), record)
+	if err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("expected token validation, got %v", err)
+	}
+	if got := sink.Records(); len(got) != 0 {
+		t.Fatalf("expected invalid record to be rejected, got %+v", got)
+	}
+}
+
+func TestUsageSinkRejectsSensitiveRecord(t *testing.T) {
+	sink := NewInMemoryUsageSink()
+	record := validUsageRecord()
+	record.ModelName = "gpt-test api_key=sk-1234567890abcdef"
+
+	err := sink.WriteUsage(context.Background(), record)
+	if err == nil || !strings.Contains(err.Error(), "model_name") {
+		t.Fatalf("expected sensitive record validation, got %v", err)
+	}
+	if got := sink.Records(); len(got) != 0 {
+		t.Fatalf("expected sensitive record to be rejected, got %+v", got)
 	}
 }
 
