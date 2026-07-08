@@ -10,6 +10,7 @@ package platform
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -166,6 +167,26 @@ func (p StorageProfile) Validate() error {
 	}
 	if _, err := NormalizeStorageMigrationMode(p.MigrationMode); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Validate checks that audit retention and sampling policy is safe to use.
+func (p AuditPolicy) Validate() error {
+	if strings.TrimSpace(p.TenantID) == "" {
+		return ErrTenantIDRequired
+	}
+	if strings.TrimSpace(p.PolicyID) == "" {
+		return fmt.Errorf("policy_id is required")
+	}
+	if p.RetentionDays < 0 {
+		return fmt.Errorf("retention_days must be greater than or equal to 0")
+	}
+	if math.IsNaN(p.SampleRate) || math.IsInf(p.SampleRate, 0) || p.SampleRate < 0 || p.SampleRate > 1 {
+		return fmt.Errorf("sample_rate must be between 0 and 1")
+	}
+	if _, err := NewRedactor(p.RedactionRules...); err != nil {
+		return fmt.Errorf("redaction_rules: %w", err)
 	}
 	return nil
 }
