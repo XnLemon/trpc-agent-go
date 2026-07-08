@@ -34,6 +34,22 @@ const (
 	AppStatusDeleted AppStatus = "deleted"
 )
 
+// AppConfigVersionStatus is the lifecycle state of one app configuration version.
+type AppConfigVersionStatus string
+
+const (
+	// AppConfigVersionStatusDraft is editable and not ready for traffic.
+	AppConfigVersionStatusDraft AppConfigVersionStatus = "draft"
+	// AppConfigVersionStatusValidated passed offline validation.
+	AppConfigVersionStatusValidated AppConfigVersionStatus = "validated"
+	// AppConfigVersionStatusReleased is eligible for gray traffic.
+	AppConfigVersionStatusReleased AppConfigVersionStatus = "released"
+	// AppConfigVersionStatusActive receives normal traffic.
+	AppConfigVersionStatusActive AppConfigVersionStatus = "active"
+	// AppConfigVersionStatusRollback is retained as the rollback target.
+	AppConfigVersionStatusRollback AppConfigVersionStatus = "rollback"
+)
+
 // BindingStatus is the lifecycle state of a channel binding.
 type BindingStatus string
 
@@ -188,6 +204,20 @@ type AgentApp struct {
 	Status           AppStatus
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+// AppConfigVersion stores one deployable app configuration bundle.
+type AppConfigVersion struct {
+	TenantID         string
+	AppID            string
+	Version          string
+	ConfigBundleJSON string
+	Checksum         string
+	Status           AppConfigVersionStatus
+	GrayPercent      int
+	CreatedBy        string
+	CreatedAt        time.Time
+	ActivatedAt      *time.Time
 }
 
 // ModelProfile stores model provider configuration references.

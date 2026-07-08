@@ -9,6 +9,7 @@
 package platform
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
@@ -55,6 +56,87 @@ func (a AgentApp) Validate() error {
 	default:
 		return fmt.Errorf("invalid app status %q", a.Status)
 	}
+}
+
+// Validate checks that an app config version is safe to store and route.
+func (v AppConfigVersion) Validate() error {
+	if strings.TrimSpace(v.TenantID) == "" {
+		return ErrTenantIDRequired
+	}
+	if strings.TrimSpace(v.AppID) == "" {
+		return ErrAppIDRequired
+	}
+	if strings.TrimSpace(v.Version) == "" {
+		return fmt.Errorf("version is required")
+	}
+	if strings.TrimSpace(v.ConfigBundleJSON) == "" {
+		return fmt.Errorf("config_bundle_json is required")
+	}
+	if !json.Valid([]byte(v.ConfigBundleJSON)) {
+		return fmt.Errorf("config_bundle_json must be valid json")
+	}
+	if err := validateConfigBundleJSON(v.ConfigBundleJSON); err != nil {
+		return err
+	}
+	if strings.TrimSpace(v.Checksum) == "" {
+		return fmt.Errorf("checksum is required")
+	}
+	if err := validateAuditRedactedText("checksum", v.Checksum); err != nil {
+		return err
+	}
+	if v.GrayPercent < 0 || v.GrayPercent > 100 {
+		return fmt.Errorf("gray_percent must be between 0 and 100")
+	}
+	switch v.Status {
+	case AppConfigVersionStatusDraft,
+		AppConfigVersionStatusValidated,
+		AppConfigVersionStatusReleased,
+		AppConfigVersionStatusActive,
+		AppConfigVersionStatusRollback:
+		return nil
+	case "":
+		return fmt.Errorf("status is required")
+	default:
+		return fmt.Errorf("invalid app config version status %q", v.Status)
+	}
+}
+
+func validateConfigBundleJSON(bundle string) error {
+	var value any
+	if err := json.Unmarshal([]byte(bundle), &value); err != nil {
+		return fmt.Errorf("config_bundle_json must be valid json")
+	}
+	return validateConfigBundleValue("config_bundle_json", "", value)
+}
+
+func validateConfigBundleValue(path, key string, value any) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for childKey, childValue := range typed {
+			childPath := path + "." + childKey
+			if err := validateConfigBundleValue(childPath, childKey, childValue); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, childValue := range typed {
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			if err := validateConfigBundleValue(childPath, key, childValue); err != nil {
+				return err
+			}
+		}
+	case string:
+		if strings.HasSuffix(strings.ToLower(strings.TrimSpace(key)), "_ref") {
+			if err := validateSecretReference(path, typed); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := validateAuditRedactedText(path, typed); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Validate checks that model profile sensitive values are stored by reference.
