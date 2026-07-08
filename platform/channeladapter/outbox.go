@@ -94,6 +94,12 @@ type OutboxStore interface {
 	MarkDeadLetter(ctx context.Context, dedupKey string, leaseToken string, err error, now time.Time) (OutboxRecord, error)
 }
 
+// DeadLetterOutboxStore exposes admin operations for dead-letter inspection and replay.
+type DeadLetterOutboxStore interface {
+	ListDeadLetters(ctx context.Context, tenantID string, limit int) ([]OutboxRecord, error)
+	RequeueDeadLetter(ctx context.Context, dedupKey string, policy RetryPolicy, now time.Time) (OutboxRecord, error)
+}
+
 // InMemoryOutboxStore is a concurrency-safe outbox store for tests and demos.
 type InMemoryOutboxStore struct {
 	mu      sync.Mutex
@@ -188,6 +194,33 @@ func (s *InMemoryOutboxStore) ListDue(
 	return out, nil
 }
 
+// ListDeadLetters returns dead-lettered records, optionally scoped by tenant.
+func (s *InMemoryOutboxStore) ListDeadLetters(
+	ctx context.Context,
+	tenantID string,
+	limit int,
+) ([]OutboxRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]OutboxRecord, 0)
+	for _, record := range s.records {
+		if record.Status != platform.OutboundStatusDeadLetter {
+			continue
+		}
+		if tenantID != "" && record.Message.TenantID != tenantID {
+			continue
+		}
+		out = append(out, record)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 // ClaimDue atomically leases due records for one dispatcher worker.
 func (s *InMemoryOutboxStore) ClaimDue(
 	ctx context.Context,
@@ -225,6 +258,38 @@ func (s *InMemoryOutboxStore) ClaimDue(
 		}
 	}
 	return out, nil
+}
+
+// RequeueDeadLetter moves one dead-lettered record back to pending delivery.
+func (s *InMemoryOutboxStore) RequeueDeadLetter(
+	ctx context.Context,
+	dedupKey string,
+	policy RetryPolicy,
+	now time.Time,
+) (OutboxRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return OutboxRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[dedupKey]
+	if !ok {
+		return OutboxRecord{}, ErrOutboundNotFound
+	}
+	if record.Status != platform.OutboundStatusDeadLetter {
+		return OutboxRecord{}, ErrOutboundReplayNotDeadLetter
+	}
+	record.Status = platform.OutboundStatusPending
+	record.Attempts = 0
+	record.MaxAttempts = maxAttempts(policy)
+	record.RetryPolicy = normalizeRetryPolicy(policy)
+	record.NextAttemptAt = now
+	record.LeaseToken = ""
+	record.LeaseExpiresAt = time.Time{}
+	record.LastError = ""
+	record.UpdatedAt = now
+	s.records[dedupKey] = record
+	return record, nil
 }
 
 // MarkSent marks an outbox record as delivered.

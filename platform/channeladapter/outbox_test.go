@@ -158,6 +158,103 @@ func TestOutboxFailureSchedulesRetryThenDeadLetter(t *testing.T) {
 	}
 }
 
+func TestOutboxListsAndRequeuesDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	policy := RetryPolicy{MaxAttempts: 1, InitialBackoff: time.Second, MaxBackoff: time.Second}
+	_, _, err := store.Enqueue(ctx, msg, policy)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+	_, err = store.MarkDeadLetter(ctx, msg.DedupKey, claimed[0].LeaseToken, errors.New("permanent"), now)
+	if err != nil {
+		t.Fatalf("mark dead letter: %v", err)
+	}
+
+	dead, err := store.ListDeadLetters(ctx, "tenant", 10)
+	if err != nil {
+		t.Fatalf("ListDeadLetters: %v", err)
+	}
+	if len(dead) != 1 || dead[0].Message.DedupKey != msg.DedupKey {
+		t.Fatalf("unexpected dead letters: %+v", dead)
+	}
+	otherTenant, err := store.ListDeadLetters(ctx, "other-tenant", 10)
+	if err != nil {
+		t.Fatalf("ListDeadLetters other tenant: %v", err)
+	}
+	if len(otherTenant) != 0 {
+		t.Fatalf("dead letter listing should respect tenant scope: %+v", otherTenant)
+	}
+
+	requeued, err := store.RequeueDeadLetter(ctx, msg.DedupKey, RetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: 2 * time.Second,
+		MaxBackoff:     10 * time.Second,
+	}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("RequeueDeadLetter: %v", err)
+	}
+	if requeued.Status != platform.OutboundStatusPending ||
+		requeued.Attempts != 0 ||
+		requeued.MaxAttempts != 3 ||
+		requeued.LastError != "" ||
+		!requeued.NextAttemptAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("unexpected requeued record: %+v", requeued)
+	}
+	due, err := store.ClaimDue(ctx, now.Add(time.Minute), 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim requeued: %v", err)
+	}
+	if len(due) != 1 || due[0].Message.DedupKey != msg.DedupKey {
+		t.Fatalf("requeued record should be due: %+v", due)
+	}
+}
+
+func TestOutboxRequeueRejectsNonDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, DefaultRetryPolicy())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	record, err := store.RequeueDeadLetter(ctx, msg.DedupKey, DefaultRetryPolicy(), time.Now())
+	if !errors.Is(err, ErrOutboundReplayNotDeadLetter) {
+		t.Fatalf("expected replay rejection, got record=%+v err=%v", record, err)
+	}
+}
+
+func TestOutboxRequeueRejectsSentRecord(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, DefaultRetryPolicy())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+	_, err = store.MarkSent(ctx, msg.DedupKey, claimed[0].LeaseToken, "provider-1", now)
+	if err != nil {
+		t.Fatalf("mark sent: %v", err)
+	}
+
+	record, err := store.RequeueDeadLetter(ctx, msg.DedupKey, DefaultRetryPolicy(), now)
+	if !errors.Is(err, ErrOutboundReplayNotDeadLetter) {
+		t.Fatalf("expected replay rejection, got record=%+v err=%v", record, err)
+	}
+}
+
 func TestDispatcherMarksSent(t *testing.T) {
 	ctx := context.Background()
 	store := NewInMemoryOutboxStore()

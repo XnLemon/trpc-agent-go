@@ -27,4 +27,6 @@ var (
 	ErrOutboundLeaseExpired = errors.New("channel adapter outbound lease expired")
 	// ErrInvalidDeliveryStatus indicates that a provider returned an invalid status.
 	ErrInvalidDeliveryStatus = errors.New("channel adapter invalid delivery status")
+	// ErrOutboundReplayNotDeadLetter indicates that only dead-letter records can be replayed.
+	ErrOutboundReplayNotDeadLetter = errors.New("channel adapter outbound replay requires dead letter")
 )
