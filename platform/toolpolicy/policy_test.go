@@ -118,8 +118,138 @@ func TestPolicyAllowsHighRiskWithAuditAndRedactsArguments(t *testing.T) {
 		strings.Contains(record.RedactedDetailRef, "Authorization") {
 		t.Fatalf("audit leaked raw argument content: %q", record.RedactedDetailRef)
 	}
-	if !strings.HasPrefix(record.RedactedDetailRef, "sha256:") {
-		t.Fatalf("expected digest summary, got %q", record.RedactedDetailRef)
+	if !strings.Contains(record.RedactedDetailRef, "args:sha256:") ||
+		!strings.Contains(record.RedactedDetailRef, "args_bytes:") ||
+		!strings.Contains(record.RedactedDetailRef, "decision:allow") {
+		t.Fatalf("expected safe detail summary, got %q", record.RedactedDetailRef)
+	}
+}
+
+func TestPolicyBuildsApprovalSummaryWithoutRawArguments(t *testing.T) {
+	now := time.Unix(200, 0)
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
+			PolicyID:            "policy",
+			DangerousToolAction: platform.DangerousToolActionAsk,
+			HighRiskTools:       []string{"workspace_write"},
+		},
+		WithNow(func() time.Time { return now }),
+	)
+	req := request(
+		"workspace_write",
+		tool.ToolMetadata{
+			Destructive:     true,
+			OpenWorld:       true,
+			ConcurrencySafe: false,
+			MaxResultSize:   4096,
+		},
+		[]byte(`{"path":"/private/file","api_key":"sk-secret"}`),
+	)
+	req.ToolCallID = "call-1"
+
+	decision, err := p.CheckToolPermission(context.Background(), req)
+	if err != nil {
+		t.Fatalf("CheckToolPermission: %v", err)
+	}
+	summary, err := p.ApprovalSummary(req, decision, decision.Reason)
+	if err != nil {
+		t.Fatalf("ApprovalSummary: %v", err)
+	}
+	if summary.TenantID != "tenant" ||
+		summary.AppID != "app" ||
+		summary.PolicyID != "policy" ||
+		summary.ToolName != "workspace_write" ||
+		summary.ToolCallID != "call-1" ||
+		summary.Decision != tool.PermissionActionAsk ||
+		!summary.RequiresApproval ||
+		!summary.Destructive ||
+		!summary.OpenWorld ||
+		summary.MaxResultSize != 4096 ||
+		!summary.CreatedAt.Equal(now) {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+	if summary.ArgumentsBytes == 0 || !strings.HasPrefix(summary.ArgumentsDigest, "sha256:") {
+		t.Fatalf("expected argument digest, got %+v", summary)
+	}
+	detail := summary.DetailRef()
+	if strings.Contains(detail, "sk-secret") ||
+		strings.Contains(detail, "/private/file") ||
+		strings.Contains(detail, "api_key") {
+		t.Fatalf("summary detail leaked raw arguments: %q", detail)
+	}
+	if !strings.Contains(detail, "requires_approval:true") ||
+		!strings.Contains(detail, "destructive:true") ||
+		!strings.Contains(detail, "open_world:true") {
+		t.Fatalf("summary detail missing risk markers: %q", detail)
+	}
+}
+
+func TestApprovalSummaryValidationRejectsUnsafeOrInconsistentFields(t *testing.T) {
+	now := time.Unix(300, 0)
+	valid := ApprovalSummary{
+		ToolName:         "workspace_write",
+		ToolCallID:       "call-1",
+		Decision:         tool.PermissionActionAsk,
+		Reason:           "high-risk tool requires approval",
+		ArgumentsDigest:  "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+		ArgumentsBytes:   16,
+		RequiresApproval: true,
+		RedactionVersion: "platform-toolpolicy-v1",
+		CreatedAt:        now,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate valid summary: %v", err)
+	}
+
+	unsafe := valid
+	unsafe.Reason = "sk-secret-token"
+	if err := unsafe.Validate(); err == nil || !strings.Contains(err.Error(), "reason") {
+		t.Fatalf("expected unsafe reason rejection, got %v", err)
+	}
+
+	unsafeToolName := valid
+	unsafeToolName.ToolName = "api_key: sk-secret-token"
+	if err := unsafeToolName.Validate(); err == nil || !strings.Contains(err.Error(), "tool_name") {
+		t.Fatalf("expected unsafe tool name rejection, got %v", err)
+	}
+
+	unsafeToolCallID := valid
+	unsafeToolCallID.ToolCallID = "token=sk-secret-token"
+	if err := unsafeToolCallID.Validate(); err == nil || !strings.Contains(err.Error(), "tool_call_id") {
+		t.Fatalf("expected unsafe tool call id rejection, got %v", err)
+	}
+
+	wrongApproval := valid
+	wrongApproval.RequiresApproval = false
+	if err := wrongApproval.Validate(); err == nil || !strings.Contains(err.Error(), "requires_approval") {
+		t.Fatalf("expected ask approval invariant, got %v", err)
+	}
+
+	wrongDigest := valid
+	wrongDigest.ArgumentsDigest = "raw-json"
+	if err := wrongDigest.Validate(); err == nil || !strings.Contains(err.Error(), "arguments_digest") {
+		t.Fatalf("expected digest prefix rejection, got %v", err)
+	}
+
+	unsafeDigest := valid
+	unsafeDigest.ArgumentsDigest = "sha256:sk-secret-token"
+	if err := unsafeDigest.Validate(); err == nil || !strings.Contains(err.Error(), "arguments_digest") {
+		t.Fatalf("expected digest hex rejection, got %v", err)
+	}
+
+	noArguments := valid
+	noArguments.ArgumentsBytes = 0
+	if err := noArguments.Validate(); err == nil || !strings.Contains(err.Error(), "arguments_digest") {
+		t.Fatalf("expected empty-arguments digest rejection, got %v", err)
+	}
+
+	allowNeedsApproval := valid
+	allowNeedsApproval.Decision = tool.PermissionActionAllow
+	if err := allowNeedsApproval.Validate(); err == nil || !strings.Contains(err.Error(), "requires_approval") {
+		t.Fatalf("expected allow approval invariant, got %v", err)
 	}
 }
 
