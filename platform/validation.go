@@ -191,6 +191,50 @@ func (p AuditPolicy) Validate() error {
 	return nil
 }
 
+// Validate checks that an audit record has required identity and no raw secret detail.
+func (r AuditRecord) Validate() error {
+	if strings.TrimSpace(r.TenantID) == "" {
+		return ErrTenantIDRequired
+	}
+	if strings.TrimSpace(r.AuditID) == "" {
+		return fmt.Errorf("audit_id is required")
+	}
+	if r.LatencyMS < 0 {
+		return fmt.Errorf("latency_ms must be greater than or equal to 0")
+	}
+	if math.IsNaN(r.Cost) || math.IsInf(r.Cost, 0) || r.Cost < 0 {
+		return fmt.Errorf("cost must be greater than or equal to 0")
+	}
+	if err := validateAuditRedactedText("decision_reason", r.DecisionReason); err != nil {
+		return err
+	}
+	if err := validateAuditRedactedText("error_type", r.ErrorType); err != nil {
+		return err
+	}
+	if err := validateAuditRedactedText("token_usage_json", r.TokenUsageJSON); err != nil {
+		return err
+	}
+	if err := validateAuditRedactedText("redacted_detail_ref", r.RedactedDetailRef); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAuditRedactedText(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	redactor, err := NewRedactor()
+	if err != nil {
+		return fmt.Errorf("%s: redactor unavailable: %w", field, err)
+	}
+	if redactor.Redact(value) != value {
+		return fmt.Errorf("%s contains unredacted sensitive content", field)
+	}
+	return nil
+}
+
 func validateSecretReference(field, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
