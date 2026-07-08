@@ -391,6 +391,7 @@ func (p *Policy) writeAudit(
 	}
 	argsSummary := argumentSummary(req.Arguments)
 	_ = p.audit.WriteAudit(ctx, platform.AuditRecord{
+		AuditID:           platform.AuditID(p.policy.TenantID, p.policy.AppID, toolName, req.ToolCallID, decision, argsSummary),
 		TenantID:          p.policy.TenantID,
 		AppID:             p.policy.AppID,
 		ToolName:          toolName,

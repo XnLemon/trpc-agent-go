@@ -164,6 +164,7 @@ func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, "queued", stored.Content)
 	require.Len(t, audit.Records(), 1)
+	assert.NotEmpty(t, audit.Records()[0].AuditID)
 	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
 }
 
@@ -378,6 +379,7 @@ func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedMessageType)
 	assert.Empty(t, r.calls)
 	require.Len(t, audit.Records(), 1)
+	assert.NotEmpty(t, audit.Records()[0].AuditID)
 	assert.Equal(t, "reject", audit.Records()[0].Decision)
 	assert.NotEqual(t, "user-1", audit.Records()[0].UserID)
 }

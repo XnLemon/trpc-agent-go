@@ -91,6 +91,21 @@ func TestInternalUserIDIsStableAndTenantScoped(t *testing.T) {
 	}
 }
 
+func TestAuditIDIsStableAndScoped(t *testing.T) {
+	a1 := AuditID("tenant-a", "app", "trace", "decision")
+	a2 := AuditID("tenant-a", "app", "trace", "decision")
+	b := AuditID("tenant-b", "app", "trace", "decision")
+	if a1 != a2 {
+		t.Fatalf("expected stable audit id, got %q and %q", a1, a2)
+	}
+	if a1 == b {
+		t.Fatalf("expected scoped audit ids, got %q", a1)
+	}
+	if !strings.HasPrefix(a1, "audit_") {
+		t.Fatalf("expected audit id prefix, got %q", a1)
+	}
+}
+
 func TestIdempotencyStoreDoesNotRestartCompletedMessage(t *testing.T) {
 	store := NewInMemoryIdempotencyStore()
 	record := IdempotencyRecord{

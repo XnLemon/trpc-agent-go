@@ -379,6 +379,7 @@ func auditFromMessage(
 	err error,
 ) platform.AuditRecord {
 	record := platform.AuditRecord{
+		AuditID:        platform.AuditID(msg.TenantID, msg.AppID, msg.Channel, msg.BindingID, msg.PlatformMessageID, sessionID, decision),
 		TenantID:       msg.TenantID,
 		AppID:          msg.AppID,
 		Channel:        msg.Channel,

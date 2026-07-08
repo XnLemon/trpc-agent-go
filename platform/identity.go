@@ -26,6 +26,11 @@ func UserIDHash(tenantID, channel, userID string) string {
 	return "user_hash_" + shortHash(tenantID, channel, userID)
 }
 
+// AuditID returns a stable audit identifier for one audit event boundary.
+func AuditID(parts ...string) string {
+	return "audit_" + shortHash(parts...)
+}
+
 // IdempotencyKey returns the canonical duplicate-delivery key.
 func IdempotencyKey(tenantID, channel, accountID, platformMessageID string) string {
 	return strings.Join([]string{

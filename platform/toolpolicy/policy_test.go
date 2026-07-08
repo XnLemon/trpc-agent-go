@@ -104,6 +104,7 @@ func TestPolicyAllowsHighRiskWithAuditAndRedactsArguments(t *testing.T) {
 	}
 	record := records[0]
 	if record.Decision != string(tool.PermissionActionAllow) ||
+		record.AuditID == "" ||
 		record.ToolName != "http_post" ||
 		record.TenantID != "tenant" ||
 		record.AppID != "app" ||
@@ -119,6 +120,63 @@ func TestPolicyAllowsHighRiskWithAuditAndRedactsArguments(t *testing.T) {
 	}
 	if !strings.HasPrefix(record.RedactedDetailRef, "sha256:") {
 		t.Fatalf("expected digest summary, got %q", record.RedactedDetailRef)
+	}
+}
+
+func TestPolicyAuditIDUsesToolCallBoundary(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
+			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+			HighRiskTools:       []string{"http_post"},
+		},
+		WithAuditSink(audit),
+	)
+	args := []byte(`{"url":"https://example.com"}`)
+	req1 := request("http_post", tool.ToolMetadata{}, args)
+	req1.ToolCallID = "call-1"
+	req2 := request("http_post", tool.ToolMetadata{}, args)
+	req2.ToolCallID = "call-2"
+
+	if _, err := p.CheckToolPermission(context.Background(), req1); err != nil {
+		t.Fatalf("CheckToolPermission req1: %v", err)
+	}
+	if _, err := p.CheckToolPermission(context.Background(), req2); err != nil {
+		t.Fatalf("CheckToolPermission req2: %v", err)
+	}
+	records := audit.Records()
+	if len(records) != 2 {
+		t.Fatalf("expected two audit records, got %d", len(records))
+	}
+	if records[0].AuditID == records[1].AuditID {
+		t.Fatalf("expected tool-call-scoped audit ids, got %q", records[0].AuditID)
+	}
+
+	retryAudit := platform.NewInMemoryAuditSink()
+	retryPolicy := newPolicy(
+		t,
+		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
+			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+			HighRiskTools:       []string{"http_post"},
+		},
+		WithAuditSink(retryAudit),
+	)
+	retryReq := request("http_post", tool.ToolMetadata{}, args)
+	retryReq.ToolCallID = "call-1"
+	if _, err := retryPolicy.CheckToolPermission(context.Background(), retryReq); err != nil {
+		t.Fatalf("CheckToolPermission retry: %v", err)
+	}
+	retryRecords := retryAudit.Records()
+	if len(retryRecords) != 1 {
+		t.Fatalf("expected one retry audit record, got %d", len(retryRecords))
+	}
+	if records[0].AuditID != retryRecords[0].AuditID {
+		t.Fatalf("expected stable audit id for same tool call, got %q and %q", records[0].AuditID, retryRecords[0].AuditID)
 	}
 }
 
@@ -144,6 +202,9 @@ func TestPolicyNilRedactorStillDoesNotLeakArguments(t *testing.T) {
 	records := audit.Records()
 	if len(records) != 1 {
 		t.Fatalf("expected one audit record, got %d", len(records))
+	}
+	if records[0].AuditID == "" {
+		t.Fatalf("expected audit id")
 	}
 	if strings.Contains(records[0].RedactedDetailRef, "person@example.com") ||
 		strings.Contains(records[0].RedactedDetailRef, "/private/file") {
@@ -242,6 +303,9 @@ func TestPolicyRegisterAppliesNameBasedGovernance(t *testing.T) {
 	}
 	if result == nil || result.CustomResult == nil {
 		t.Fatalf("expected approval-required result")
+	}
+	if len(audit.Records()) != 1 || audit.Records()[0].AuditID == "" {
+		t.Fatalf("expected audit record with id, got %+v", audit.Records())
 	}
 	permissionResult, ok := result.CustomResult.(tool.PermissionResult)
 	if !ok {
