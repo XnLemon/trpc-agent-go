@@ -18,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
+	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
 )
 
 // Service handles normalized inbound platform messages.
@@ -175,6 +176,18 @@ func (s *Service) HandleInbound(
 		TraceID:                  requestID,
 	}
 	if err := s.outboundStore.Save(ctx, resultRef, outbound); err != nil {
+		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
+		return Result{}, err
+	}
+	if err := s.outboundStore.Enqueue(
+		ctx,
+		outbound,
+		channeladapter.RetryPolicyForBinding(runtime.Binding),
+	); err != nil {
+		if _, markErr := s.idempotencyStore.MarkReplyFailed(ctx, key, resultRef); markErr != nil {
+			return Result{}, markErr
+		}
+		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
 		return Result{}, err
 	}
 	record, err = s.idempotencyStore.Complete(ctx, key, resultRef)
@@ -217,7 +230,9 @@ func (s *Service) duplicateResult(
 		Duplicate:  true,
 		Processing: record.Status == platform.IdempotencyStatusProcessing,
 	}
-	if record.Status != platform.IdempotencyStatusCompleted || record.ResultRef == "" {
+	if record.ResultRef == "" ||
+		(record.Status != platform.IdempotencyStatusCompleted &&
+			record.Status != platform.IdempotencyStatusReplyFailed) {
 		return result, nil
 	}
 	outbound, ok, err := s.outboundStore.Get(ctx, record.ResultRef)

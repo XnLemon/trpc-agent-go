@@ -22,6 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
+	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
 )
 
 func TestServiceHandleInboundIsolatesTenants(t *testing.T) {
@@ -69,6 +70,138 @@ func TestServiceHandleInboundDeduplicatesPlatformMessage(t *testing.T) {
 	assert.True(t, second.Duplicate)
 	assert.False(t, second.Processing)
 	assert.Equal(t, first.Outbound, second.Outbound)
+	assert.Len(t, r.calls, 1)
+}
+
+func TestServiceHandleInboundEnqueuesChannelOutbox(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RetryMaxAttempts = 5
+	require.NoError(t, registry.Register(runtime))
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewOutboxBackedOutboundStore(outbox),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	record, ok, err := outbox.Get(ctx, result.Outbound.DedupKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.OutboundStatusPending, record.Status)
+	assert.Equal(t, result.Outbound, record.Message)
+	assert.Equal(t, 5, record.MaxAttempts)
+}
+
+func TestServiceHandleInboundDuplicateReusesOutboxBackedResult(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewOutboxBackedOutboundStore(outbox),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	first, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	second, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	assert.True(t, second.Duplicate)
+	assert.Equal(t, first.Outbound, second.Outbound)
+	assert.Len(t, r.calls, 1)
+	due, err := outbox.ListDue(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	assert.Len(t, due, 1)
+}
+
+func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	store := NewOutboxBackedOutboundStore(outbox)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	resultRef := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1") + ":outbound:1"
+	colliding := platform.OutboundMessage{
+		TenantID:                 "other-tenant",
+		BindingID:                "binding",
+		Channel:                  "wecom",
+		SessionID:                "session",
+		ReplyToPlatformMessageID: "msg-1",
+		Kind:                     platform.OutboundMessageKindText,
+		Content:                  "already queued",
+		Sequence:                 1,
+		DedupKey:                 resultRef,
+	}
+	_, _, err := outbox.Enqueue(ctx, colliding, channeladapter.DefaultRetryPolicy())
+	require.NoError(t, err)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, store, WithAuditSink(audit))
+
+	_, err = svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, channeladapter.ErrOutboundDuplicate)
+	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, record.Status)
+	assert.Equal(t, resultRef, record.ResultRef)
+	stored, ok, err := store.Get(ctx, resultRef)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "queued", stored.Content)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	store := NewOutboxBackedOutboundStore(outbox)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	resultRef := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1") + ":outbound:1"
+	colliding := platform.OutboundMessage{
+		TenantID:                 "other-tenant",
+		BindingID:                "binding",
+		Channel:                  "wecom",
+		SessionID:                "session",
+		ReplyToPlatformMessageID: "msg-1",
+		Kind:                     platform.OutboundMessageKindText,
+		Content:                  "already queued",
+		Sequence:                 1,
+		DedupKey:                 resultRef,
+	}
+	_, _, err := outbox.Enqueue(ctx, colliding, channeladapter.DefaultRetryPolicy())
+	require.NoError(t, err)
+	svc := NewService(registry, idempotency, store)
+	_, err = svc.HandleInbound(ctx, msg)
+	require.ErrorIs(t, err, channeladapter.ErrOutboundDuplicate)
+
+	dup, err := svc.HandleInbound(ctx, msg)
+
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, dup.Status)
+	assert.Equal(t, resultRef, dup.ResultRef)
+	assert.Equal(t, "queued", dup.Outbound.Content)
 	assert.Len(t, r.calls, 1)
 }
 
