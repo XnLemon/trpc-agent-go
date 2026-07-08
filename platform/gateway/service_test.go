@@ -233,6 +233,130 @@ func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
 	require.NoError(t, <-errCh)
 }
 
+func TestServiceHandleInboundSerializesSameSession(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &blockingRunner{started: make(chan struct{})}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	first := inbound("tenant-a", "msg-1", "user-1", "hello")
+	second := inbound("tenant-a", "msg-2", "user-1", "again")
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleInbound(ctx, first)
+		errCh <- err
+	}()
+	<-r.started
+
+	busy, err := svc.HandleInbound(ctx, second)
+	require.NoError(t, err)
+
+	assert.False(t, busy.Duplicate)
+	assert.True(t, busy.Processing)
+	assert.Equal(t, platform.IdempotencyStatusProcessing, busy.Status)
+	assert.Equal(t, "tenant:tenant-a:app:app:channel:wecom:dm:user-1", busy.SessionID)
+	assert.Len(t, r.calls, 1)
+	record, ok, err := svc.idempotencyStore.Get(
+		ctx,
+		platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-2"),
+	)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Empty(t, record.ResultRef)
+	r.finish("done")
+	require.NoError(t, <-errCh)
+
+	r.finish("again")
+	retry, err := svc.HandleInbound(ctx, second)
+	require.NoError(t, err)
+	assert.False(t, retry.Processing)
+	assert.Equal(t, platform.IdempotencyStatusCompleted, retry.Status)
+	assert.Len(t, r.calls, 2)
+}
+
+func TestServiceHandleInboundAllowsDifferentSessions(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "done"}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-2", "user-2", "hello"))
+	require.NoError(t, err)
+
+	require.Len(t, r.calls, 2)
+	assert.NotEqual(t, r.calls[0].sessionID, r.calls[1].sessionID)
+}
+
+func TestServiceHandleInboundReleaseIgnoresCanceledRequestContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("runner failed")
+	r := &cancelingRunner{cancel: cancel, runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	lease := &recordingLease{}
+	leaseStore := &recordingLeaseStore{lease: lease}
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithSessionLeaseStore(leaseStore),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, runnerErr)
+	require.True(t, lease.released)
+	require.NoError(t, lease.ctxErr)
+}
+
+func TestServiceHandleInboundCancellationDuringEventCollectionReleasesSessionLease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	registry := NewInMemoryRegistry()
+	r := &hangingFirstRunner{
+		started:  make(chan struct{}),
+		response: "done",
+	}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	first := inbound("tenant-a", "msg-1", "user-1", "hello")
+	second := inbound("tenant-a", "msg-2", "user-1", "again")
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleInbound(ctx, first)
+		errCh <- err
+	}()
+	<-r.started
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("HandleInbound did not return after context cancellation")
+	}
+	retry, err := svc.HandleInbound(context.Background(), second)
+
+	require.NoError(t, err)
+	assert.False(t, retry.Processing)
+	assert.Equal(t, platform.IdempotencyStatusCompleted, retry.Status)
+	assert.Len(t, r.calls, 2)
+}
+
 func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -349,7 +473,7 @@ func TestCollectAssistantTextStopsAtRunnerCompletion(t *testing.T) {
 		&model.Response{ID: "rc", Object: model.ObjectTypeRunnerCompletion, Done: true},
 	)
 
-	content, err := collectAssistantText(ch)
+	content, err := collectAssistantText(context.Background(), ch)
 
 	require.NoError(t, err)
 	assert.Equal(t, "done", content)
@@ -362,7 +486,7 @@ func TestCollectAssistantTextPrefersFinalFullMessage(t *testing.T) {
 	ch <- responseEvent("hello", true)
 	close(ch)
 
-	content, err := collectAssistantText(ch)
+	content, err := collectAssistantText(context.Background(), ch)
 
 	require.NoError(t, err)
 	assert.Equal(t, "hello", content)
@@ -480,10 +604,17 @@ func (r *recordingRunner) Close() error {
 }
 
 type blockingRunner struct {
-	mu      sync.Mutex
-	started chan struct{}
-	done    chan string
-	calls   []runnerCall
+	mu          sync.Mutex
+	started     chan struct{}
+	startedOnce sync.Once
+	done        chan string
+	calls       []runnerCall
+}
+
+type cancelingRunner struct {
+	cancel func()
+	runErr error
+	calls  []runnerCall
 }
 
 type staticRegistry struct {
@@ -517,7 +648,9 @@ func (r *blockingRunner) Run(
 		message:   message,
 		requestID: requestIDFromOptions(runOpts...),
 	})
-	close(r.started)
+	r.startedOnce.Do(func() {
+		close(r.started)
+	})
 	done := r.done
 	r.mu.Unlock()
 	out := make(chan *event.Event, 1)
@@ -538,6 +671,94 @@ func (r *blockingRunner) Close() error {
 
 func (r *blockingRunner) finish(content string) {
 	r.done <- content
+}
+
+func (r *cancelingRunner) Run(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	runOpts ...agent.RunOption,
+) (<-chan *event.Event, error) {
+	r.calls = append(r.calls, runnerCall{
+		userID:    userID,
+		sessionID: sessionID,
+		message:   message,
+		requestID: requestIDFromOptions(runOpts...),
+	})
+	r.cancel()
+	return nil, r.runErr
+}
+
+func (r *cancelingRunner) Close() error {
+	return nil
+}
+
+type hangingFirstRunner struct {
+	mu          sync.Mutex
+	started     chan struct{}
+	startedOnce sync.Once
+	response    string
+	calls       []runnerCall
+}
+
+func (r *hangingFirstRunner) Run(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	runOpts ...agent.RunOption,
+) (<-chan *event.Event, error) {
+	r.mu.Lock()
+	callIndex := len(r.calls)
+	r.calls = append(r.calls, runnerCall{
+		userID:    userID,
+		sessionID: sessionID,
+		message:   message,
+		requestID: requestIDFromOptions(runOpts...),
+	})
+	if callIndex == 0 {
+		r.startedOnce.Do(func() {
+			close(r.started)
+		})
+	}
+	r.mu.Unlock()
+	if callIndex == 0 {
+		return make(chan *event.Event), nil
+	}
+	out := make(chan *event.Event, 1)
+	out <- responseEvent(r.response, true)
+	close(out)
+	return out, nil
+}
+
+func (r *hangingFirstRunner) Close() error {
+	return nil
+}
+
+type recordingLeaseStore struct {
+	lease *recordingLease
+}
+
+func (s *recordingLeaseStore) Acquire(
+	ctx context.Context,
+	key SessionLeaseKey,
+) (SessionLease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return s.lease, true, nil
+}
+
+type recordingLease struct {
+	released bool
+	ctxErr   error
+}
+
+func (l *recordingLease) Release(ctx context.Context) error {
+	l.released = true
+	l.ctxErr = ctx.Err()
+	return nil
 }
 
 func responseEvent(content string, done bool) *event.Event {

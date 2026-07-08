@@ -26,6 +26,7 @@ type Service struct {
 	registry         Registry
 	idempotencyStore platform.IdempotencyStore
 	outboundStore    OutboundStore
+	leaseStore       SessionLeaseStore
 	auditSink        platform.AuditSink
 	now              func() time.Time
 }
@@ -49,6 +50,13 @@ func WithNow(now func() time.Time) Option {
 	}
 }
 
+// WithSessionLeaseStore sets the lease store used to serialize same-session runs.
+func WithSessionLeaseStore(store SessionLeaseStore) Option {
+	return func(s *Service) {
+		s.leaseStore = store
+	}
+}
+
 // NewService creates a gateway service.
 func NewService(
 	registry Registry,
@@ -60,6 +68,7 @@ func NewService(
 		registry:         registry,
 		idempotencyStore: idempotencyStore,
 		outboundStore:    outboundStore,
+		leaseStore:       NewInMemorySessionLeaseStore(),
 		now:              time.Now,
 	}
 	for _, opt := range opts {
@@ -130,6 +139,34 @@ func (s *Service) HandleInbound(
 		msg.ChannelAccountID,
 		msg.PlatformMessageID,
 	)
+	existing, ok, err := s.idempotencyStore.Get(ctx, key)
+	if err != nil {
+		return Result{}, err
+	}
+	if ok {
+		return s.duplicateResult(ctx, existing)
+	}
+	lease, acquired, err := s.leaseStore.Acquire(ctx, SessionLeaseKey{
+		TenantID:  msg.TenantID,
+		AppID:     msg.AppID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	if !acquired {
+		return Result{
+			RequestID:  requestID,
+			SessionID:  sessionID,
+			Status:     platform.IdempotencyStatusProcessing,
+			Processing: true,
+		}, nil
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = lease.Release(cleanupCtx)
+	}()
 	record, started, err := s.idempotencyStore.Start(ctx, platform.IdempotencyRecord{
 		TenantID:          msg.TenantID,
 		Channel:           msg.Channel,
@@ -157,7 +194,7 @@ func (s *Service) HandleInbound(
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
 		return Result{}, err
 	}
-	content, err := collectAssistantText(ch)
+	content, err := collectAssistantText(ctx, ch)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
 		return Result{}, err
@@ -215,6 +252,9 @@ func (s *Service) validateService() error {
 	if s.outboundStore == nil {
 		return fmt.Errorf("gateway outbound store is required")
 	}
+	if s.leaseStore == nil {
+		return fmt.Errorf("gateway session lease store is required")
+	}
 	return nil
 }
 
@@ -266,10 +306,20 @@ func inboundText(msg platform.InboundMessage) (string, error) {
 	return text, nil
 }
 
-func collectAssistantText(ch <-chan *event.Event) (string, error) {
+func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, error) {
 	var parts []string
 	var final string
-	for evt := range ch {
+	for {
+		var evt *event.Event
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case next, ok := <-ch:
+			if !ok {
+				goto done
+			}
+			evt = next
+		}
 		if evt == nil || evt.Response == nil {
 			continue
 		}
@@ -296,6 +346,7 @@ func collectAssistantText(ch <-chan *event.Event) (string, error) {
 			}
 		}
 	}
+done:
 	if strings.TrimSpace(final) != "" {
 		return strings.TrimSpace(final), nil
 	}
