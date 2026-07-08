@@ -393,3 +393,23 @@ type AuditRecord struct {
 	RedactionVersion  string
 	CreatedAt         time.Time
 }
+
+// UsageRecord stores post-run token and cost accounting dimensions.
+type UsageRecord struct {
+	TenantID         string
+	AppID            string
+	UserIDHash       string
+	SessionID        string
+	RequestID        string
+	ModelName        string
+	ToolName         string
+	PromptTokens     int
+	CompletionTokens int
+	CachedTokens     int
+	ModelUnitPrice   float64
+	ModelCost        float64
+	ToolCost         float64
+	TotalCost        float64
+	TraceID          string
+	CreatedAt        time.Time
+}

@@ -220,6 +220,46 @@ func (r AuditRecord) Validate() error {
 	return nil
 }
 
+// Validate checks that a usage record has required identity and safe accounting values.
+func (r UsageRecord) Validate() error {
+	if strings.TrimSpace(r.TenantID) == "" {
+		return ErrTenantIDRequired
+	}
+	if strings.TrimSpace(r.AppID) == "" {
+		return ErrAppIDRequired
+	}
+	for field, value := range map[string]string{
+		"user_id_hash": r.UserIDHash,
+		"session_id":   r.SessionID,
+		"request_id":   r.RequestID,
+		"model_name":   r.ModelName,
+		"tool_name":    r.ToolName,
+		"trace_id":     r.TraceID,
+	} {
+		if err := validateAuditRedactedText(field, value); err != nil {
+			return err
+		}
+	}
+	if r.PromptTokens < 0 ||
+		r.CompletionTokens < 0 ||
+		r.CachedTokens < 0 {
+		return fmt.Errorf("usage token values must be non-negative")
+	}
+	if !isFiniteNonNegative(r.ModelUnitPrice) {
+		return fmt.Errorf("model_unit_price must be finite and non-negative")
+	}
+	if !isFiniteNonNegative(r.ModelCost) {
+		return fmt.Errorf("model_cost must be finite and non-negative")
+	}
+	if !isFiniteNonNegative(r.ToolCost) {
+		return fmt.Errorf("tool_cost must be finite and non-negative")
+	}
+	if !isFiniteNonNegative(r.TotalCost) {
+		return fmt.Errorf("total_cost must be finite and non-negative")
+	}
+	return nil
+}
+
 func validateAuditRedactedText(field, value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
