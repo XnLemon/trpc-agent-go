@@ -11,6 +11,7 @@ package channeladapter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,84 @@ func TestOutboxFailureSchedulesRetryThenDeadLetter(t *testing.T) {
 	}
 	if dead.Status != platform.OutboundStatusDeadLetter || dead.Attempts != 2 {
 		t.Fatalf("unexpected dead letter record: %+v", dead)
+	}
+}
+
+func TestOutboxRedactsFailureDetails(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, DefaultRetryPolicy())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+
+	failed, err := store.MarkFailed(
+		ctx,
+		msg.DedupKey,
+		claimed[0].LeaseToken,
+		errors.New("provider failed Authorization: Bearer raw-token api_key=sk-1234567890abcdef"),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	if failed.LastError == "" {
+		t.Fatal("expected diagnostic error to be stored")
+	}
+	for _, leaked := range []string{"raw-token", "sk-1234567890abcdef"} {
+		if strings.Contains(failed.LastError, leaked) {
+			t.Fatalf("LastError leaked %q: %q", leaked, failed.LastError)
+		}
+	}
+	if !strings.Contains(failed.LastError, "Authorization: ****") ||
+		!strings.Contains(failed.LastError, "api_key=****") {
+		t.Fatalf("LastError did not preserve redacted diagnostics: %q", failed.LastError)
+	}
+}
+
+func TestOutboxRedactsDeadLetterDetails(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, DefaultRetryPolicy())
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+
+	dead, err := store.MarkDeadLetter(
+		ctx,
+		msg.DedupKey,
+		claimed[0].LeaseToken,
+		errors.New("permanent failure token: raw-token password=secret-value"),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("mark dead letter: %v", err)
+	}
+
+	if dead.LastError == "" {
+		t.Fatal("expected diagnostic error to be stored")
+	}
+	for _, leaked := range []string{"raw-token", "secret-value"} {
+		if strings.Contains(dead.LastError, leaked) {
+			t.Fatalf("LastError leaked %q: %q", leaked, dead.LastError)
+		}
+	}
+	if !strings.Contains(dead.LastError, "token: ****") ||
+		!strings.Contains(dead.LastError, "password=****") {
+		t.Fatalf("LastError did not preserve redacted diagnostics: %q", dead.LastError)
 	}
 }
 
