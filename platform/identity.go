@@ -12,9 +12,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/url"
 	"strings"
 )
+
+type stableIDPart struct {
+	name  string
+	value string
+}
 
 // InternalUserID returns a stable tenant-scoped user identifier.
 func InternalUserID(tenantID, channel, externalUserID string) string {
@@ -33,12 +37,13 @@ func AuditID(parts ...string) string {
 
 // IdempotencyKey returns the canonical duplicate-delivery key.
 func IdempotencyKey(tenantID, channel, accountID, platformMessageID string) string {
-	return strings.Join([]string{
-		"tenant", escapeKeyPart(tenantID),
-		"channel", escapeKeyPart(channel),
-		"account", escapeKeyPart(accountID),
-		"message", escapeKeyPart(platformMessageID),
-	}, ":")
+	return stableID(
+		"idem",
+		stableIDPart{"tenant", tenantID},
+		stableIDPart{"channel", channel},
+		stableIDPart{"account", accountID},
+		stableIDPart{"message", platformMessageID},
+	)
 }
 
 // SessionIDForInbound returns the stable session id for one inbound message.
@@ -46,15 +51,32 @@ func SessionIDForInbound(msg InboundMessage) (string, error) {
 	if err := msg.Validate(); err != nil {
 		return "", err
 	}
-	return SessionID(
-		msg.TenantID,
-		msg.AppID,
-		msg.Channel,
+	parts := []stableIDPart{
+		{"tenant", msg.TenantID},
+		{"app", msg.AppID},
+		{"binding", msg.BindingID},
+		{"channel", msg.Channel},
+		{"account", msg.ChannelAccountID},
+	}
+	if msg.MessageType == MessageTypeEvent {
+		parts = append(parts,
+			stableIDPart{"message_type", string(msg.MessageType)},
+			stableIDPart{"event_type", msg.RawEventType},
+			stableIDPart{"message", msg.PlatformMessageID},
+		)
+		return stableID("ses", parts...), nil
+	}
+	conversationParts, err := sessionConversationParts(
 		msg.ConversationType,
 		msg.ExternalUserID,
 		msg.ExternalGroupID,
 		msg.ThreadID,
 	)
+	if err != nil {
+		return "", err
+	}
+	parts = append(parts, conversationParts...)
+	return stableID("ses", parts...), nil
 }
 
 // SessionID returns the stable tenant/app/channel-scoped session id.
@@ -76,36 +98,63 @@ func SessionID(
 	if strings.TrimSpace(channel) == "" {
 		return "", ErrChannelRequired
 	}
-	prefix := fmt.Sprintf(
-		"tenant:%s:app:%s:channel:%s",
-		escapeKeyPart(tenantID),
-		escapeKeyPart(appID),
-		escapeKeyPart(channel),
+	parts := []stableIDPart{
+		{"tenant", tenantID},
+		{"app", appID},
+		{"channel", channel},
+	}
+	conversationParts, err := sessionConversationParts(
+		conversationType,
+		externalUserID,
+		externalGroupID,
+		threadID,
 	)
+	if err != nil {
+		return "", err
+	}
+	parts = append(parts, conversationParts...)
+	return stableID("ses", parts...), nil
+}
+
+func sessionConversationParts(
+	conversationType ConversationType,
+	externalUserID string,
+	externalGroupID string,
+	threadID string,
+) ([]stableIDPart, error) {
 	switch conversationType {
 	case ConversationTypeDM:
 		if strings.TrimSpace(externalUserID) == "" {
-			return "", ErrExternalUserIDRequired
+			return nil, ErrExternalUserIDRequired
 		}
-		return prefix + ":dm:" + escapeKeyPart(externalUserID), nil
+		return []stableIDPart{
+			{"conversation_type", string(ConversationTypeDM)},
+			{"user", externalUserID},
+		}, nil
 	case ConversationTypeGroup:
 		if strings.TrimSpace(externalGroupID) == "" {
-			return "", ErrExternalGroupIDRequired
+			return nil, ErrExternalGroupIDRequired
 		}
-		return prefix + ":group:" + escapeKeyPart(externalGroupID), nil
+		return []stableIDPart{
+			{"conversation_type", string(ConversationTypeGroup)},
+			{"group", externalGroupID},
+		}, nil
 	case ConversationTypeThread:
 		if strings.TrimSpace(externalGroupID) == "" {
-			return "", ErrExternalGroupIDRequired
+			return nil, ErrExternalGroupIDRequired
 		}
 		if strings.TrimSpace(threadID) == "" {
-			return "", fmt.Errorf("thread_id is required")
+			return nil, fmt.Errorf("thread_id is required")
 		}
-		return prefix + ":group:" + escapeKeyPart(externalGroupID) +
-			":thread:" + escapeKeyPart(threadID), nil
+		return []stableIDPart{
+			{"conversation_type", string(ConversationTypeThread)},
+			{"group", externalGroupID},
+			{"thread", threadID},
+		}, nil
 	case "":
-		return "", ErrConversationTypeRequired
+		return nil, ErrConversationTypeRequired
 	default:
-		return "", ErrInvalidConversationType
+		return nil, ErrInvalidConversationType
 	}
 }
 
@@ -114,6 +163,15 @@ func shortHash(parts ...string) string {
 	return hex.EncodeToString(sum[:])[:24]
 }
 
-func escapeKeyPart(value string) string {
-	return url.PathEscape(strings.TrimSpace(value))
+func stableID(prefix string, parts ...stableIDPart) string {
+	hash := sha256.New()
+	writeStablePart(hash, "prefix", prefix)
+	for _, part := range parts {
+		writeStablePart(hash, strings.TrimSpace(part.name), strings.TrimSpace(part.value))
+	}
+	return prefix + "_" + hex.EncodeToString(hash.Sum(nil))[:32]
+}
+
+func writeStablePart(hash interface{ Write([]byte) (int, error) }, name, value string) {
+	fmt.Fprintf(hash, "%d:%s=%d:%s;", len(name), name, len(value), value)
 }

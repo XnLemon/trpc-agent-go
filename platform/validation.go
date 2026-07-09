@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -201,6 +202,9 @@ func (m InboundMessage) Validate() error {
 	if strings.TrimSpace(m.AppID) == "" {
 		return ErrAppIDRequired
 	}
+	if strings.TrimSpace(m.BindingID) == "" {
+		return ErrBindingIDRequired
+	}
 	if strings.TrimSpace(m.Channel) == "" {
 		return ErrChannelRequired
 	}
@@ -209,6 +213,9 @@ func (m InboundMessage) Validate() error {
 	}
 	if strings.TrimSpace(m.PlatformMessageID) == "" {
 		return ErrPlatformMessageIDRequired
+	}
+	if m.MessageType == MessageTypeEvent {
+		return nil
 	}
 	if strings.TrimSpace(m.ExternalUserID) == "" {
 		return ErrExternalUserIDRequired
@@ -371,13 +378,15 @@ func validateSecretReference(field, value string) error {
 }
 
 func hasInlineURLCredential(value string) bool {
-	scheme := strings.Index(value, "://")
-	at := strings.Index(value, "@")
-	if scheme < 0 || at < 0 || at < scheme {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User == nil {
 		return false
 	}
-	credential := value[scheme+3 : at]
-	return strings.Contains(credential, ":")
+	if parsed.User.Username() != "" {
+		return true
+	}
+	_, hasPassword := parsed.User.Password()
+	return hasPassword
 }
 
 func looksLikeRawSecret(value string) bool {
