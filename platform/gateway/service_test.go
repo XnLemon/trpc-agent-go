@@ -775,7 +775,13 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	registry := NewInMemoryRegistry()
 	r := &recordingRunner{chunks: []string{"hel", "lo"}}
 	registerRuntime(t, registry, "tenant-a", r)
-	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
 	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
 	msg.TraceContext = map[string]string{"request_id": "req-123"}
 
@@ -786,6 +792,9 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	assert.Equal(t, "req-123", r.calls[0].requestID)
 	assert.Equal(t, "hello", result.Outbound.Content)
 	assert.Equal(t, "req-123", result.Outbound.TraceID)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "req-123", audit.Records()[0].RequestID)
+	assert.Equal(t, "req-123", audit.Records()[0].TraceID)
 }
 
 func TestRuntimeValidateRejectsIdentifierMismatch(t *testing.T) {
