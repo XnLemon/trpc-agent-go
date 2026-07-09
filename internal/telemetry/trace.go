@@ -13,6 +13,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -96,9 +97,18 @@ func TraceMemorySearch(span trace.Span, maxResults int, resultCount int, hybridS
 		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, deduplicate),
 	)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		span.RecordError(err)
+		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
 	}
+}
+
+func recordSafeSpanError(span trace.Span, err error, fallback string) {
+	if err == nil {
+		return
+	}
+	errorType := ToErrorType(err, fallback)
+	span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
+	span.SetStatus(codes.Error, errorType)
+	span.RecordError(errors.New(errorType))
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.

@@ -597,8 +597,30 @@ func TestTraceMemorySearch_Error(t *testing.T) {
 	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemorySearch))
 	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(0)))
 	require.Equal(t, codes.Error, span.status)
-	require.Equal(t, err.Error(), span.statusDesc)
-	require.Contains(t, span.recordedErrors, err)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.statusDesc)
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType))
+	require.Len(t, span.recordedErrors, 1)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.recordedErrors[0].Error())
+}
+
+func TestTraceMemorySearch_ErrorDoesNotExposeRawErrorText(t *testing.T) {
+	span := newRecordingSpan()
+	err := errors.New("query=reset password Authorization: Bearer raw-token api_key=sk-1234567890abcdef")
+
+	TraceMemorySearch(span, 1, 0, false, false, err)
+
+	traceText := span.statusDesc
+	for _, recorded := range span.recordedErrors {
+		traceText += "\n" + recorded.Error()
+	}
+	for _, attr := range span.attrs {
+		traceText += "\n" + attr.Value.AsString()
+	}
+	require.Equal(t, codes.Error, span.status)
+	require.NotContains(t, traceText, "reset password")
+	require.NotContains(t, traceText, "raw-token")
+	require.NotContains(t, traceText, "sk-1234567890abcdef")
+	require.NotContains(t, traceText, err.Error())
 }
 
 func TestNewSummarizeTaskType(t *testing.T) {
