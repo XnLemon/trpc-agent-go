@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"time"
 
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	isummary "trpc.group/trpc-go/trpc-agent-go/session/internal/summary"
+	atrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 // CreateSessionSummary is the internal implementation that returns the summary.
@@ -39,6 +41,11 @@ func (s *Service) CreateSessionSummary(
 	if err := key.CheckSessionKey(); err != nil {
 		return fmt.Errorf("check session key failed: %w", err)
 	}
+
+	ctx, span := atrace.Tracer.Start(ctx, "create_session_summary")
+	itelemetry.MarkSummaryCreateSpan(span)
+	defer span.End()
+
 	if !isummary.NewSummaryDispatchPolicy(
 		s.opts.summaryFilterAllowlist,
 		s.opts.shouldCascadeFullSessionSummary(),
