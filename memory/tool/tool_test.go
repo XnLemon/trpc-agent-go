@@ -180,13 +180,17 @@ func useMemoryToolSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
 }
 
 func requireMemoryToolSpan(t *testing.T, recorder *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
+	return requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemorySearchSpanName())
+}
+
+func requireMemoryToolSpanNamed(t *testing.T, recorder *tracetest.SpanRecorder, spanName string) sdktrace.ReadOnlySpan {
 	t.Helper()
 	for _, span := range recorder.Ended() {
-		if span.Name() == itelemetry.NewMemorySearchSpanName() {
+		if span.Name() == spanName {
 			return span
 		}
 	}
-	t.Fatalf("span %q not recorded; ended spans=%v", itelemetry.NewMemorySearchSpanName(), recorder.Ended())
+	t.Fatalf("span %q not recorded; ended spans=%v", spanName, recorder.Ended())
 	return nil
 }
 
@@ -209,6 +213,36 @@ func requireMemoryToolSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, ke
 		return
 	}
 	t.Fatalf("missing attribute %s=%v; attributes=%v", key, want, span.Attributes())
+}
+
+func requireNoMemoryToolSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, key string) {
+	t.Helper()
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == key {
+			t.Fatalf("unexpected attribute %s present; attributes=%v", key, span.Attributes())
+		}
+	}
+}
+
+func requireMemoryToolSpanSafeError(t *testing.T, span sdktrace.ReadOnlySpan, rawValues ...string) {
+	t.Helper()
+	require.Equal(t, codes.Error, span.Status().Code)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.Status().Description)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType)
+
+	traceText := span.Status().Description
+	for _, attr := range span.Attributes() {
+		traceText += "\n" + string(attr.Key) + "=" + attr.Value.AsString()
+	}
+	for _, event := range span.Events() {
+		traceText += "\n" + event.Name
+		for _, attr := range event.Attributes {
+			traceText += "\n" + string(attr.Key) + "=" + attr.Value.AsString()
+		}
+	}
+	for _, raw := range rawValues {
+		require.NotContains(t, traceText, raw)
+	}
 }
 
 func TestMemoryTool_AddMemory(t *testing.T) {
@@ -243,6 +277,29 @@ func TestMemoryTool_AddMemory(t *testing.T) {
 
 	assert.Len(t, memories, 1, "Expected 1 memory, got %d", len(memories))
 	assert.Equal(t, "User's name is John Doe", memories[0].Memory.Memory, "Expected memory 'User's name is John Doe', got '%s'", memories[0].Memory.Memory)
+}
+
+func TestMemoryTool_AddMemory_RecordsMemoryWriteTraceContract(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := newMockMemoryService()
+	tool := NewAddTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory": "User's name is John Doe",
+		"topics": []string{"personal"},
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationAdd)
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory")
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory_id")
+	require.NotEqual(t, codes.Error, span.Status().Code)
 }
 
 func TestMemoryTool_AddMemory_WithoutTopics(t *testing.T) {
@@ -442,6 +499,35 @@ func TestMemoryTool_UpdateMemory(t *testing.T) {
 	assert.Equal(t, "User loves coffee and tea", updatedMemories[0].Memory.Memory, "Expected updated memory content")
 }
 
+func TestMemoryTool_UpdateMemory_RecordsMemoryWriteTraceContract(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := newMockMemoryService()
+	userKey := memory.UserKey{AppName: "test-app", UserID: "test-user"}
+	require.NoError(t, service.AddMemory(context.Background(), userKey, "User likes coffee", []string{"preferences"}))
+	memories, err := service.ReadMemories(context.Background(), userKey, 1)
+	require.NoError(t, err)
+	require.Len(t, memories, 1)
+
+	tool := NewUpdateTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory_id": memories[0].ID,
+		"memory":    "User loves coffee and tea",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationUpdate)
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory")
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory_id")
+	require.NotEqual(t, codes.Error, span.Status().Code)
+}
+
 func TestMemoryTool_UpdateMemory_WithoutTopics(t *testing.T) {
 	service := newMockMemoryService()
 
@@ -579,6 +665,57 @@ func TestMemoryTool_DeleteMemory(t *testing.T) {
 	deletedMemories, err := service.ReadMemories(context.Background(), userKey, 1)
 	require.NoError(t, err, "Failed to read memories after deletion")
 	assert.Len(t, deletedMemories, 0, "Expected 0 memories after deletion")
+}
+
+func TestMemoryTool_DeleteMemory_RecordsMemoryWriteTraceContract(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := newMockMemoryService()
+	userKey := memory.UserKey{AppName: "test-app", UserID: "test-user"}
+	require.NoError(t, service.AddMemory(context.Background(), userKey, "User likes coffee", []string{"preferences"}))
+	memories, err := service.ReadMemories(context.Background(), userKey, 1)
+	require.NoError(t, err)
+	require.Len(t, memories, 1)
+
+	tool := NewDeleteTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory_id": memories[0].ID,
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationDelete)
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory")
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory_id")
+	require.NotEqual(t, codes.Error, span.Status().Code)
+}
+
+func TestMemoryTool_ClearMemory_RecordsMemoryWriteTraceContract(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := newMockMemoryService()
+	userKey := memory.UserKey{AppName: "test-app", UserID: "test-user"}
+	require.NoError(t, service.AddMemory(context.Background(), userKey, "User likes coffee", []string{"preferences"}))
+
+	tool := NewClearTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationClear)
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory")
+	requireNoMemoryToolSpanAttribute(t, span, "trpc.go.agent.memory.write.memory_id")
+	require.NotEqual(t, codes.Error, span.Status().Code)
 }
 
 func TestMemoryTool_DeleteMemory_InvalidID(t *testing.T) {
@@ -1210,6 +1347,85 @@ func TestMemoryTool_AddMemory_ServiceError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to add memory")
 }
 
+func TestMemoryTool_AddMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := &mockMemoryServiceWithError{}
+	tool := NewAddTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory": "reset password with Authorization: Bearer raw-token and api_key=sk-1234567890abcdef",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationAdd)
+	requireMemoryToolSpanSafeError(t, span, "reset password", "raw-token", "sk-1234567890abcdef")
+}
+
+func TestMemoryTool_UpdateMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := &mockMemoryServiceWithError{}
+	tool := NewUpdateTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory_id": "memory-1-raw-token",
+		"memory":    "updated reset password with Authorization: Bearer raw-token and api_key=sk-1234567890abcdef",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationUpdate)
+	requireMemoryToolSpanSafeError(t, span, "memory-1-raw-token", "reset password", "raw-token", "sk-1234567890abcdef")
+}
+
+func TestMemoryTool_DeleteMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := &mockMemoryServiceWithError{}
+	tool := NewDeleteTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"memory_id": "memory-1-raw-token",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationDelete)
+	requireMemoryToolSpanSafeError(t, span, "memory-1-raw-token", "raw-token")
+}
+
+func TestMemoryTool_ClearMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := &mockMemoryServiceWithError{}
+	tool := NewClearTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationClear)
+	requireMemoryToolSpanSafeError(t, span, "reset password", "raw-token", "sk-1234567890abcdef")
+}
+
 func TestMemoryTool_SearchMemory_ServiceError(t *testing.T) {
 	service := &mockMemoryServiceWithError{}
 	tool := NewSearchTool()
@@ -1250,19 +1466,19 @@ func TestMemoryTool_LoadMemory_ServiceError(t *testing.T) {
 type mockMemoryServiceWithError struct{}
 
 func (m *mockMemoryServiceWithError) AddMemory(ctx context.Context, userKey memory.UserKey, memoryStr string, topics []string, opts ...memory.AddOption) error {
-	return fmt.Errorf("mock add error")
+	return fmt.Errorf("mock add error: memory=%s Authorization: Bearer raw-token api_key=sk-1234567890abcdef", memoryStr)
 }
 
 func (m *mockMemoryServiceWithError) UpdateMemory(ctx context.Context, memoryKey memory.Key, mem string, topics []string, opts ...memory.UpdateOption) error {
-	return fmt.Errorf("mock update error")
+	return fmt.Errorf("mock update error: memory_id=%s memory=%s Authorization: Bearer raw-token api_key=sk-1234567890abcdef", memoryKey.MemoryID, mem)
 }
 
 func (m *mockMemoryServiceWithError) DeleteMemory(ctx context.Context, memoryKey memory.Key) error {
-	return fmt.Errorf("mock delete error")
+	return fmt.Errorf("mock delete error: memory_id=%s Authorization: Bearer raw-token", memoryKey.MemoryID)
 }
 
 func (m *mockMemoryServiceWithError) ClearMemories(ctx context.Context, userKey memory.UserKey) error {
-	return fmt.Errorf("mock clear error")
+	return fmt.Errorf("mock clear error: reset password Authorization: Bearer raw-token api_key=sk-1234567890abcdef")
 }
 
 func (m *mockMemoryServiceWithError) ReadMemories(ctx context.Context, userKey memory.UserKey, limit int) ([]*memory.Entry, error) {
