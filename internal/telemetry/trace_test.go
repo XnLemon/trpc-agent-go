@@ -572,6 +572,10 @@ func TestNewMemoryWriteSpanName(t *testing.T) {
 	require.Equal(t, OperationMemoryWrite, NewMemoryWriteSpanName())
 }
 
+func TestNewSummaryCreateSpanName(t *testing.T) {
+	require.Equal(t, OperationSummaryCreate, NewSummaryCreateSpanName())
+}
+
 func TestMarkToolCallSpan(t *testing.T) {
 	span := newRecordingSpan()
 	MarkToolCallSpan(span)
@@ -653,6 +657,14 @@ func TestTraceMemoryWrite_Error(t *testing.T) {
 	require.Len(t, span.recordedErrors, 1)
 	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.recordedErrors[0].Error())
 	require.NotContains(t, spanText(span), err.Error())
+}
+
+func TestMarkSummaryCreateSpan(t *testing.T) {
+	span := newRecordingSpan()
+
+	MarkSummaryCreateSpan(span)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationSummaryCreate))
 }
 
 func TestNewSummarizeTaskType(t *testing.T) {

@@ -22,8 +22,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	atrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
@@ -336,6 +338,7 @@ func TestCreateSessionSummary_WithTracing(t *testing.T) {
 	s := findSpan(spans, "create_session_summary")
 	require.NotNil(t, s, "expected create_session_summary span")
 	assert.Equal(t, "css1", spanAttr(s, "session_id"))
+	assert.Equal(t, itelemetry.OperationSummaryCreate, spanAttr(s, semconvtrace.KeyTRPCAgentGoTraceSpan))
 }
 
 // ============================================================================

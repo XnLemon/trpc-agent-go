@@ -49,6 +49,7 @@ const (
 	OperationToolCall        = "tool.call"
 	OperationMemorySearch    = "memory.search"
 	OperationMemoryWrite     = "memory.write"
+	OperationSummaryCreate   = "summary.create"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
@@ -90,6 +91,11 @@ func NewMemoryWriteSpanName() string {
 	return OperationMemoryWrite
 }
 
+// NewSummaryCreateSpanName creates the stable platform summary-create span contract name.
+func NewSummaryCreateSpanName() string {
+	return OperationSummaryCreate
+}
+
 // MarkToolCallSpan marks a span with the stable platform tool-call contract.
 func MarkToolCallSpan(span trace.Span) {
 	if !span.IsRecording() {
@@ -127,6 +133,14 @@ func TraceMemoryWrite(span trace.Span, operation string, err error) {
 	if err != nil {
 		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
 	}
+}
+
+// MarkSummaryCreateSpan marks a span with the stable platform summary-create contract.
+func MarkSummaryCreateSpan(span trace.Span) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewSummaryCreateSpanName()))
 }
 
 func recordSafeSpanError(span trace.Span, err error, fallback string) {
