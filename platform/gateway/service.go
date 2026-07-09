@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -504,6 +505,14 @@ func recordSpanError(span oteltrace.Span, err error) {
 	if err == nil {
 		return
 	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
+	description := traceErrorDescription(err)
+	span.RecordError(errors.New(description))
+	span.SetStatus(codes.Error, description)
+}
+
+func traceErrorDescription(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
 }

@@ -632,6 +632,30 @@ func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	assert.Empty(t, record.ResultRef)
 }
 
+func TestServiceHandleInboundTraceErrorDoesNotExposeRawErrorText(t *testing.T) {
+	recorder := useGatewaySpanRecorder(t)
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("Authorization: Bearer raw-token postgres://user:password@example/db")
+	r := &recordingRunner{runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+	require.ErrorIs(t, err, runnerErr)
+
+	runnerSpan := spanByName(t, recorder.Ended(), "runner.run")
+	assert.Equal(t, traceErrorDescription(runnerErr), runnerSpan.Status().Description)
+	traceText := spanAttributesText(runnerSpan) + "\n" + spanEventsText(runnerSpan)
+	assert.NotContains(t, traceText, "raw-token")
+	assert.NotContains(t, traceText, "password@example")
+	assert.NotContains(t, traceText, runnerErr.Error())
+}
+
 func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -1296,6 +1320,17 @@ func spanAttributesText(span sdktrace.ReadOnlySpan) string {
 	var values []string
 	for _, attr := range span.Attributes() {
 		values = append(values, string(attr.Key), attr.Value.AsString())
+	}
+	return strings.Join(values, "\n")
+}
+
+func spanEventsText(span sdktrace.ReadOnlySpan) string {
+	var values []string
+	for _, event := range span.Events() {
+		values = append(values, event.Name)
+		for _, attr := range event.Attributes {
+			values = append(values, string(attr.Key), attr.Value.AsString())
+		}
 	}
 	return strings.Join(values, "\n")
 }
