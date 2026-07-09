@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
+	itrace "trpc.group/trpc-go/trpc-agent-go/internal/trace"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -272,10 +274,36 @@ func NewSearchTool() tool.CallableTool {
 
 		userKey := memory.UserKey{AppName: appName, UserID: userID}
 		opts := buildSearchOptions(req)
-		memories, err := memoryService.SearchMemories(ctx, userKey,
+		searchCtx := ctx
+		var spanStarted bool
+		var spanErr error
+		var spanResultCount int
+		if invocation, ok := agent.InvocationFromContext(ctx); ok {
+			tracedCtx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewMemorySearchSpanName())
+			searchCtx = tracedCtx
+			spanStarted = startedSpan
+			if startedSpan {
+				defer func() {
+					itelemetry.TraceMemorySearch(
+						span,
+						opts.MaxResults,
+						spanResultCount,
+						opts.HybridSearch,
+						opts.Deduplicate,
+						spanErr,
+					)
+					span.End()
+				}()
+			}
+		}
+		memories, err := memoryService.SearchMemories(searchCtx, userKey,
 			opts.Query, memory.WithSearchOptions(opts))
 		if err != nil {
+			spanErr = err
 			return nil, fmt.Errorf("failed to search memories: %v", err)
+		}
+		if spanStarted {
+			spanResultCount = len(memories)
 		}
 
 		// Convert MemoryEntry to MemoryResult.

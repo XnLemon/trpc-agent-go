@@ -28,6 +28,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/internal/fileref"
 	iflow "trpc.group/trpc-go/trpc-agent-go/internal/flow"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
+	itrace "trpc.group/trpc-go/trpc-agent-go/internal/trace"
 	"trpc.group/trpc-go/trpc-agent-go/internal/util/message"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
@@ -3107,12 +3109,24 @@ func (p *ContentRequestProcessor) getAdaptivePreloadMemoryMessage(
 		Deduplicate:  true,
 		HybridSearch: true,
 	}
+	searchCtx, span, startedSpan := itrace.StartSpan(ctx, inv, itelemetry.NewMemorySearchSpanName())
 	memories, err := reader.SearchMemories(
-		ctx,
+		searchCtx,
 		userKey,
 		query,
 		memory.WithSearchOptions(searchOpts),
 	)
+	if startedSpan {
+		itelemetry.TraceMemorySearch(
+			span,
+			searchOpts.MaxResults,
+			len(memories),
+			searchOpts.HybridSearch,
+			searchOpts.Deduplicate,
+			err,
+		)
+		span.End()
+	}
 	if err != nil {
 		log.WarnfContext(ctx, "Failed to search memories for preload: %v", err)
 		return p.loadPreloadMemoryMessage(ctx, inv, reader, userKey, budget)

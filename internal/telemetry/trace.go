@@ -13,6 +13,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -46,6 +47,7 @@ const (
 
 	OperationExecuteTool     = "execute_tool"
 	OperationToolCall        = "tool.call"
+	OperationMemorySearch    = "memory.search"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
@@ -69,12 +71,44 @@ func NewToolCallSpanName() string {
 	return OperationToolCall
 }
 
+// NewMemorySearchSpanName creates the stable platform memory-search span contract name.
+func NewMemorySearchSpanName() string {
+	return OperationMemorySearch
+}
+
 // MarkToolCallSpan marks a span with the stable platform tool-call contract.
 func MarkToolCallSpan(span trace.Span) {
 	if !span.IsRecording() {
 		return
 	}
 	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewToolCallSpanName()))
+}
+
+// TraceMemorySearch marks a memory search span with stable low-cardinality attributes.
+func TraceMemorySearch(span trace.Span, maxResults int, resultCount int, hybridSearch bool, deduplicate bool, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewMemorySearchSpanName()),
+		attribute.Int(semconvtrace.KeyTRPCAgentGoMemorySearchMaxResults, maxResults),
+		attribute.Int(semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, resultCount),
+		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, hybridSearch),
+		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, deduplicate),
+	)
+	if err != nil {
+		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
+	}
+}
+
+func recordSafeSpanError(span trace.Span, err error, fallback string) {
+	if err == nil {
+		return
+	}
+	errorType := ToErrorType(err, fallback)
+	span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
+	span.SetStatus(codes.Error, errorType)
+	span.RecordError(errors.New(errorType))
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.

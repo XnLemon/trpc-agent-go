@@ -48,6 +48,14 @@ const (
 	KeyTRPCAgentGoClientTimeToFirstToken = "trpc_agent_go.client.time_to_first_token" // #nosec G101 - this is a metric key name, not a credential.
 	// KeyTRPCAgentGoTraceSpan is the stable platform trace span contract name.
 	KeyTRPCAgentGoTraceSpan = "trpc.go.agent.trace.span"
+	// KeyTRPCAgentGoMemorySearchMaxResults is the configured memory search result cap.
+	KeyTRPCAgentGoMemorySearchMaxResults = "trpc.go.agent.memory.search.max_results"
+	// KeyTRPCAgentGoMemorySearchResultCount is the number of returned memory search results.
+	KeyTRPCAgentGoMemorySearchResultCount = "trpc.go.agent.memory.search.result_count"
+	// KeyTRPCAgentGoMemorySearchHybrid is whether hybrid memory search was requested.
+	KeyTRPCAgentGoMemorySearchHybrid = "trpc.go.agent.memory.search.hybrid"
+	// KeyTRPCAgentGoMemorySearchDeduplicate is whether memory search deduplication was requested.
+	KeyTRPCAgentGoMemorySearchDeduplicate = "trpc.go.agent.memory.search.deduplicate"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"
