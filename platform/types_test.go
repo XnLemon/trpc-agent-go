@@ -610,8 +610,15 @@ func TestIdempotencyStoreEnforcesStateTransitions(t *testing.T) {
 	if !started {
 		t.Fatalf("processing record should start")
 	}
-	if _, err := processingStore.MarkReplyFailed(ctx, processing.IdempotencyKey, "outbound-1"); err == nil {
-		t.Fatalf("reply failure should only be allowed after completion")
+	replyFailed, err := processingStore.MarkReplyFailed(ctx, processing.IdempotencyKey, "outbound-1")
+	if err != nil {
+		t.Fatalf("mark reply failed from processing: %v", err)
+	}
+	if replyFailed.Status != IdempotencyStatusReplyFailed || replyFailed.ResultRef != "outbound-1" {
+		t.Fatalf("unexpected processing reply-failed record: %#v", replyFailed)
+	}
+	if _, err := processingStore.Complete(ctx, processing.IdempotencyKey, "outbound-2"); err == nil {
+		t.Fatalf("reply-failed processing record should not transition to completed")
 	}
 
 	completedStore := NewInMemoryIdempotencyStore()

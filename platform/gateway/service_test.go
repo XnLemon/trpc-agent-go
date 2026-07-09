@@ -259,7 +259,9 @@ func TestServiceHandleInboundSerializesSameSession(t *testing.T) {
 	assert.False(t, busy.Duplicate)
 	assert.True(t, busy.Processing)
 	assert.Equal(t, platform.IdempotencyStatusProcessing, busy.Status)
-	assert.Equal(t, "tenant:tenant-a:app:app:channel:wecom:dm:user-1", busy.SessionID)
+	wantSessionID, err := platform.SessionIDForInbound(second)
+	require.NoError(t, err)
+	assert.Equal(t, wantSessionID, busy.SessionID)
 	assert.Len(t, r.calls, 1)
 	record, ok, err := svc.idempotencyStore.Get(
 		ctx,

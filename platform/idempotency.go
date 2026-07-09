@@ -86,7 +86,7 @@ func (s *InMemoryIdempotencyStore) MarkReplyFailed(
 	key string,
 	resultRef string,
 ) (IdempotencyRecord, error) {
-	return s.update(ctx, key, IdempotencyStatusCompleted, IdempotencyStatusReplyFailed, resultRef)
+	return s.update(ctx, key, "", IdempotencyStatusReplyFailed, resultRef)
 }
 
 // Get returns the record for key.
@@ -119,7 +119,14 @@ func (s *InMemoryIdempotencyStore) update(
 	if !ok {
 		return IdempotencyRecord{}, ErrIdempotencyRecordNotFound
 	}
-	if record.Status != from {
+	if from != "" && record.Status != from {
+		return IdempotencyRecord{}, fmt.Errorf(
+			"invalid idempotency transition from %q to %q",
+			record.Status,
+			status,
+		)
+	}
+	if from == "" && record.Status != IdempotencyStatusCompleted && record.Status != IdempotencyStatusProcessing {
 		return IdempotencyRecord{}, fmt.Errorf(
 			"invalid idempotency transition from %q to %q",
 			record.Status,

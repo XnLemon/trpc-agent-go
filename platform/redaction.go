@@ -14,12 +14,13 @@ import (
 )
 
 var defaultRedactionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)(Authorization:\s*Basic\s+)[A-Za-z0-9._~+/\-]+=*`),
+	regexp.MustCompile(`(?i)(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9._~+/\-]+=*`),
+	regexp.MustCompile(`(?i)(Authorization\s*=\s*Bearer\s+)[^\r\n\s]+`),
 	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
-	regexp.MustCompile(`(?im)(authorization\s*:\s*)[^\r\n]+`),
-	regexp.MustCompile(`(?im)(authorization\s*=\s*)[^\r\n]+`),
-	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|authorization|cookie)=([^&\s]+)`),
-	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|authorization|cookie):\s*([^,\s]+)`),
+	regexp.MustCompile(`(?im)(authorization\s*:\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*=\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)=([^&\s]+)`),
+	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie):\s*([^,\s]+)`),
 	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
 	regexp.MustCompile(`(?i)(sk-[A-Za-z0-9._~+/\-]{8,})`),
 	regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s/?#]+`),
@@ -62,8 +63,15 @@ func (r *Redactor) Redact(text string) string {
 
 func redactMatch(match string) string {
 	lower := strings.ToLower(match)
-	if strings.Contains(lower, "authorization:") && strings.Contains(lower, "basic ") {
-		return match[:strings.Index(lower, "basic ")+6] + "****"
+	if strings.Contains(lower, "authorization:") {
+		if idx := strings.Index(match, ":"); idx >= 0 {
+			return match[:idx+1] + " ****"
+		}
+	}
+	if strings.Contains(lower, "authorization=") {
+		if idx := strings.Index(match, "="); idx >= 0 {
+			return match[:idx+1] + "****"
+		}
 	}
 	if strings.Contains(lower, "bearer ") {
 		return match[:strings.Index(lower, "bearer ")+7] + "****"
