@@ -99,6 +99,86 @@ func TestServiceHandleInboundEnqueuesChannelOutbox(t *testing.T) {
 	assert.Equal(t, 5, record.MaxAttempts)
 }
 
+func TestServiceHandleInboundDispatchesOutboundToProvider(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "telegram reply"}
+	require.NoError(t, registry.Register(validRuntimeForBinding(
+		"tenant-a",
+		"app-telegram",
+		"binding-telegram",
+		"telegram",
+		"acct-telegram",
+		r,
+	)))
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewOutboxBackedOutboundStore(outbox),
+	)
+	msg := inboundForRuntime(
+		"tenant-a",
+		"app-telegram",
+		"binding-telegram",
+		"telegram",
+		"acct-telegram",
+		"msg-telegram-dm",
+		"user-1",
+		"hello telegram",
+	)
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	provider := &recordingOutboundProvider{
+		status:            platform.OutboundStatusSent,
+		providerMessageID: "telegram-provider-msg-1",
+	}
+	dispatcher := channeladapter.NewDispatcher(
+		outbox,
+		channeladapter.ProviderRegistryFunc(func(channel string) (channeladapter.OutboundProvider, bool) {
+			if channel != "telegram" {
+				return nil, false
+			}
+			return provider, true
+		}),
+	)
+
+	dispatchResults, err := dispatcher.DispatchDue(ctx, 10)
+	require.NoError(t, err)
+
+	require.Len(t, dispatchResults, 1)
+	assert.Equal(t, result.Outbound.DedupKey, dispatchResults[0].DedupKey)
+	assert.Equal(t, platform.OutboundStatusSent, dispatchResults[0].Status)
+	assert.NoError(t, dispatchResults[0].Error)
+	require.Len(t, provider.delivered, 1)
+	delivered := provider.delivered[0]
+	expectedDedupKey := platform.IdempotencyKey(
+		"tenant-a",
+		"telegram",
+		"acct-telegram",
+		"msg-telegram-dm",
+	) + ":outbound:1"
+	assert.Equal(t, "tenant-a", delivered.TenantID)
+	assert.Equal(t, "binding-telegram", delivered.BindingID)
+	assert.Equal(t, "telegram", delivered.Channel)
+	assert.Equal(t, result.SessionID, delivered.SessionID)
+	assert.Equal(t, "msg-telegram-dm", delivered.ReplyToPlatformMessageID)
+	assert.Equal(t, platform.OutboundMessageKindText, delivered.Kind)
+	assert.Equal(t, "telegram reply", delivered.Content)
+	assert.Equal(t, 1, delivered.Sequence)
+	assert.Equal(t, expectedDedupKey, delivered.DedupKey)
+	assert.Equal(t, result.RequestID, delivered.TraceID)
+	assert.Equal(t, result.Outbound, delivered)
+	record, ok, err := outbox.Get(ctx, result.Outbound.DedupKey)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.OutboundStatusSent, record.Status)
+	assert.Equal(t, "telegram-provider-msg-1", record.ProviderMessageID)
+	assert.NotNil(t, record.SentAt)
+	assert.Len(t, r.calls, 1)
+}
+
 func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -805,6 +885,26 @@ type recordingRunner struct {
 	chunks   []string
 	runErr   error
 	calls    []runnerCall
+}
+
+type recordingOutboundProvider struct {
+	status            platform.OutboundStatus
+	providerMessageID string
+	delivered         []platform.OutboundMessage
+}
+
+func (p *recordingOutboundProvider) Deliver(
+	ctx context.Context,
+	msg platform.OutboundMessage,
+) (channeladapter.DeliveryResult, error) {
+	if err := ctx.Err(); err != nil {
+		return channeladapter.DeliveryResult{}, err
+	}
+	p.delivered = append(p.delivered, msg)
+	return channeladapter.DeliveryResult{
+		Status:            p.status,
+		ProviderMessageID: p.providerMessageID,
+	}, nil
 }
 
 func (r *recordingRunner) Run(
