@@ -647,9 +647,12 @@ func TestTraceMemoryWrite_Error(t *testing.T) {
 
 	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemoryWrite))
 	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, MemoryWriteOperationDelete))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType))
 	require.Equal(t, codes.Error, span.status)
-	require.Equal(t, err.Error(), span.statusDesc)
-	require.Contains(t, span.recordedErrors, err)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.statusDesc)
+	require.Len(t, span.recordedErrors, 1)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.recordedErrors[0].Error())
+	require.NotContains(t, spanText(span), err.Error())
 }
 
 func TestNewSummarizeTaskType(t *testing.T) {

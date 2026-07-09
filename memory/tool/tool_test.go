@@ -224,6 +224,27 @@ func requireNoMemoryToolSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, 
 	}
 }
 
+func requireMemoryToolSpanSafeError(t *testing.T, span sdktrace.ReadOnlySpan, rawValues ...string) {
+	t.Helper()
+	require.Equal(t, codes.Error, span.Status().Code)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.Status().Description)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType)
+
+	traceText := span.Status().Description
+	for _, attr := range span.Attributes() {
+		traceText += "\n" + string(attr.Key) + "=" + attr.Value.AsString()
+	}
+	for _, event := range span.Events() {
+		traceText += "\n" + event.Name
+		for _, attr := range event.Attributes {
+			traceText += "\n" + string(attr.Key) + "=" + attr.Value.AsString()
+		}
+	}
+	for _, raw := range rawValues {
+		require.NotContains(t, traceText, raw)
+	}
+}
+
 func TestMemoryTool_AddMemory(t *testing.T) {
 	service := newMockMemoryService()
 	tool := NewAddTool()
@@ -1332,7 +1353,7 @@ func TestMemoryTool_AddMemory_RecordsMemoryWriteTraceContractOnError(t *testing.
 	tool := NewAddTool()
 	ctx := createMockContext("test-app", "test-user", service)
 	jsonArgs, err := json.Marshal(map[string]any{
-		"memory": "test memory",
+		"memory": "reset password with Authorization: Bearer raw-token and api_key=sk-1234567890abcdef",
 	})
 	require.NoError(t, err)
 
@@ -1343,7 +1364,7 @@ func TestMemoryTool_AddMemory_RecordsMemoryWriteTraceContractOnError(t *testing.
 	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationAdd)
-	require.Equal(t, codes.Error, span.Status().Code)
+	requireMemoryToolSpanSafeError(t, span, "reset password", "raw-token", "sk-1234567890abcdef")
 }
 
 func TestMemoryTool_UpdateMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
@@ -1352,8 +1373,8 @@ func TestMemoryTool_UpdateMemory_RecordsMemoryWriteTraceContractOnError(t *testi
 	tool := NewUpdateTool()
 	ctx := createMockContext("test-app", "test-user", service)
 	jsonArgs, err := json.Marshal(map[string]any{
-		"memory_id": "memory-1",
-		"memory":    "updated memory",
+		"memory_id": "memory-1-raw-token",
+		"memory":    "updated reset password with Authorization: Bearer raw-token and api_key=sk-1234567890abcdef",
 	})
 	require.NoError(t, err)
 
@@ -1364,7 +1385,7 @@ func TestMemoryTool_UpdateMemory_RecordsMemoryWriteTraceContractOnError(t *testi
 	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationUpdate)
-	require.Equal(t, codes.Error, span.Status().Code)
+	requireMemoryToolSpanSafeError(t, span, "memory-1-raw-token", "reset password", "raw-token", "sk-1234567890abcdef")
 }
 
 func TestMemoryTool_DeleteMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
@@ -1373,7 +1394,7 @@ func TestMemoryTool_DeleteMemory_RecordsMemoryWriteTraceContractOnError(t *testi
 	tool := NewDeleteTool()
 	ctx := createMockContext("test-app", "test-user", service)
 	jsonArgs, err := json.Marshal(map[string]any{
-		"memory_id": "memory-1",
+		"memory_id": "memory-1-raw-token",
 	})
 	require.NoError(t, err)
 
@@ -1384,7 +1405,7 @@ func TestMemoryTool_DeleteMemory_RecordsMemoryWriteTraceContractOnError(t *testi
 	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationDelete)
-	require.Equal(t, codes.Error, span.Status().Code)
+	requireMemoryToolSpanSafeError(t, span, "memory-1-raw-token", "raw-token")
 }
 
 func TestMemoryTool_ClearMemory_RecordsMemoryWriteTraceContractOnError(t *testing.T) {
@@ -1402,7 +1423,7 @@ func TestMemoryTool_ClearMemory_RecordsMemoryWriteTraceContractOnError(t *testin
 	span := requireMemoryToolSpanNamed(t, recorder, itelemetry.NewMemoryWriteSpanName())
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemoryWrite)
 	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, itelemetry.MemoryWriteOperationClear)
-	require.Equal(t, codes.Error, span.Status().Code)
+	requireMemoryToolSpanSafeError(t, span, "reset password", "raw-token", "sk-1234567890abcdef")
 }
 
 func TestMemoryTool_SearchMemory_ServiceError(t *testing.T) {
@@ -1445,19 +1466,19 @@ func TestMemoryTool_LoadMemory_ServiceError(t *testing.T) {
 type mockMemoryServiceWithError struct{}
 
 func (m *mockMemoryServiceWithError) AddMemory(ctx context.Context, userKey memory.UserKey, memoryStr string, topics []string, opts ...memory.AddOption) error {
-	return fmt.Errorf("mock add error")
+	return fmt.Errorf("mock add error: memory=%s Authorization: Bearer raw-token api_key=sk-1234567890abcdef", memoryStr)
 }
 
 func (m *mockMemoryServiceWithError) UpdateMemory(ctx context.Context, memoryKey memory.Key, mem string, topics []string, opts ...memory.UpdateOption) error {
-	return fmt.Errorf("mock update error")
+	return fmt.Errorf("mock update error: memory_id=%s memory=%s Authorization: Bearer raw-token api_key=sk-1234567890abcdef", memoryKey.MemoryID, mem)
 }
 
 func (m *mockMemoryServiceWithError) DeleteMemory(ctx context.Context, memoryKey memory.Key) error {
-	return fmt.Errorf("mock delete error")
+	return fmt.Errorf("mock delete error: memory_id=%s Authorization: Bearer raw-token", memoryKey.MemoryID)
 }
 
 func (m *mockMemoryServiceWithError) ClearMemories(ctx context.Context, userKey memory.UserKey) error {
-	return fmt.Errorf("mock clear error")
+	return fmt.Errorf("mock clear error: reset password Authorization: Bearer raw-token api_key=sk-1234567890abcdef")
 }
 
 func (m *mockMemoryServiceWithError) ReadMemories(ctx context.Context, userKey memory.UserKey, limit int) ([]*memory.Entry, error) {
