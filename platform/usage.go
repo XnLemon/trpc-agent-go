@@ -18,14 +18,16 @@ type UsageSink interface {
 	WriteUsage(ctx context.Context, record UsageRecord) error
 }
 
-// InMemoryUsageSink is a concurrency-safe usage sink for tests and demos.
+// InMemoryUsageSink is a concurrency-safe bounded usage sink for tests and demos.
 type InMemoryUsageSink struct {
 	records inMemoryRecords[UsageRecord]
 }
 
 // NewInMemoryUsageSink creates an in-memory usage sink.
-func NewInMemoryUsageSink() *InMemoryUsageSink {
-	return &InMemoryUsageSink{}
+func NewInMemoryUsageSink(options ...InMemorySinkOption) *InMemoryUsageSink {
+	return &InMemoryUsageSink{
+		records: newInMemoryRecords[UsageRecord](options...),
+	}
 }
 
 // WriteUsage writes one usage record.

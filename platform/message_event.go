@@ -18,14 +18,16 @@ type MessageEventSink interface {
 	WriteMessageEvent(ctx context.Context, event MessageEvent) error
 }
 
-// InMemoryMessageEventSink is a concurrency-safe message event sink for tests and demos.
+// InMemoryMessageEventSink is a concurrency-safe bounded message event sink for tests and demos.
 type InMemoryMessageEventSink struct {
 	events inMemoryRecords[MessageEvent]
 }
 
 // NewInMemoryMessageEventSink creates an in-memory message event sink.
-func NewInMemoryMessageEventSink() *InMemoryMessageEventSink {
-	return &InMemoryMessageEventSink{}
+func NewInMemoryMessageEventSink(options ...InMemorySinkOption) *InMemoryMessageEventSink {
+	return &InMemoryMessageEventSink{
+		events: newInMemoryRecords[MessageEvent](options...),
+	}
 }
 
 // WriteMessageEvent writes one message event.

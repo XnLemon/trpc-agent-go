@@ -18,14 +18,16 @@ type AuditSink interface {
 	WriteAudit(ctx context.Context, record AuditRecord) error
 }
 
-// InMemoryAuditSink is a concurrency-safe audit sink for tests and demos.
+// InMemoryAuditSink is a concurrency-safe bounded audit sink for tests and demos.
 type InMemoryAuditSink struct {
 	records inMemoryRecords[AuditRecord]
 }
 
 // NewInMemoryAuditSink creates an in-memory audit sink.
-func NewInMemoryAuditSink() *InMemoryAuditSink {
-	return &InMemoryAuditSink{}
+func NewInMemoryAuditSink(options ...InMemorySinkOption) *InMemoryAuditSink {
+	return &InMemoryAuditSink{
+		records: newInMemoryRecords[AuditRecord](options...),
+	}
 }
 
 // WriteAudit writes one audit record.

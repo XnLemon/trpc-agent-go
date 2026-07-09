@@ -137,6 +137,26 @@ func TestUsageSinkStoresSnapshot(t *testing.T) {
 	}
 }
 
+func TestUsageSinkEvictsOldRecordsAtConfiguredLimit(t *testing.T) {
+	sink := NewInMemoryUsageSink(WithInMemorySinkMaxRecords(2))
+
+	for i := 0; i < 3; i++ {
+		record := validUsageRecord()
+		record.RequestID = string(rune('a' + i))
+		if err := sink.WriteUsage(context.Background(), record); err != nil {
+			t.Fatalf("WriteUsage(%d): %v", i, err)
+		}
+	}
+
+	records := sink.Records()
+	if len(records) != 2 {
+		t.Fatalf("expected capped records, got %d", len(records))
+	}
+	if records[0].RequestID != "b" || records[1].RequestID != "c" {
+		t.Fatalf("expected newest records to be retained, got %+v", records)
+	}
+}
+
 func TestUsageSinkRejectsInvalidRecord(t *testing.T) {
 	sink := NewInMemoryUsageSink()
 	record := validUsageRecord()
