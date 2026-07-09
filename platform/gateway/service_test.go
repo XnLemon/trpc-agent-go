@@ -99,6 +99,159 @@ func TestServiceHandleInboundEnqueuesChannelOutbox(t *testing.T) {
 	assert.Equal(t, 5, record.MaxAttempts)
 }
 
+func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	wecomRunner := &recordingRunner{response: "wecom reply"}
+	telegramRunner := &recordingRunner{response: "telegram reply"}
+	require.NoError(t, registry.Register(validRuntimeForBinding(
+		"tenant-a",
+		"app-wecom",
+		"binding-wecom",
+		"wecom",
+		"acct-wecom",
+		wecomRunner,
+	)))
+	require.NoError(t, registry.Register(validRuntimeForBinding(
+		"tenant-b",
+		"app-telegram",
+		"binding-telegram",
+		"telegram",
+		"acct-telegram",
+		telegramRunner,
+	)))
+	require.NoError(t, registry.Register(validRuntimeForBinding(
+		"tenant-b",
+		"app-wecom",
+		"binding-wecom-tenant-b",
+		"wecom",
+		"acct-wecom",
+		wecomRunner,
+	)))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		idempotency,
+		NewOutboxBackedOutboundStore(outbox),
+		WithAuditSink(audit),
+	)
+	wecomDM := inboundForRuntime(
+		"tenant-a",
+		"app-wecom",
+		"binding-wecom",
+		"wecom",
+		"acct-wecom",
+		"msg-wecom-dm",
+		"user-shared",
+		"hello wecom",
+	)
+	telegramDM := inboundForRuntime(
+		"tenant-b",
+		"app-telegram",
+		"binding-telegram",
+		"telegram",
+		"acct-telegram",
+		"msg-telegram-dm",
+		"user-shared",
+		"hello telegram",
+	)
+	tenantBWeComDM := inboundForRuntime(
+		"tenant-b",
+		"app-wecom",
+		"binding-wecom-tenant-b",
+		"wecom",
+		"acct-wecom",
+		"msg-tenant-b-wecom-dm",
+		"user-shared",
+		"hello same channel",
+	)
+	wecomGroup := inboundForRuntime(
+		"tenant-a",
+		"app-wecom",
+		"binding-wecom",
+		"wecom",
+		"acct-wecom",
+		"msg-wecom-group",
+		"user-shared",
+		"hello group",
+	)
+	wecomGroup.ConversationType = platform.ConversationTypeGroup
+	wecomGroup.ExternalGroupID = "room-1"
+
+	wecomResult, err := svc.HandleInbound(ctx, wecomDM)
+	require.NoError(t, err)
+	telegramResult, err := svc.HandleInbound(ctx, telegramDM)
+	require.NoError(t, err)
+	tenantBWeComResult, err := svc.HandleInbound(ctx, tenantBWeComDM)
+	require.NoError(t, err)
+	groupResult, err := svc.HandleInbound(ctx, wecomGroup)
+	require.NoError(t, err)
+	duplicate, err := svc.HandleInbound(ctx, wecomDM)
+	require.NoError(t, err)
+
+	assert.False(t, wecomResult.Duplicate)
+	assert.True(t, duplicate.Duplicate)
+	assert.Equal(t, wecomResult.Outbound, duplicate.Outbound)
+	assert.Len(t, wecomRunner.calls, 3)
+	assert.Len(t, telegramRunner.calls, 1)
+	assert.Equal(t, "wecom reply", wecomResult.Outbound.Content)
+	assert.Equal(t, "telegram reply", telegramResult.Outbound.Content)
+	assert.Equal(t, "wecom reply", tenantBWeComResult.Outbound.Content)
+	assert.Equal(t, "wecom reply", groupResult.Outbound.Content)
+	wantWeComSessionID, err := platform.SessionIDForInbound(wecomDM)
+	require.NoError(t, err)
+	wantTelegramSessionID, err := platform.SessionIDForInbound(telegramDM)
+	require.NoError(t, err)
+	wantTenantBWeComSessionID, err := platform.SessionIDForInbound(tenantBWeComDM)
+	require.NoError(t, err)
+	wantGroupSessionID, err := platform.SessionIDForInbound(wecomGroup)
+	require.NoError(t, err)
+	assert.Equal(t, wantWeComSessionID, wecomResult.SessionID)
+	assert.Equal(t, wantTelegramSessionID, telegramResult.SessionID)
+	assert.Equal(t, wantTenantBWeComSessionID, tenantBWeComResult.SessionID)
+	assert.Equal(t, wantGroupSessionID, groupResult.SessionID)
+	assert.NotContains(t, wecomResult.SessionID, "user-shared")
+	assert.NotContains(t, wecomResult.SessionID, ":")
+	assert.NotEqual(t, wecomResult.SessionID, telegramResult.SessionID)
+	assert.NotEqual(t, wecomResult.SessionID, tenantBWeComResult.SessionID)
+	assert.NotEqual(t, wecomResult.SessionID, groupResult.SessionID)
+	assert.NotEqual(t, wecomRunner.calls[0].userID, telegramRunner.calls[0].userID)
+	assert.NotEqual(t, wecomRunner.calls[0].userID, wecomRunner.calls[1].userID)
+	assertRunnerCall(t, wecomRunner.calls[0], wecomResult, wecomDM, "hello wecom")
+	assertRunnerCall(t, telegramRunner.calls[0], telegramResult, telegramDM, "hello telegram")
+	assertRunnerCall(t, wecomRunner.calls[1], tenantBWeComResult, tenantBWeComDM, "hello same channel")
+	assertRunnerCall(t, wecomRunner.calls[2], groupResult, wecomGroup, "hello group")
+
+	due, err := outbox.ListDue(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	require.Len(t, due, 4)
+	assertOutboundQueued(t, due, wecomResult.Outbound)
+	assertOutboundQueued(t, due, telegramResult.Outbound)
+	assertOutboundQueued(t, due, tenantBWeComResult.Outbound)
+	assertOutboundQueued(t, due, groupResult.Outbound)
+	records := audit.Records()
+	require.Len(t, records, 4)
+	for _, record := range records {
+		expectedUserHash := platform.UserIDHash(record.TenantID, record.Channel, "user-shared")
+		expectedInternalUserID := platform.InternalUserID(record.TenantID, record.Channel, "user-shared")
+		assert.Equal(t, "completed", record.Decision)
+		assert.NotEmpty(t, record.AuditID)
+		assert.NotEmpty(t, record.SessionID)
+		assert.Equal(t, expectedUserHash, record.UserID)
+		assert.Equal(t, expectedUserHash, record.UserIDHash)
+		assert.Equal(t, expectedInternalUserID, record.InternalUserID)
+		assert.NotContains(t, record.UserID, "user-shared")
+		assert.NotContains(t, record.UserIDHash, "user-shared")
+		assert.NotContains(t, record.InternalUserID, "user-shared")
+	}
+	assert.Equal(t, platform.IdempotencyStatusCompleted, wecomResult.Status)
+	assert.Equal(t, platform.IdempotencyStatusCompleted, telegramResult.Status)
+	assert.Equal(t, platform.IdempotencyStatusCompleted, tenantBWeComResult.Status)
+	assert.Equal(t, platform.IdempotencyStatusCompleted, groupResult.Status)
+}
+
 func TestServiceHandleInboundDuplicateReusesOutboxBackedResult(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -661,6 +814,41 @@ func validRuntime(tenantID string, r runnerStub) Runtime {
 	}
 }
 
+func validRuntimeForBinding(
+	tenantID string,
+	appID string,
+	bindingID string,
+	channel string,
+	accountID string,
+	r runnerStub,
+) Runtime {
+	return Runtime{
+		Tenant: platform.Tenant{
+			TenantID: tenantID,
+			Status:   platform.TenantStatusActive,
+		},
+		App: platform.AgentApp{
+			TenantID: tenantID,
+			AppID:    appID,
+			AppName:  appID,
+			Status:   platform.AppStatusActive,
+		},
+		Binding: platform.ChannelBinding{
+			TenantID:      tenantID,
+			AppID:         appID,
+			BindingID:     bindingID,
+			Channel:       channel,
+			AccountID:     accountID,
+			WebhookPath:   "/webhook/" + bindingID,
+			TokenRef:      "secret://token/" + bindingID,
+			SecretRef:     "secret://secret/" + bindingID,
+			Status:        platform.BindingStatusActive,
+			ChannelLimits: platform.ChannelLimits{MaxTextLength: 4096},
+		},
+		Runner: r,
+	}
+}
+
 func inbound(tenantID, messageID, userID, text string) platform.InboundMessage {
 	return platform.InboundMessage{
 		TenantID:          tenantID,
@@ -677,6 +865,64 @@ func inbound(tenantID, messageID, userID, text string) platform.InboundMessage {
 		},
 		ReceivedAt: time.Unix(100, 0),
 	}
+}
+
+func inboundForRuntime(
+	tenantID string,
+	appID string,
+	bindingID string,
+	channel string,
+	accountID string,
+	messageID string,
+	userID string,
+	text string,
+) platform.InboundMessage {
+	return platform.InboundMessage{
+		TenantID:          tenantID,
+		AppID:             appID,
+		BindingID:         bindingID,
+		Channel:           channel,
+		ChannelAccountID:  accountID,
+		PlatformMessageID: messageID,
+		ExternalUserID:    userID,
+		ConversationType:  platform.ConversationTypeDM,
+		MessageType:       platform.MessageTypeText,
+		ContentParts: []platform.ContentPart{
+			{Type: platform.ContentPartTypeText, Text: text},
+		},
+		ReceivedAt: time.Unix(100, 0),
+	}
+}
+
+func assertOutboundQueued(
+	t *testing.T,
+	records []channeladapter.OutboxRecord,
+	outbound platform.OutboundMessage,
+) {
+	t.Helper()
+	for _, record := range records {
+		if record.Message.DedupKey == outbound.DedupKey {
+			assert.Equal(t, platform.OutboundStatusPending, record.Status)
+			assert.Equal(t, outbound, record.Message)
+			return
+		}
+	}
+	t.Fatalf("outbound %q was not queued", outbound.DedupKey)
+}
+
+func assertRunnerCall(
+	t *testing.T,
+	call runnerCall,
+	result Result,
+	msg platform.InboundMessage,
+	content string,
+) {
+	t.Helper()
+	assert.Equal(t, result.SessionID, call.sessionID)
+	assert.Equal(t, result.RequestID, call.requestID)
+	assert.Equal(t, platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID), call.userID)
+	assert.Equal(t, model.RoleUser, call.message.Role)
+	assert.Equal(t, content, call.message.Content)
 }
 
 type runnerStub interface {
