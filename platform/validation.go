@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 var rawSecretPrefixes = []string{
@@ -27,10 +28,26 @@ var rawSecretPrefixes = []string{
 	"glpat-",
 }
 
+func validateRoutingIdentifier(field, value string, requiredErr error) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return requiredErr
+	}
+	if trimmed != value {
+		return fmt.Errorf("%s must not contain leading or trailing whitespace", field)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%s must not contain control characters", field)
+		}
+	}
+	return nil
+}
+
 // Validate checks that the tenant can be used as an isolation boundary.
 func (t Tenant) Validate() error {
-	if strings.TrimSpace(t.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", t.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
 	switch t.Status {
 	case "", TenantStatusActive, TenantStatusSuspended, TenantStatusDeleted:
@@ -42,11 +59,11 @@ func (t Tenant) Validate() error {
 
 // Validate checks that the app has the identifiers required for routing.
 func (a AgentApp) Validate() error {
-	if strings.TrimSpace(a.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", a.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(a.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", a.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
 	if a.GrayPercent < 0 || a.GrayPercent > 100 {
 		return fmt.Errorf("gray_percent must be between 0 and 100")
@@ -142,11 +159,11 @@ func validateConfigBundleValue(path, key string, value any) error {
 
 // Validate checks that model profile sensitive values are stored by reference.
 func (p ModelProfile) Validate() error {
-	if strings.TrimSpace(p.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", p.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(p.ProfileID) == "" {
-		return fmt.Errorf("profile_id is required")
+	if err := validateRoutingIdentifier("profile_id", p.ProfileID, fmt.Errorf("profile_id is required")); err != nil {
+		return err
 	}
 	if err := validateSecretReference("base_url_ref", p.BaseURLRef); err != nil {
 		return err
@@ -159,20 +176,20 @@ func (p ModelProfile) Validate() error {
 
 // Validate checks that a binding has safe routing and secret references.
 func (b ChannelBinding) Validate() error {
-	if strings.TrimSpace(b.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", b.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", b.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.BindingID) == "" {
-		return ErrBindingIDRequired
+	if err := validateRoutingIdentifier("binding_id", b.BindingID, ErrBindingIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.Channel) == "" {
-		return ErrChannelRequired
+	if err := validateRoutingIdentifier("channel", b.Channel, ErrChannelRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(b.AccountID) == "" {
-		return ErrAccountIDRequired
+	if err := validateRoutingIdentifier("account_id", b.AccountID, ErrAccountIDRequired); err != nil {
+		return err
 	}
 	if strings.TrimSpace(b.WebhookPath) == "" {
 		return ErrWebhookPathRequired
@@ -196,44 +213,47 @@ func (b ChannelBinding) Validate() error {
 
 // Validate checks that an inbound message has enough identity for routing.
 func (m InboundMessage) Validate() error {
-	if strings.TrimSpace(m.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", m.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(m.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", m.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(m.BindingID) == "" {
-		return ErrBindingIDRequired
+	if err := validateRoutingIdentifier("binding_id", m.BindingID, ErrBindingIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(m.Channel) == "" {
-		return ErrChannelRequired
+	if err := validateRoutingIdentifier("channel", m.Channel, ErrChannelRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(m.ChannelAccountID) == "" {
-		return ErrAccountIDRequired
+	if err := validateRoutingIdentifier("channel_account_id", m.ChannelAccountID, ErrAccountIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(m.PlatformMessageID) == "" {
-		return ErrPlatformMessageIDRequired
+	if err := validateRoutingIdentifier("platform_message_id", m.PlatformMessageID, ErrPlatformMessageIDRequired); err != nil {
+		return err
+	}
+	if err := validateInboundMessageType(m); err != nil {
+		return err
 	}
 	if m.MessageType == MessageTypeEvent {
 		return nil
 	}
-	if strings.TrimSpace(m.ExternalUserID) == "" {
-		return ErrExternalUserIDRequired
+	if err := validateRoutingIdentifier("external_user_id", m.ExternalUserID, ErrExternalUserIDRequired); err != nil {
+		return err
 	}
 	switch m.ConversationType {
 	case ConversationTypeDM:
 		return nil
 	case ConversationTypeGroup:
-		if strings.TrimSpace(m.ExternalGroupID) == "" {
-			return ErrExternalGroupIDRequired
+		if err := validateRoutingIdentifier("external_group_id", m.ExternalGroupID, ErrExternalGroupIDRequired); err != nil {
+			return err
 		}
 		return nil
 	case ConversationTypeThread:
-		if strings.TrimSpace(m.ExternalGroupID) == "" {
-			return ErrExternalGroupIDRequired
+		if err := validateRoutingIdentifier("external_group_id", m.ExternalGroupID, ErrExternalGroupIDRequired); err != nil {
+			return err
 		}
-		if strings.TrimSpace(m.ThreadID) == "" {
-			return fmt.Errorf("thread_id is required")
+		if err := validateRoutingIdentifier("thread_id", m.ThreadID, fmt.Errorf("thread_id is required")); err != nil {
+			return err
 		}
 		return nil
 	case "":
@@ -243,13 +263,26 @@ func (m InboundMessage) Validate() error {
 	}
 }
 
+func validateInboundMessageType(m InboundMessage) error {
+	switch m.MessageType {
+	case MessageTypeText, MessageTypeImage, MessageTypeFile, MessageTypeAudio, MessageTypeVideo:
+		return nil
+	case MessageTypeEvent:
+		return validateRoutingIdentifier("raw_event_type", m.RawEventType, fmt.Errorf("raw_event_type is required"))
+	case "":
+		return fmt.Errorf("message_type is required")
+	default:
+		return fmt.Errorf("invalid message_type %q", m.MessageType)
+	}
+}
+
 // Validate checks that a storage profile uses references for sensitive values.
 func (p StorageProfile) Validate() error {
-	if strings.TrimSpace(p.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", p.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(p.ProfileID) == "" {
-		return fmt.Errorf("profile_id is required")
+	if err := validateRoutingIdentifier("profile_id", p.ProfileID, fmt.Errorf("profile_id is required")); err != nil {
+		return err
 	}
 	if err := validateSecretReference("dsn_ref", p.DSNRef); err != nil {
 		return err

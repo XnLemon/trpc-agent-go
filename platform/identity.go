@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 type stableIDPart struct {
@@ -22,12 +21,22 @@ type stableIDPart struct {
 
 // InternalUserID returns a stable tenant-scoped user identifier.
 func InternalUserID(tenantID, channel, externalUserID string) string {
-	return "usr_" + shortHash(tenantID, channel, externalUserID)
+	return stableID(
+		"usr",
+		stableIDPart{"tenant", tenantID},
+		stableIDPart{"channel", channel},
+		stableIDPart{"user", externalUserID},
+	)
 }
 
 // UserIDHash returns a low-sensitivity hash for logs and trace attributes.
 func UserIDHash(tenantID, channel, userID string) string {
-	return "user_hash_" + shortHash(tenantID, channel, userID)
+	return stableID(
+		"user_hash",
+		stableIDPart{"tenant", tenantID},
+		stableIDPart{"channel", channel},
+		stableIDPart{"user", userID},
+	)
 }
 
 // AuditID returns a stable audit identifier for one audit event boundary.
@@ -79,29 +88,39 @@ func SessionIDForInbound(msg InboundMessage) (string, error) {
 	return stableID("ses", parts...), nil
 }
 
-// SessionID returns the stable tenant/app/channel-scoped session id.
+// SessionID returns the stable tenant/app/binding/channel/account-scoped session id.
 func SessionID(
 	tenantID string,
 	appID string,
+	bindingID string,
 	channel string,
+	channelAccountID string,
 	conversationType ConversationType,
 	externalUserID string,
 	externalGroupID string,
 	threadID string,
 ) (string, error) {
-	if strings.TrimSpace(tenantID) == "" {
-		return "", ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", tenantID, ErrTenantIDRequired); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(appID) == "" {
-		return "", ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", appID, ErrAppIDRequired); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(channel) == "" {
-		return "", ErrChannelRequired
+	if err := validateRoutingIdentifier("binding_id", bindingID, ErrBindingIDRequired); err != nil {
+		return "", err
+	}
+	if err := validateRoutingIdentifier("channel", channel, ErrChannelRequired); err != nil {
+		return "", err
+	}
+	if err := validateRoutingIdentifier("channel_account_id", channelAccountID, ErrAccountIDRequired); err != nil {
+		return "", err
 	}
 	parts := []stableIDPart{
 		{"tenant", tenantID},
 		{"app", appID},
+		{"binding", bindingID},
 		{"channel", channel},
+		{"account", channelAccountID},
 	}
 	conversationParts, err := sessionConversationParts(
 		conversationType,
@@ -124,27 +143,27 @@ func sessionConversationParts(
 ) ([]stableIDPart, error) {
 	switch conversationType {
 	case ConversationTypeDM:
-		if strings.TrimSpace(externalUserID) == "" {
-			return nil, ErrExternalUserIDRequired
+		if err := validateRoutingIdentifier("external_user_id", externalUserID, ErrExternalUserIDRequired); err != nil {
+			return nil, err
 		}
 		return []stableIDPart{
 			{"conversation_type", string(ConversationTypeDM)},
 			{"user", externalUserID},
 		}, nil
 	case ConversationTypeGroup:
-		if strings.TrimSpace(externalGroupID) == "" {
-			return nil, ErrExternalGroupIDRequired
+		if err := validateRoutingIdentifier("external_group_id", externalGroupID, ErrExternalGroupIDRequired); err != nil {
+			return nil, err
 		}
 		return []stableIDPart{
 			{"conversation_type", string(ConversationTypeGroup)},
 			{"group", externalGroupID},
 		}, nil
 	case ConversationTypeThread:
-		if strings.TrimSpace(externalGroupID) == "" {
-			return nil, ErrExternalGroupIDRequired
+		if err := validateRoutingIdentifier("external_group_id", externalGroupID, ErrExternalGroupIDRequired); err != nil {
+			return nil, err
 		}
-		if strings.TrimSpace(threadID) == "" {
-			return nil, fmt.Errorf("thread_id is required")
+		if err := validateRoutingIdentifier("thread_id", threadID, fmt.Errorf("thread_id is required")); err != nil {
+			return nil, err
 		}
 		return []stableIDPart{
 			{"conversation_type", string(ConversationTypeThread)},
@@ -158,16 +177,11 @@ func sessionConversationParts(
 	}
 }
 
-func shortHash(parts ...string) string {
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(sum[:])[:24]
-}
-
 func stableID(prefix string, parts ...stableIDPart) string {
 	hash := sha256.New()
 	writeStablePart(hash, "prefix", prefix)
 	for _, part := range parts {
-		writeStablePart(hash, strings.TrimSpace(part.name), strings.TrimSpace(part.value))
+		writeStablePart(hash, part.name, part.value)
 	}
 	return prefix + "_" + hex.EncodeToString(hash.Sum(nil))[:32]
 }
