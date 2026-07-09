@@ -113,6 +113,10 @@ func (s *Service) HandleInbound(
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
 		return Result{}, err
 	}
+	if err := authorizeBinding(runtime.Binding, msg); err != nil {
+		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		return Result{}, err
+	}
 	text, err := inboundText(msg)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
@@ -245,6 +249,35 @@ func (s *Service) duplicateResult(
 	return result, nil
 }
 
+func authorizeBinding(binding platform.ChannelBinding, msg platform.InboundMessage) error {
+	if !containsAllowed(binding.AllowedUsers, msg.ExternalUserID) {
+		return ErrBindingAccessDenied
+	}
+	if msg.ConversationType != platform.ConversationTypeDM &&
+		!containsAllowed(binding.AllowedGroups, msg.ExternalGroupID) {
+		return ErrBindingAccessDenied
+	}
+	if binding.RequiredMention &&
+		msg.ConversationType != platform.ConversationTypeDM &&
+		!msg.RequiredMentionSeen {
+		return ErrBindingMentionRequired
+	}
+	return nil
+}
+
+func containsAllowed(allowed []string, value string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	for _, candidate := range allowed {
+		if strings.TrimSpace(candidate) == value {
+			return true
+		}
+	}
+	return false
+}
+
 func inboundText(msg platform.InboundMessage) (string, error) {
 	if msg.MessageType != platform.MessageTypeText {
 		return "", ErrUnsupportedMessageType
@@ -339,7 +372,7 @@ func auditFromMessage(
 		MessageID:      msg.PlatformMessageID,
 		RequestID:      requestIDFor(msg),
 		Decision:       decision,
-		DecisionReason: reason,
+		DecisionReason: redactAuditReason(reason),
 		LatencyMS:      time.Since(start).Milliseconds(),
 		CreatedAt:      time.Now(),
 	}
@@ -347,6 +380,17 @@ func auditFromMessage(
 		record.ErrorType = fmt.Sprintf("%T", err)
 	}
 	return record
+}
+
+func redactAuditReason(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return reason
+	}
+	return redactor.Redact(reason)
 }
 
 func (s *Service) writeAudit(ctx context.Context, record platform.AuditRecord) {
