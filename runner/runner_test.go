@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
@@ -49,6 +51,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
+	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -4432,6 +4435,7 @@ func TestRunner_Run_AgentRunError(t *testing.T) {
 }
 
 func TestRunnerLatencyDiagnosticHelpers(t *testing.T) {
+	recorder := useRunnerSpanRecorder(t)
 	ctx := context.Background()
 	_, disabledSpan, disabledStarted := startRunnerLatencySpan(
 		ctx,
@@ -4466,7 +4470,8 @@ func TestRunnerLatencyDiagnosticHelpers(t *testing.T) {
 		attribute.String("test.attr", "value"),
 	)
 	require.True(t, started)
-	finishRunnerLatencySpan(span, started, errors.New("boom"))
+	rawError := errors.New("raw-user-id raw-session-id raw-request-id")
+	finishRunnerLatencySpan(span, started, rawError)
 
 	_, optionSpan, optionStarted := startRunnerRunOptionsLatencySpan(
 		ctx,
@@ -4485,36 +4490,50 @@ func TestRunnerLatencyDiagnosticHelpers(t *testing.T) {
 	require.False(t, optionStarted)
 	finishRunnerLatencySpan(optionSpan, optionStarted, nil)
 
+	rawUserID := "raw-user-id"
+	rawSessionID := "raw-session-id"
+	rawRequestID := "raw-request-id"
+
 	runAttrs := runnerRunAttrs(
 		"app",
-		"user",
-		"sess",
+		rawUserID,
+		rawSessionID,
 		model.NewUserMessage("hello"),
 		agent.RunOptions{
-			RequestID: "req-latency",
+			RequestID: rawRequestID,
 			Messages:  []model.Message{model.NewSystemMessage("seed")},
 		},
 	)
 	require.True(t, runnerHasAttr(runAttrs, "runner.app", "app"))
-	require.True(t, runnerHasAttr(runAttrs, "runner.request_id", "req-latency"))
+	require.True(t, runnerHasAttr(runAttrs, "runner.user_id_hash", runnerTraceSafeHash("user", rawUserID)))
+	require.True(t, runnerHasAttr(runAttrs, "runner.session_id_hash", runnerTraceSafeHash("session", rawSessionID)))
+	require.True(t, runnerHasAttr(runAttrs, "runner.request_id_hash", runnerTraceSafeHash("request", rawRequestID)))
 	require.True(t, runnerHasAttr(runAttrs, "runner.message.role", "user"))
 	require.True(t, runnerHasAttr(runAttrs, "runner.message.has_payload", true))
 	require.True(t, runnerHasAttr(runAttrs, "runner.options.seed_messages", 1))
+	require.NotContains(t, runnerAttrsText(runAttrs), rawUserID)
+	require.NotContains(t, runnerAttrsText(runAttrs), rawSessionID)
+	require.NotContains(t, runnerAttrsText(runAttrs), rawRequestID)
 
 	invAttrs := runnerInvocationAttrs(inv)
 	require.True(t, runnerHasAttr(invAttrs, "runner.agent", "a"))
-	require.True(t, runnerHasAttr(invAttrs, "runner.request_id", "req-latency"))
+	require.True(t, runnerHasAttr(invAttrs, "runner.request_id_hash", runnerTraceSafeHash("request", "req-latency")))
+	require.NotContains(t, runnerAttrsText(invAttrs), "req-latency")
 	require.Nil(t, runnerInvocationAttrs(nil))
 
-	sess := session.NewSession("app", "user", "sess")
+	sess := session.NewSession("app", rawUserID, rawSessionID)
 	sess.SetState("state-key", []byte("value"))
 	sess.Summaries = map[string]*session.Summary{"default": {}}
-	key := session.Key{AppName: "app", UserID: "user", SessionID: "sess"}
+	key := session.Key{AppName: "app", UserID: rawUserID, SessionID: rawSessionID}
 	sessionAttrs := runnerSessionAttrs(key, sess)
 	require.True(t, runnerHasAttr(sessionAttrs, "runner.session.app", "app"))
+	require.True(t, runnerHasAttr(sessionAttrs, "runner.session.user_hash", runnerTraceSafeHash("user", rawUserID)))
+	require.True(t, runnerHasAttr(sessionAttrs, "runner.session.id_hash", runnerTraceSafeHash("session", rawSessionID)))
 	require.True(t, runnerHasAttr(sessionAttrs, "runner.session.events", 0))
 	require.True(t, runnerHasAttr(sessionAttrs, runnerAttrSessionStateKeys, 1))
 	require.True(t, runnerHasAttr(sessionAttrs, runnerAttrSessionSummaryKeys, 1))
+	require.NotContains(t, runnerAttrsText(sessionAttrs), rawUserID)
+	require.NotContains(t, runnerAttrsText(sessionAttrs), rawSessionID)
 
 	evt := event.New(
 		inv.InvocationID,
@@ -4554,6 +4573,13 @@ func TestRunnerLatencyDiagnosticHelpers(t *testing.T) {
 			Error: &model.ResponseError{Type: model.ErrorTypeRunError},
 		},
 	}))
+
+	errorSpan := runnerSpanByName(t, recorder.Ended(), runnerLatencySpanProcessEvent)
+	require.Equal(t, runnerTraceErrorDescription(rawError), errorSpan.Status().Description)
+	errorTraceText := runnerSpanAttributesText(errorSpan) + "\n" + runnerSpanEventsText(errorSpan)
+	require.NotContains(t, errorTraceText, rawUserID)
+	require.NotContains(t, errorTraceText, rawSessionID)
+	require.NotContains(t, errorTraceText, rawRequestID)
 }
 
 func runnerHasAttr(attrs []attribute.KeyValue, key string, want any) bool {
@@ -4564,6 +4590,60 @@ func runnerHasAttr(attrs []attribute.KeyValue, key string, want any) bool {
 		}
 	}
 	return false
+}
+
+func runnerAttrsText(attrs []attribute.KeyValue) string {
+	var values []string
+	for _, attr := range attrs {
+		values = append(values, fmt.Sprint(attr.Value.AsInterface()))
+	}
+	return strings.Join(values, "\n")
+}
+
+func useRunnerSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	originalProvider := telemetrytrace.TracerProvider
+	originalTracer := telemetrytrace.Tracer
+	telemetrytrace.TracerProvider = provider
+	telemetrytrace.Tracer = provider.Tracer("runner-test")
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		telemetrytrace.TracerProvider = originalProvider
+		telemetrytrace.Tracer = originalTracer
+	})
+	return recorder
+}
+
+func runnerSpanByName(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("span %q not found", name)
+	return nil
+}
+
+func runnerSpanAttributesText(span sdktrace.ReadOnlySpan) string {
+	var values []string
+	for _, attr := range span.Attributes() {
+		values = append(values, string(attr.Key), attr.Value.AsString())
+	}
+	return strings.Join(values, "\n")
+}
+
+func runnerSpanEventsText(span sdktrace.ReadOnlySpan) string {
+	var values []string
+	for _, event := range span.Events() {
+		values = append(values, event.Name)
+		for _, attr := range event.Attributes {
+			values = append(values, string(attr.Key), attr.Value.AsString())
+		}
+	}
+	return strings.Join(values, "\n")
 }
 
 func TestGetOrCreateSession_Existing(t *testing.T) {

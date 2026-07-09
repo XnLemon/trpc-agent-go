@@ -235,6 +235,8 @@ func (s *Service) HandleInbound(
 		sessionID,
 		model.NewUserMessage(text),
 		agent.WithRequestID(requestID),
+		agent.WithLatencyDiagnostics(true),
+		agent.WithLatencyDiagnosticsEvents(false),
 	)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
