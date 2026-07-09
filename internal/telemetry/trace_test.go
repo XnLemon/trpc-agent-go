@@ -564,10 +564,41 @@ func TestNewToolCallSpanName(t *testing.T) {
 	require.Equal(t, OperationToolCall, NewToolCallSpanName())
 }
 
+func TestNewMemorySearchSpanName(t *testing.T) {
+	require.Equal(t, OperationMemorySearch, NewMemorySearchSpanName())
+}
+
 func TestMarkToolCallSpan(t *testing.T) {
 	span := newRecordingSpan()
 	MarkToolCallSpan(span)
 	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
+}
+
+func TestTraceMemorySearch(t *testing.T) {
+	span := newRecordingSpan()
+
+	TraceMemorySearch(span, 3, 2, true, true, nil)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemorySearch))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchMaxResults, int64(3)))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(2)))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, true))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, true))
+	require.False(t, hasAttrKey(span.attrs, "trpc.go.agent.memory.search.query"))
+	require.NotEqual(t, codes.Error, span.status)
+}
+
+func TestTraceMemorySearch_Error(t *testing.T) {
+	span := newRecordingSpan()
+	err := errors.New("boom")
+
+	TraceMemorySearch(span, 1, 0, false, false, err)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemorySearch))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(0)))
+	require.Equal(t, codes.Error, span.status)
+	require.Equal(t, err.Error(), span.statusDesc)
+	require.Contains(t, span.recordedErrors, err)
 }
 
 func TestNewSummarizeTaskType(t *testing.T) {

@@ -20,11 +20,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
+	tracetelemetry "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -157,6 +163,54 @@ func createMockContext(appName, userID string, service memory.Service) context.C
 	return agent.NewInvocationContext(context.Background(), mockInvocation)
 }
 
+func useMemoryToolSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	originalProvider := tracetelemetry.TracerProvider
+	originalTracer := tracetelemetry.Tracer
+	tracetelemetry.TracerProvider = provider
+	tracetelemetry.Tracer = provider.Tracer("memory-tool-test")
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		tracetelemetry.TracerProvider = originalProvider
+		tracetelemetry.Tracer = originalTracer
+	})
+	return recorder
+}
+
+func requireMemoryToolSpan(t *testing.T, recorder *tracetest.SpanRecorder) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() == itelemetry.NewMemorySearchSpanName() {
+			return span
+		}
+	}
+	t.Fatalf("span %q not recorded; ended spans=%v", itelemetry.NewMemorySearchSpanName(), recorder.Ended())
+	return nil
+}
+
+func requireMemoryToolSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, key string, want any) {
+	t.Helper()
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) != key {
+			continue
+		}
+		switch v := want.(type) {
+		case string:
+			require.Equal(t, v, attr.Value.AsString())
+		case int64:
+			require.Equal(t, v, attr.Value.AsInt64())
+		case bool:
+			require.Equal(t, v, attr.Value.AsBool())
+		default:
+			t.Fatalf("unsupported expected attribute type %T", want)
+		}
+		return
+	}
+	t.Fatalf("missing attribute %s=%v; attributes=%v", key, want, span.Attributes())
+}
+
 func TestMemoryTool_AddMemory(t *testing.T) {
 	service := newMockMemoryService()
 	tool := NewAddTool()
@@ -264,6 +318,51 @@ func TestMemoryTool_SearchMemory(t *testing.T) {
 	assert.Equal(t, 1, response.Count, "Expected 1 result, got %d", response.Count)
 	assert.Len(t, response.Results, 1, "Expected 1 result, got %d", len(response.Results))
 	assert.Equal(t, "User likes coffee", response.Results[0].Memory, "Expected memory 'User likes coffee', got '%s'", response.Results[0].Memory)
+}
+
+func TestMemoryTool_SearchMemory_RecordsMemorySearchTraceContract(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	service := newMockMemoryService()
+	userKey := memory.UserKey{AppName: "test-app", UserID: "test-user"}
+	require.NoError(t, service.AddMemory(context.Background(), userKey, "User likes coffee", []string{"preferences"}))
+
+	tool := NewSearchTool()
+	ctx := createMockContext("test-app", "test-user", service)
+	jsonArgs, err := json.Marshal(map[string]any{
+		"query": "coffee",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	span := requireMemoryToolSpan(t, recorder)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemorySearch)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchMaxResults, int64(0))
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(1))
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, true)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, true)
+	require.NotEqual(t, codes.Error, span.Status().Code)
+}
+
+func TestMemoryTool_SearchMemory_RecordsMemorySearchTraceContractOnError(t *testing.T) {
+	recorder := useMemoryToolSpanRecorder(t)
+	tool := NewSearchTool()
+	ctx := createMockContext("test-app", "test-user", &mockMemoryServiceWithError{})
+	jsonArgs, err := json.Marshal(map[string]any{
+		"query": "coffee",
+	})
+	require.NoError(t, err)
+
+	result, err := tool.Call(ctx, jsonArgs)
+
+	require.Error(t, err)
+	require.Nil(t, result)
+	span := requireMemoryToolSpan(t, recorder)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemorySearch)
+	requireMemoryToolSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(0))
+	require.Equal(t, codes.Error, span.Status().Code)
 }
 
 func TestMemoryTool_LoadMemory(t *testing.T) {
