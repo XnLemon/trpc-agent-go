@@ -11,7 +11,6 @@ package platform
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 )
@@ -135,17 +134,17 @@ func (s *InMemoryIdempotencyStore) update(
 }
 
 func canonicalIdempotencyKey(record IdempotencyRecord) (string, error) {
-	if strings.TrimSpace(record.TenantID) == "" {
-		return "", ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", record.TenantID, ErrTenantIDRequired); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(record.Channel) == "" {
-		return "", ErrChannelRequired
+	if err := validateRoutingIdentifier("channel", record.Channel, ErrChannelRequired); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(record.AccountID) == "" {
-		return "", ErrAccountIDRequired
+	if err := validateRoutingIdentifier("account_id", record.AccountID, ErrAccountIDRequired); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(record.PlatformMessageID) == "" {
-		return "", ErrPlatformMessageIDRequired
+	if err := validateRoutingIdentifier("platform_message_id", record.PlatformMessageID, ErrPlatformMessageIDRequired); err != nil {
+		return "", err
 	}
 	return IdempotencyKey(
 		record.TenantID,

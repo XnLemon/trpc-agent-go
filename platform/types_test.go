@@ -48,11 +48,11 @@ func TestSessionIDForInboundIsTenantScoped(t *testing.T) {
 }
 
 func TestSessionIDForInboundSupportsGroupAndThread(t *testing.T) {
-	groupID, err := SessionID("tenant", "app", "wecom", ConversationTypeGroup, "user", "room 1", "")
+	groupID, err := SessionID("tenant", "app", "binding", "wecom", "bot", ConversationTypeGroup, "user", "room 1", "")
 	if err != nil {
 		t.Fatalf("group session: %v", err)
 	}
-	groupIDAgain, err := SessionID("tenant", "app", "wecom", ConversationTypeGroup, "user", "room 1", "")
+	groupIDAgain, err := SessionID("tenant", "app", "binding", "wecom", "bot", ConversationTypeGroup, "user", "room 1", "")
 	if err != nil {
 		t.Fatalf("group session again: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestSessionIDForInboundSupportsGroupAndThread(t *testing.T) {
 		t.Fatalf("group session id should be opaque and delimiter-safe, got %q", groupID)
 	}
 
-	threadID, err := SessionID("tenant", "app", "telegram", ConversationTypeThread, "user", "chat", "topic/7")
+	threadID, err := SessionID("tenant", "app", "binding", "telegram", "bot", ConversationTypeThread, "user", "chat", "topic/7")
 	if err != nil {
 		t.Fatalf("thread session: %v", err)
 	}
@@ -75,12 +75,33 @@ func TestSessionIDForInboundSupportsGroupAndThread(t *testing.T) {
 	}
 }
 
+func TestSessionIDIncludesBindingAndAccountScope(t *testing.T) {
+	bindingA, err := SessionID("tenant", "app", "binding-a", "telegram", "bot-a", ConversationTypeDM, "user", "", "")
+	if err != nil {
+		t.Fatalf("binding A: %v", err)
+	}
+	bindingB, err := SessionID("tenant", "app", "binding-b", "telegram", "bot-a", ConversationTypeDM, "user", "", "")
+	if err != nil {
+		t.Fatalf("binding B: %v", err)
+	}
+	if bindingA == bindingB {
+		t.Fatalf("sessions should differ across bindings: %q", bindingA)
+	}
+	accountB, err := SessionID("tenant", "app", "binding-a", "telegram", "bot-b", ConversationTypeDM, "user", "", "")
+	if err != nil {
+		t.Fatalf("account B: %v", err)
+	}
+	if bindingA == accountB {
+		t.Fatalf("sessions should differ across channel accounts: %q", bindingA)
+	}
+}
+
 func TestStableIDsAreDelimiterSafe(t *testing.T) {
-	sessionA, err := SessionID("tenant", "app", "chat:dm:user", ConversationTypeDM, "leaf", "", "")
+	sessionA, err := SessionID("tenant", "app", "binding", "chat:dm:user", "bot", ConversationTypeDM, "leaf", "", "")
 	if err != nil {
 		t.Fatalf("session A: %v", err)
 	}
-	sessionB, err := SessionID("tenant", "app", "chat", ConversationTypeDM, "user:dm:leaf", "", "")
+	sessionB, err := SessionID("tenant", "app", "binding", "chat", "bot", ConversationTypeDM, "user:dm:leaf", "", "")
 	if err != nil {
 		t.Fatalf("session B: %v", err)
 	}
@@ -110,6 +131,7 @@ func TestValidateInboundRequiresGroupForGroupConversation(t *testing.T) {
 		PlatformMessageID: "msg",
 		ExternalUserID:    "user",
 		ConversationType:  ConversationTypeGroup,
+		MessageType:       MessageTypeText,
 	}
 	if err := msg.Validate(); !errors.Is(err, ErrExternalGroupIDRequired) {
 		t.Fatalf("expected ErrExternalGroupIDRequired, got %v", err)
@@ -145,6 +167,240 @@ func TestValidateInboundEventDoesNotRequireConversationIdentity(t *testing.T) {
 	}
 	if err := msg.Validate(); err != nil {
 		t.Fatalf("event should not require user or conversation identity, got %v", err)
+	}
+}
+
+func TestValidateRejectsNonNormalizedRoutingIdentifiers(t *testing.T) {
+	badValues := []struct {
+		name  string
+		value string
+	}{
+		{name: "leading_space", value: " value"},
+		{name: "trailing_space", value: "value "},
+		{name: "control_nul", value: "value\x00x"},
+		{name: "control_newline", value: "value\nx"},
+	}
+	tests := []struct {
+		name     string
+		validate func(string) error
+	}{
+		{
+			name: "TenantID",
+			validate: func(value string) error {
+				return Tenant{TenantID: value}.Validate()
+			},
+		},
+		{
+			name: "AppID",
+			validate: func(value string) error {
+				return AgentApp{TenantID: "tenant", AppID: value}.Validate()
+			},
+		},
+		{
+			name: "BindingID",
+			validate: func(value string) error {
+				return ChannelBinding{
+					TenantID:    "tenant",
+					AppID:       "app",
+					BindingID:   value,
+					Channel:     "telegram",
+					AccountID:   "bot",
+					WebhookPath: "/channels/telegram/binding/callback",
+				}.Validate()
+			},
+		},
+		{
+			name: "Channel",
+			validate: func(value string) error {
+				return ChannelBinding{
+					TenantID:    "tenant",
+					AppID:       "app",
+					BindingID:   "binding",
+					Channel:     value,
+					AccountID:   "bot",
+					WebhookPath: "/channels/telegram/binding/callback",
+				}.Validate()
+			},
+		},
+		{
+			name: "ChannelAccountID",
+			validate: func(value string) error {
+				return InboundMessage{
+					TenantID:          "tenant",
+					AppID:             "app",
+					BindingID:         "binding",
+					Channel:           "telegram",
+					ChannelAccountID:  value,
+					PlatformMessageID: "msg",
+					ExternalUserID:    "user",
+					ConversationType:  ConversationTypeDM,
+					MessageType:       MessageTypeText,
+				}.Validate()
+			},
+		},
+		{
+			name: "PlatformMessageID",
+			validate: func(value string) error {
+				return InboundMessage{
+					TenantID:          "tenant",
+					AppID:             "app",
+					BindingID:         "binding",
+					Channel:           "telegram",
+					ChannelAccountID:  "bot",
+					PlatformMessageID: value,
+					ExternalUserID:    "user",
+					ConversationType:  ConversationTypeDM,
+					MessageType:       MessageTypeText,
+				}.Validate()
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, bad := range badValues {
+			t.Run(tt.name+"/"+bad.name, func(t *testing.T) {
+				if err := tt.validate(bad.value); err == nil {
+					t.Fatalf("expected %s to reject %q", tt.name, bad.value)
+				}
+			})
+		}
+	}
+}
+
+func TestIdempotencyStartRejectsNonNormalizedKeyFields(t *testing.T) {
+	badValues := []struct {
+		name  string
+		value string
+	}{
+		{name: "leading_space", value: " value"},
+		{name: "trailing_space", value: "value "},
+		{name: "control_nul", value: "value\x00x"},
+		{name: "control_newline", value: "value\nx"},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*IdempotencyRecord, string)
+	}{
+		{
+			name: "TenantID",
+			mutate: func(record *IdempotencyRecord, value string) {
+				record.TenantID = value
+			},
+		},
+		{
+			name: "Channel",
+			mutate: func(record *IdempotencyRecord, value string) {
+				record.Channel = value
+			},
+		},
+		{
+			name: "AccountID",
+			mutate: func(record *IdempotencyRecord, value string) {
+				record.AccountID = value
+			},
+		},
+		{
+			name: "PlatformMessageID",
+			mutate: func(record *IdempotencyRecord, value string) {
+				record.PlatformMessageID = value
+			},
+		},
+	}
+	for _, tt := range tests {
+		for _, bad := range badValues {
+			t.Run(tt.name+"/"+bad.name, func(t *testing.T) {
+				record := IdempotencyRecord{
+					TenantID:          "tenant",
+					Channel:           "telegram",
+					AccountID:         "bot",
+					PlatformMessageID: "msg",
+				}
+				tt.mutate(&record, bad.value)
+				store := NewInMemoryIdempotencyStore()
+				_, started, err := store.Start(context.Background(), record)
+				if err == nil {
+					t.Fatalf("expected %s to reject %q", tt.name, bad.value)
+				}
+				if started {
+					t.Fatalf("invalid record should not start")
+				}
+			})
+		}
+	}
+}
+
+func TestValidateInboundRequiresKnownMessageType(t *testing.T) {
+	base := InboundMessage{
+		TenantID:          "tenant",
+		AppID:             "app",
+		BindingID:         "binding",
+		Channel:           "telegram",
+		ChannelAccountID:  "bot",
+		PlatformMessageID: "msg",
+		ExternalUserID:    "user",
+		ConversationType:  ConversationTypeDM,
+	}
+	tests := []struct {
+		name        string
+		messageType MessageType
+	}{
+		{name: "empty"},
+		{name: "unknown", messageType: MessageTypeUnknown},
+		{name: "custom", messageType: MessageType("reaction")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := base
+			msg.MessageType = tt.messageType
+			if err := msg.Validate(); err == nil {
+				t.Fatalf("expected message type %q to be rejected", tt.messageType)
+			}
+		})
+	}
+}
+
+func TestValidateInboundAllowsKnownConversationalMessageTypes(t *testing.T) {
+	for _, messageType := range []MessageType{
+		MessageTypeText,
+		MessageTypeImage,
+		MessageTypeFile,
+		MessageTypeAudio,
+		MessageTypeVideo,
+	} {
+		t.Run(string(messageType), func(t *testing.T) {
+			msg := InboundMessage{
+				TenantID:          "tenant",
+				AppID:             "app",
+				BindingID:         "binding",
+				Channel:           "telegram",
+				ChannelAccountID:  "bot",
+				PlatformMessageID: "msg",
+				ExternalUserID:    "user",
+				ConversationType:  ConversationTypeDM,
+				MessageType:       messageType,
+			}
+			if err := msg.Validate(); err != nil {
+				t.Fatalf("expected %q to be accepted, got %v", messageType, err)
+			}
+		})
+	}
+}
+
+func TestValidateInboundEventRequiresRawEventType(t *testing.T) {
+	msg := InboundMessage{
+		TenantID:          "tenant",
+		AppID:             "app",
+		BindingID:         "binding",
+		Channel:           "telegram",
+		ChannelAccountID:  "bot",
+		PlatformMessageID: "event-1",
+		MessageType:       MessageTypeEvent,
+	}
+	if err := msg.Validate(); err == nil {
+		t.Fatalf("expected event without raw_event_type to fail")
+	}
+	msg.RawEventType = " "
+	if err := msg.Validate(); err == nil {
+		t.Fatalf("expected event with blank raw_event_type to fail")
 	}
 }
 
@@ -210,6 +466,20 @@ func TestAuditIDIsStableAndScoped(t *testing.T) {
 	}
 	if !strings.HasPrefix(a1, "audit_") {
 		t.Fatalf("expected audit id prefix, got %q", a1)
+	}
+}
+
+func TestUserIdentifiersAreLengthPrefixed(t *testing.T) {
+	internalA := InternalUserID("tenant\x00telegram", "user", "42")
+	internalB := InternalUserID("tenant", "telegram\x00user", "42")
+	if internalA == internalB {
+		t.Fatalf("internal user IDs should not collide on NUL-delimited inputs: %q", internalA)
+	}
+
+	hashA := UserIDHash("tenant\x00telegram", "user", "42")
+	hashB := UserIDHash("tenant", "telegram\x00user", "42")
+	if hashA == hashB {
+		t.Fatalf("user ID hashes should not collide on NUL-delimited inputs: %q", hashA)
 	}
 }
 
@@ -534,8 +804,53 @@ func TestRedactorMasksURLUserinfoWithMultipleAtSigns(t *testing.T) {
 		strings.Contains(got, "ss@word@example.com") {
 		t.Fatalf("redacted output leaked URL password fragments: %q", got)
 	}
-	if !strings.Contains(got, "postgres://user:****@example.com/db") {
+	if !strings.Contains(got, "postgres://****@example.com/db") {
 		t.Fatalf("expected URL userinfo password mask, got %q", got)
+	}
+}
+
+func TestRedactorMasksURLUserinfo(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		leaks []string
+	}{
+		{
+			name:  "username_only",
+			input: "https://token@example.com/path",
+			want:  "https://****@example.com/path",
+			leaks: []string{"token@example.com"},
+		},
+		{
+			name:  "percent_encoded",
+			input: "https://tok%40en@example.com/path",
+			want:  "https://****@example.com/path",
+			leaks: []string{"tok%40en"},
+		},
+		{
+			name:  "username_with_at",
+			input: "postgres://svc@example.com:password@db/prod",
+			want:  "postgres://****@db/prod",
+			leaks: []string{"svc@example.com", "password"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactor.Redact(tt.input)
+			if got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+			for _, leaked := range tt.leaks {
+				if strings.Contains(got, leaked) {
+					t.Fatalf("redacted output leaked %q: %q", leaked, got)
+				}
+			}
+		})
 	}
 }
 

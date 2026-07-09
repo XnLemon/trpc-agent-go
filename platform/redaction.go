@@ -22,7 +22,7 @@ var defaultRedactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|authorization|cookie):\s*([^,\s]+)`),
 	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
 	regexp.MustCompile(`(?i)(sk-[A-Za-z0-9._~+/\-]{8,})`),
-	regexp.MustCompile(`(?i)(://[^\s/?#@]+:)([^\s/?#]+)(@[^\s/?#@]+)`),
+	regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s/?#]+`),
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
 }
 
@@ -69,12 +69,8 @@ func redactMatch(match string) string {
 		return match[:strings.Index(lower, "bearer ")+7] + "****"
 	}
 	if strings.Contains(match, "://") && strings.Contains(match, "@") {
-		start := strings.Index(match, "://")
-		at := strings.LastIndex(match, "@")
-		credential := match[start+3 : at]
-		colon := strings.LastIndex(credential, ":")
-		if colon >= 0 {
-			return match[:start+3+colon+1] + "****" + match[at:]
+		if redacted, ok := redactURLUserinfo(match); ok {
+			return redacted
 		}
 	}
 	if strings.HasPrefix(match, "-----BEGIN ") {
@@ -95,4 +91,22 @@ func redactMatch(match string) string {
 		return "****"
 	}
 	return match[:4] + "****" + match[len(match)-4:]
+}
+
+func redactURLUserinfo(match string) (string, bool) {
+	scheme := strings.Index(match, "://")
+	if scheme < 0 {
+		return match, false
+	}
+	authorityStart := scheme + len("://")
+	authorityEnd := len(match)
+	if end := strings.IndexAny(match[authorityStart:], "/?# \t\r\n"); end >= 0 {
+		authorityEnd = authorityStart + end
+	}
+	at := strings.LastIndex(match[authorityStart:authorityEnd], "@")
+	if at <= 0 {
+		return match, false
+	}
+	at += authorityStart
+	return match[:authorityStart] + "****" + match[at:], true
 }
