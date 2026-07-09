@@ -428,7 +428,11 @@ func errorString(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return err.Error()
+	}
+	return redactor.Redact(err.Error())
 }
 
 func sameOutboundIdentity(existing platform.OutboundMessage, next platform.OutboundMessage) bool {
