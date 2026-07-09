@@ -188,12 +188,16 @@ func (t *ChatMetricsTracker) TrackResponse(response *model.Response) {
 			now = time.Now()
 		}
 		// Record TTFT only when the first meaningful response payload arrives.
-		t.firstTokenTimeDuration = now.Sub(t.start)
+		firstTokenDuration := now.Sub(t.start)
+		if firstTokenDuration <= 0 {
+			firstTokenDuration = time.Nanosecond
+		}
+		t.firstTokenTimeDuration = firstTokenDuration
 		t.isFirstToken = false
 
 		// Update FirstTokenDuration in TimingInfo only if not already recorded (first LLM call only).
 		if t.timingInfo != nil && t.timingInfo.FirstTokenDuration == 0 {
-			t.timingInfo.FirstTokenDuration = now.Sub(t.start)
+			t.timingInfo.FirstTokenDuration = firstTokenDuration
 		}
 
 		if response.Usage != nil {
