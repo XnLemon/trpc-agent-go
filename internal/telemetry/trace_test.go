@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,41 @@ func attrStringValue(attrs []attribute.KeyValue, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func attrBoolValue(attrs []attribute.KeyValue, key string) (bool, bool) {
+	for _, kv := range attrs {
+		if string(kv.Key) == key {
+			return kv.Value.AsBool(), true
+		}
+	}
+	return false, false
+}
+
+func spanText(span *recordingSpan) string {
+	var b strings.Builder
+	b.WriteString(span.statusDesc)
+	for _, attr := range span.attrs {
+		b.WriteString(string(attr.Key))
+		b.WriteString("=")
+		b.WriteString(attr.Value.Emit())
+		b.WriteString("\n")
+	}
+	for _, err := range span.recordedErrors {
+		if err != nil {
+			b.WriteString(err.Error())
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func requireSpanOmitsSensitiveText(t *testing.T, span *recordingSpan, secrets ...string) {
+	t.Helper()
+	got := spanText(span)
+	for _, secret := range secrets {
+		require.NotContains(t, got, secret)
+	}
 }
 
 func TestNewWorkflowSpanName(t *testing.T) {
@@ -617,6 +653,113 @@ func TestTraceToolCall_NilPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTraceToolCall_ContractOmitsRawPayloadAndError(t *testing.T) {
+	span := newRecordingSpan()
+	decl := &tool.Declaration{Name: "search", Description: "safe description"}
+	args := []byte(`{"query":"customer user text","api_key":"sk-live-secret"}`)
+	rspEvt := event.New("evt-safe", "author")
+	code := "tool_failed"
+	rspEvt.Response = &model.Response{
+		Error: &model.ResponseError{
+			Code:    &code,
+			Message: "Authorization: Bearer raw-token for customer user text",
+		},
+	}
+
+	TraceToolCall(
+		span,
+		&session.Session{ID: "session-1", UserID: "user-1"},
+		decl,
+		args,
+		rspEvt,
+		errors.New("password=raw-password token=raw-token"),
+	)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallArguments))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallResult))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyErrorMessage))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, "_OTHER_tool_failed"))
+	gotArgsPresent, ok := attrBoolValue(span.attrs, semconvtrace.KeyGenAIToolCallArgumentsPresent)
+	require.True(t, ok)
+	require.True(t, gotArgsPresent)
+	gotResultPresent, ok := attrBoolValue(span.attrs, semconvtrace.KeyGenAIToolCallResultPresent)
+	require.True(t, ok)
+	require.True(t, gotResultPresent)
+	require.Equal(t, codes.Error, span.status)
+	require.Equal(t, "_OTHER_tool_failed", span.statusDesc)
+	requireSpanOmitsSensitiveText(
+		t,
+		span,
+		"customer user text",
+		"sk-live-secret",
+		"Authorization",
+		"raw-token",
+		"raw-password",
+	)
+}
+
+func TestTraceToolCall_ContractOmitsGenericRawError(t *testing.T) {
+	span := newRecordingSpan()
+	decl := &tool.Declaration{Name: "lookup", Description: "safe description"}
+	rspEvt := event.New("evt-safe", "author")
+	rspEvt.Response = &model.Response{}
+
+	TraceToolCall(
+		span,
+		nil,
+		decl,
+		[]byte(`{"password":"raw-password"}`),
+		rspEvt,
+		errors.New("api_key=secret-key in user text"),
+	)
+
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallArguments))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallResult))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyErrorMessage))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType))
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.statusDesc)
+	requireSpanOmitsSensitiveText(t, span, "raw-password", "secret-key", "user text")
+}
+
+func TestTraceMergedToolCalls_ContractOmitsRawPayloadAndError(t *testing.T) {
+	span := newRecordingSpan()
+	rspEvt := event.New("evt-safe", "author")
+	code := "merged_failed"
+	rspEvt.Response = &model.Response{
+		Error: &model.ResponseError{
+			Code:    &code,
+			Message: "api_key=secret-key Authorization Bearer raw-token",
+		},
+		Choices: []model.Choice{{
+			Message: model.Message{Content: "private tool output"},
+		}},
+	}
+
+	TraceMergedToolCalls(span, rspEvt)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallArguments))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyGenAIToolCallResult))
+	require.False(t, hasAttrKey(span.attrs, semconvtrace.KeyErrorMessage))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, "_OTHER_merged_failed"))
+	gotArgsPresent, ok := attrBoolValue(span.attrs, semconvtrace.KeyGenAIToolCallArgumentsPresent)
+	require.True(t, ok)
+	require.False(t, gotArgsPresent)
+	gotResultPresent, ok := attrBoolValue(span.attrs, semconvtrace.KeyGenAIToolCallResultPresent)
+	require.True(t, ok)
+	require.True(t, gotResultPresent)
+	require.Equal(t, "_OTHER_merged_failed", span.statusDesc)
+	requireSpanOmitsSensitiveText(
+		t,
+		span,
+		"secret-key",
+		"Authorization",
+		"raw-token",
+		"private tool output",
+	)
 }
 
 func TestTraceMergedToolCalls_NilPaths(t *testing.T) {

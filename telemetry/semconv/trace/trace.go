@@ -139,6 +139,10 @@ const (
 	KeyGenAIToolCallArguments = "gen_ai.tool.call.arguments"
 	// KeyGenAIToolCallResult is the attribute key for tool call result.
 	KeyGenAIToolCallResult = "gen_ai.tool.call.result"
+	// KeyGenAIToolCallArgumentsPresent is the attribute key for whether tool call arguments were provided.
+	KeyGenAIToolCallArgumentsPresent = "trpc.go.agent.tool.call.arguments_present"
+	// KeyGenAIToolCallResultPresent is the attribute key for whether a tool call result was provided.
+	KeyGenAIToolCallResultPresent = "trpc.go.agent.tool.call.result_present"
 	// KeyGenAIRequestToolDefinitions is the attribute key for tool definitions.
 	KeyGenAIRequestToolDefinitions = "gen_ai.request.tool.definitions"
 
