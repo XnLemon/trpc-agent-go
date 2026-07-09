@@ -423,6 +423,7 @@ func auditFromMessage(
 		SessionID:      sessionID,
 		MessageID:      msg.PlatformMessageID,
 		RequestID:      requestIDFor(msg),
+		TraceID:        requestIDFor(msg),
 		Decision:       decision,
 		DecisionReason: redactAuditReason(reason),
 		LatencyMS:      time.Since(start).Milliseconds(),
