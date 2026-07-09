@@ -568,6 +568,10 @@ func TestNewMemorySearchSpanName(t *testing.T) {
 	require.Equal(t, OperationMemorySearch, NewMemorySearchSpanName())
 }
 
+func TestNewMemoryWriteSpanName(t *testing.T) {
+	require.Equal(t, OperationMemoryWrite, NewMemoryWriteSpanName())
+}
+
 func TestMarkToolCallSpan(t *testing.T) {
 	span := newRecordingSpan()
 	MarkToolCallSpan(span)
@@ -621,6 +625,34 @@ func TestTraceMemorySearch_ErrorDoesNotExposeRawErrorText(t *testing.T) {
 	require.NotContains(t, traceText, "raw-token")
 	require.NotContains(t, traceText, "sk-1234567890abcdef")
 	require.NotContains(t, traceText, err.Error())
+}
+
+func TestTraceMemoryWrite(t *testing.T) {
+	span := newRecordingSpan()
+
+	TraceMemoryWrite(span, MemoryWriteOperationAdd, nil)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemoryWrite))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, MemoryWriteOperationAdd))
+	require.False(t, hasAttrKey(span.attrs, "trpc.go.agent.memory.write.memory"))
+	require.False(t, hasAttrKey(span.attrs, "trpc.go.agent.memory.write.memory_id"))
+	require.NotEqual(t, codes.Error, span.status)
+}
+
+func TestTraceMemoryWrite_Error(t *testing.T) {
+	span := newRecordingSpan()
+	err := errors.New("boom")
+
+	TraceMemoryWrite(span, MemoryWriteOperationDelete, err)
+
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationMemoryWrite))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, MemoryWriteOperationDelete))
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType))
+	require.Equal(t, codes.Error, span.status)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.statusDesc)
+	require.Len(t, span.recordedErrors, 1)
+	require.Equal(t, semconvtrace.ValueDefaultErrorType, span.recordedErrors[0].Error())
+	require.NotContains(t, spanText(span), err.Error())
 }
 
 func TestNewSummarizeTaskType(t *testing.T) {
