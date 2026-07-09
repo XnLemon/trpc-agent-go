@@ -17,6 +17,10 @@ var (
 	ErrRuntimeInactive = errors.New("gateway runtime inactive")
 	// ErrRuntimeMismatch indicates that a runtime's tenant, app, binding, or inbound identifiers do not match.
 	ErrRuntimeMismatch = errors.New("gateway runtime identifiers mismatch")
+	// ErrBindingAccessDenied indicates that a binding policy rejects the inbound sender or conversation.
+	ErrBindingAccessDenied = errors.New("gateway binding access denied")
+	// ErrBindingMentionRequired indicates that a group/thread message did not mention the agent.
+	ErrBindingMentionRequired = errors.New("gateway binding mention required")
 	// ErrUnsupportedMessageType indicates that the gateway batch only supports text input.
 	ErrUnsupportedMessageType = errors.New("gateway only supports text messages")
 	// ErrEmptyText indicates that a text message does not contain usable text.
