@@ -216,11 +216,13 @@ func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 	idempotency := platform.NewInMemoryIdempotencyStore()
 	outbox := channeladapter.NewInMemoryOutboxStore()
 	audit := platform.NewInMemoryAuditSink()
+	messageEvents := platform.NewInMemoryMessageEventSink()
 	svc := NewService(
 		registry,
 		idempotency,
 		NewOutboxBackedOutboundStore(outbox),
 		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
 	)
 	wecomDM := inboundForRuntime(
 		"tenant-a",
@@ -318,6 +320,12 @@ func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 	assertOutboundQueued(t, due, groupResult.Outbound)
 	records := audit.Records()
 	require.Len(t, records, 4)
+	events := messageEvents.Events()
+	require.Len(t, events, 8)
+	eventsByTraceID := make(map[string][]platform.MessageEvent)
+	for _, event := range events {
+		eventsByTraceID[event.TraceID] = append(eventsByTraceID[event.TraceID], event)
+	}
 	for _, record := range records {
 		expectedUserHash := platform.UserIDHash(record.TenantID, record.Channel, "user-shared")
 		expectedInternalUserID := platform.InternalUserID(record.TenantID, record.Channel, "user-shared")
@@ -330,6 +338,12 @@ func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 		assert.NotContains(t, record.UserID, "user-shared")
 		assert.NotContains(t, record.UserIDHash, "user-shared")
 		assert.NotContains(t, record.InternalUserID, "user-shared")
+		traceEvents := eventsByTraceID[record.TraceID]
+		require.Len(t, traceEvents, 2)
+		assert.Equal(t, record.SessionID, traceEvents[0].SessionID)
+		assert.Equal(t, record.SessionID, traceEvents[1].SessionID)
+		assert.Equal(t, platform.MessageEventRoleUser, traceEvents[0].Role)
+		assert.Equal(t, platform.MessageEventRoleAssistant, traceEvents[1].Role)
 	}
 	assert.Equal(t, platform.IdempotencyStatusCompleted, wecomResult.Status)
 	assert.Equal(t, platform.IdempotencyStatusCompleted, telegramResult.Status)
@@ -371,6 +385,7 @@ func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.
 	idempotency := platform.NewInMemoryIdempotencyStore()
 	outbox := channeladapter.NewInMemoryOutboxStore()
 	store := NewOutboxBackedOutboundStore(outbox)
+	messageEvents := platform.NewInMemoryMessageEventSink()
 	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
 	resultRef := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1") + ":outbound:1"
 	colliding := platform.OutboundMessage{
@@ -387,7 +402,13 @@ func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.
 	_, _, err := outbox.Enqueue(ctx, colliding, channeladapter.DefaultRetryPolicy())
 	require.NoError(t, err)
 	audit := platform.NewInMemoryAuditSink()
-	svc := NewService(registry, idempotency, store, WithAuditSink(audit))
+	svc := NewService(
+		registry,
+		idempotency,
+		store,
+		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
+	)
 
 	_, err = svc.HandleInbound(ctx, msg)
 
@@ -404,6 +425,7 @@ func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.
 	require.Len(t, audit.Records(), 1)
 	assert.NotEmpty(t, audit.Records()[0].AuditID)
 	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
+	assert.Empty(t, messageEvents.Events())
 }
 
 func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing.T) {
@@ -735,7 +757,13 @@ func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	r := &recordingRunner{runErr: runnerErr}
 	registerRuntime(t, registry, "tenant-a", r)
 	store := platform.NewInMemoryIdempotencyStore()
-	svc := NewService(registry, store, NewInMemoryOutboundStore())
+	messageEvents := platform.NewInMemoryMessageEventSink()
+	svc := NewService(
+		registry,
+		store,
+		NewInMemoryOutboundStore(),
+		WithMessageEventSink(messageEvents),
+	)
 	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
 
 	_, err := svc.HandleInbound(ctx, msg)
@@ -746,6 +774,7 @@ func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, platform.IdempotencyStatusProcessing, record.Status)
 	assert.Empty(t, record.ResultRef)
+	assert.Empty(t, messageEvents.Events())
 }
 
 func TestServiceHandleInboundRunnerErrorRedactsAuditReason(t *testing.T) {
@@ -781,11 +810,13 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	r := &recordingRunner{chunks: []string{"hel", "lo"}}
 	registerRuntime(t, registry, "tenant-a", r)
 	audit := platform.NewInMemoryAuditSink()
+	messageEvents := platform.NewInMemoryMessageEventSink()
 	svc := NewService(
 		registry,
 		platform.NewInMemoryIdempotencyStore(),
 		NewInMemoryOutboundStore(),
 		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
 	)
 	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
 	msg.TraceContext = map[string]string{"request_id": "req-123"}
@@ -802,6 +833,17 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	require.Len(t, audit.Records(), 1)
 	assert.Equal(t, "req-123", audit.Records()[0].RequestID)
 	assert.Equal(t, "req-123", audit.Records()[0].TraceID)
+	events := messageEvents.Events()
+	require.Len(t, events, 2)
+	assert.Equal(t, "req-123", events[0].TraceID)
+	assert.Equal(t, "req-123", events[1].TraceID)
+	assert.Equal(t, result.SessionID, events[0].SessionID)
+	assert.Equal(t, result.SessionID, events[1].SessionID)
+	assert.Equal(t, platform.MessageEventRoleUser, events[0].Role)
+	assert.Equal(t, platform.MessageEventRoleAssistant, events[1].Role)
+	assert.Equal(t, result.Outbound.TraceID, audit.Records()[0].TraceID)
+	assert.Equal(t, result.Outbound.TraceID, events[0].TraceID)
+	assert.Equal(t, result.Outbound.TraceID, events[1].TraceID)
 }
 
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
