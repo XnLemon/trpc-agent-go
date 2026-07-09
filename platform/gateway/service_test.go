@@ -11,18 +11,23 @@ package gateway
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
+	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 func TestServiceHandleInboundIsolatesTenants(t *testing.T) {
@@ -797,6 +802,124 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	assert.Equal(t, "req-123", audit.Records()[0].TraceID)
 }
 
+func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
+	recorder := useGatewaySpanRecorder(t)
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "trace reply"}
+	registerRuntime(t, registry, "tenant-a", r)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "external-user-raw", "hello secret-free trace")
+	msg.TraceContext = map[string]string{"request_id": "req-123"}
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	spans := recorder.Ended()
+	require.Len(t, spans, 6)
+	assertSpanNames(t, spans,
+		"gateway.route",
+		"gateway.idempotency",
+		"gateway.session_lock",
+		"runner.run",
+		"im.reply",
+		"im.callback",
+	)
+	callback := spanByName(t, spans, "im.callback")
+	route := spanByName(t, spans, "gateway.route")
+	expectedTraceID := callback.SpanContext().TraceID()
+	assert.Equal(t, expectedTraceID, route.SpanContext().TraceID())
+	assert.Equal(t, callback.SpanContext().SpanID(), route.Parent().SpanID())
+	for _, name := range []string{
+		"gateway.idempotency",
+		"gateway.session_lock",
+		"runner.run",
+		"im.reply",
+	} {
+		span := spanByName(t, spans, name)
+		assert.Equal(t, expectedTraceID, span.SpanContext().TraceID(), name)
+		assert.Equal(t, route.SpanContext().SpanID(), span.Parent().SpanID(), name)
+		assert.Equal(t, "tenant-a", spanAttribute(t, span, "tenant_id"), name)
+		assert.Equal(t, "app", spanAttribute(t, span, "app_id"), name)
+		assert.Equal(t, "wecom", spanAttribute(t, span, "channel"), name)
+		assert.Equal(t, "binding", spanAttribute(t, span, "binding_id"), name)
+		assert.Equal(t, traceSafeHash("request", "req-123"), spanAttribute(t, span, "request_id_hash"), name)
+		assert.Equal(t, traceSafeHash("session", result.SessionID), spanAttribute(t, span, "session_id_hash"), name)
+		assert.Equal(t, platform.UserIDHash("tenant-a", "wecom", "external-user-raw"), spanAttribute(t, span, "user_id"), name)
+		assert.Empty(t, spanAttribute(t, span, "message"))
+		assert.Empty(t, spanAttribute(t, span, "content"))
+		assert.Empty(t, spanAttribute(t, span, "request_id"))
+		assert.Empty(t, spanAttribute(t, span, "session_id"))
+		assert.Empty(t, spanAttribute(t, span, "internal_user_id"))
+		assert.NotContains(t, spanAttributesText(span), "raw-token")
+		assert.NotContains(t, spanAttributesText(span), "external-user-raw")
+		assert.NotContains(t, spanAttributesText(span), result.SessionID)
+	}
+	assert.Equal(t, "completed", audit.Records()[0].Decision)
+	assert.Equal(t, "msg-1", audit.Records()[0].MessageID)
+}
+
+func TestSetInboundTraceAttributesDoesNotExposeSensitiveIdentifiers(t *testing.T) {
+	recorder := useGatewaySpanRecorder(t)
+	msg := inbound("tenant-a", "msg-1", "external-user-raw", "hello")
+	ctx, span := telemetrytrace.Tracer.Start(context.Background(), "gateway.route")
+	setInboundTraceAttributes(
+		span,
+		msg,
+		"tenant:tenant-a:app:app:channel:wecom:dm:external-user-raw",
+		"Authorization: Bearer raw-token",
+		"usr_raw-internal",
+	)
+	span.End()
+	_ = ctx
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	attrs := spanAttributesText(ended[0])
+	assert.Equal(t, traceSafeHash("request", "Authorization: Bearer raw-token"), spanAttribute(t, ended[0], "request_id_hash"))
+	assert.Equal(t, traceSafeHash("internal_user", "usr_raw-internal"), spanAttribute(t, ended[0], "internal_user_id_hash"))
+	assert.Empty(t, spanAttribute(t, ended[0], "request_id"))
+	assert.Empty(t, spanAttribute(t, ended[0], "session_id"))
+	assert.Empty(t, spanAttribute(t, ended[0], "internal_user_id"))
+	assert.NotContains(t, attrs, "raw-token")
+	assert.NotContains(t, attrs, "external-user-raw")
+	assert.NotContains(t, attrs, "usr_raw-internal")
+}
+
+func TestServiceHandleInboundTraceErrorDoesNotExposeSensitiveError(t *testing.T) {
+	recorder := useGatewaySpanRecorder(t)
+	rawErr := errors.New("runner failed Authorization: Bearer raw-token api_key=sk-secret")
+	registry := NewInMemoryRegistry()
+	registerRuntime(t, registry, "tenant-a", &recordingRunner{runErr: rawErr})
+	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+	msg := inbound("tenant-a", "msg-1", "external-user-raw", "hello")
+
+	_, err := svc.HandleInbound(context.Background(), msg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "raw-token")
+
+	spans := recorder.Ended()
+	runnerSpan := spanByName(t, spans, "runner.run")
+	status := runnerSpan.Status()
+	assert.Equal(t, "gateway_error", status.Description)
+	assert.NotContains(t, status.Description, "raw-token")
+	assert.NotContains(t, status.Description, "sk-secret")
+	assert.Equal(t, "gateway_error", spanAttribute(t, runnerSpan, "error.type"))
+
+	traceText := spanAttributesText(runnerSpan) + "\n" + spanEventsText(runnerSpan)
+	assert.NotContains(t, traceText, "raw-token")
+	assert.NotContains(t, traceText, "sk-secret")
+	assert.NotContains(t, traceText, "Authorization")
+	assert.NotContains(t, traceText, "api_key")
+	assert.Contains(t, traceText, "gateway_error")
+}
+
 func TestRuntimeValidateRejectsIdentifierMismatch(t *testing.T) {
 	runtime := validRuntime("tenant-a", &recordingRunner{response: "unused"})
 	runtime.Binding.TenantID = "tenant-b"
@@ -1290,4 +1413,71 @@ func requestIDFromOptions(opts ...agent.RunOption) string {
 		}
 	}
 	return runOptions.RequestID
+}
+
+func useGatewaySpanRecorder(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	originalProvider := telemetrytrace.TracerProvider
+	originalTracer := telemetrytrace.Tracer
+	telemetrytrace.TracerProvider = provider
+	telemetrytrace.Tracer = provider.Tracer("platform-gateway-test")
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		telemetrytrace.TracerProvider = originalProvider
+		telemetrytrace.Tracer = originalTracer
+	})
+	return recorder
+}
+
+func assertSpanNames(t *testing.T, spans []sdktrace.ReadOnlySpan, want ...string) {
+	t.Helper()
+	got := make([]string, 0, len(spans))
+	for _, span := range spans {
+		got = append(got, span.Name())
+	}
+	for _, name := range want {
+		assert.True(t, slices.Contains(got, name), "missing span %q in %v", name, got)
+	}
+}
+
+func spanByName(t *testing.T, spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	t.Fatalf("span %q not found", name)
+	return nil
+}
+
+func spanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, key string) string {
+	t.Helper()
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func spanAttributesText(span sdktrace.ReadOnlySpan) string {
+	var values []string
+	for _, attr := range span.Attributes() {
+		values = append(values, string(attr.Key), attr.Value.AsString())
+	}
+	return strings.Join(values, "\n")
+}
+
+func spanEventsText(span sdktrace.ReadOnlySpan) string {
+	var values []string
+	for _, event := range span.Events() {
+		values = append(values, event.Name)
+		for _, attr := range event.Attributes {
+			values = append(values, string(attr.Key), attr.Value.AsString())
+		}
+	}
+	return strings.Join(values, "\n")
 }
