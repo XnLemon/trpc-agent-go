@@ -83,8 +83,21 @@ func NewAddTool() tool.CallableTool {
 		if ep != nil {
 			opts = append(opts, memory.WithMetadata(ep))
 		}
-		err = memoryService.AddMemory(ctx, userKey, req.Memory, req.Topics, opts...)
+		writeCtx := ctx
+		var spanErr error
+		if invocation, ok := agent.InvocationFromContext(ctx); ok {
+			tracedCtx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewMemoryWriteSpanName())
+			writeCtx = tracedCtx
+			if startedSpan {
+				defer func() {
+					itelemetry.TraceMemoryWrite(span, itelemetry.MemoryWriteOperationAdd, spanErr)
+					span.End()
+				}()
+			}
+		}
+		err = memoryService.AddMemory(writeCtx, userKey, req.Memory, req.Topics, opts...)
 		if err != nil {
+			spanErr = err
 			return nil, fmt.Errorf("failed to add memory: %v", err)
 		}
 
@@ -143,8 +156,21 @@ func NewUpdateTool() tool.CallableTool {
 		if ep != nil {
 			opts = append(opts, memory.WithUpdateMetadata(ep))
 		}
-		err = memoryService.UpdateMemory(ctx, memoryKey, req.Memory, req.Topics, opts...)
+		writeCtx := ctx
+		var spanErr error
+		if invocation, ok := agent.InvocationFromContext(ctx); ok {
+			tracedCtx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewMemoryWriteSpanName())
+			writeCtx = tracedCtx
+			if startedSpan {
+				defer func() {
+					itelemetry.TraceMemoryWrite(span, itelemetry.MemoryWriteOperationUpdate, spanErr)
+					span.End()
+				}()
+			}
+		}
+		err = memoryService.UpdateMemory(writeCtx, memoryKey, req.Memory, req.Topics, opts...)
 		if err != nil {
+			spanErr = err
 			return nil, fmt.Errorf("failed to update memory: %v", err)
 		}
 
@@ -188,8 +214,21 @@ func NewDeleteTool() tool.CallableTool {
 		}
 
 		memoryKey := memory.Key{AppName: appName, UserID: userID, MemoryID: req.MemoryID}
-		err = memoryService.DeleteMemory(ctx, memoryKey)
+		writeCtx := ctx
+		var spanErr error
+		if invocation, ok := agent.InvocationFromContext(ctx); ok {
+			tracedCtx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewMemoryWriteSpanName())
+			writeCtx = tracedCtx
+			if startedSpan {
+				defer func() {
+					itelemetry.TraceMemoryWrite(span, itelemetry.MemoryWriteOperationDelete, spanErr)
+					span.End()
+				}()
+			}
+		}
+		err = memoryService.DeleteMemory(writeCtx, memoryKey)
 		if err != nil {
+			spanErr = err
 			return nil, fmt.Errorf("failed to delete memory: %v", err)
 		}
 
@@ -227,8 +266,21 @@ func NewClearTool() tool.CallableTool {
 		}
 
 		userKey := memory.UserKey{AppName: appName, UserID: userID}
-		err = memoryService.ClearMemories(ctx, userKey)
+		writeCtx := ctx
+		var spanErr error
+		if invocation, ok := agent.InvocationFromContext(ctx); ok {
+			tracedCtx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewMemoryWriteSpanName())
+			writeCtx = tracedCtx
+			if startedSpan {
+				defer func() {
+					itelemetry.TraceMemoryWrite(span, itelemetry.MemoryWriteOperationClear, spanErr)
+					span.End()
+				}()
+			}
+		}
+		err = memoryService.ClearMemories(writeCtx, userKey)
 		if err != nil {
+			spanErr = err
 			return nil, fmt.Errorf("memory clear tool: failed to clear memories: %v", err)
 		}
 

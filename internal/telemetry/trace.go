@@ -48,12 +48,21 @@ const (
 	OperationExecuteTool     = "execute_tool"
 	OperationToolCall        = "tool.call"
 	OperationMemorySearch    = "memory.search"
+	OperationMemoryWrite     = "memory.write"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
 	OperationCreateAgent     = "create_agent"
 	OperationEmbeddings      = "embeddings"
 	OperationWorkflow        = "workflow"
+)
+
+// Memory write operation values.
+const (
+	MemoryWriteOperationAdd    = "add"
+	MemoryWriteOperationUpdate = "update"
+	MemoryWriteOperationDelete = "delete"
+	MemoryWriteOperationClear  = "clear"
 )
 
 // NewChatSpanName creates a new chat span name.
@@ -76,6 +85,11 @@ func NewMemorySearchSpanName() string {
 	return OperationMemorySearch
 }
 
+// NewMemoryWriteSpanName creates the stable platform memory-write span contract name.
+func NewMemoryWriteSpanName() string {
+	return OperationMemoryWrite
+}
+
 // MarkToolCallSpan marks a span with the stable platform tool-call contract.
 func MarkToolCallSpan(span trace.Span) {
 	if !span.IsRecording() {
@@ -95,6 +109,20 @@ func TraceMemorySearch(span trace.Span, maxResults int, resultCount int, hybridS
 		attribute.Int(semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, resultCount),
 		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, hybridSearch),
 		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, deduplicate),
+	)
+	if err != nil {
+		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
+	}
+}
+
+// TraceMemoryWrite marks a memory write span with stable low-cardinality attributes.
+func TraceMemoryWrite(span trace.Span, operation string, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewMemoryWriteSpanName()),
+		attribute.String(semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, operation),
 	)
 	if err != nil {
 		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
