@@ -10,7 +10,6 @@ package platform
 
 import (
 	"context"
-	"sync"
 )
 
 // MessageEventSink stores immutable conversation events.
@@ -21,8 +20,7 @@ type MessageEventSink interface {
 
 // InMemoryMessageEventSink is a concurrency-safe message event sink for tests and demos.
 type InMemoryMessageEventSink struct {
-	mu     sync.Mutex
-	events []MessageEvent
+	events inMemoryRecords[MessageEvent]
 }
 
 // NewInMemoryMessageEventSink creates an in-memory message event sink.
@@ -32,23 +30,10 @@ func NewInMemoryMessageEventSink() *InMemoryMessageEventSink {
 
 // WriteMessageEvent writes one message event.
 func (s *InMemoryMessageEventSink) WriteMessageEvent(ctx context.Context, event MessageEvent) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := event.Validate(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.events = append(s.events, event)
-	return nil
+	return s.events.append(ctx, event, MessageEvent.Validate)
 }
 
 // Events returns a snapshot of written message events.
 func (s *InMemoryMessageEventSink) Events() []MessageEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]MessageEvent, len(s.events))
-	copy(out, s.events)
-	return out
+	return s.events.snapshot()
 }

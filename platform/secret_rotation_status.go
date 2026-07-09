@@ -135,21 +135,19 @@ func (r SecretRotationStatusReport) Validate() error {
 	if r.UpdatedAt.IsZero() {
 		return fmt.Errorf("updated_at is required")
 	}
-	for field, value := range map[string]string{
-		"app_id":         r.AppID,
-		"rotation_id":    r.RotationID,
-		"resource_type":  r.ResourceType,
-		"resource_hash":  r.ResourceHash,
-		"secret_field":   r.SecretField,
-		"operation_id":   r.OperationID,
-		"failure_reason": r.FailureReason,
-		"trace_id":       r.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return err
-		}
+	if err := validateAuditRedactedFields(
+		safeTextField{"app_id", r.AppID},
+		safeTextField{"rotation_id", r.RotationID},
+		safeTextField{"resource_type", r.ResourceType},
+		safeTextField{"resource_hash", r.ResourceHash},
+		safeTextField{"secret_field", r.SecretField},
+		safeTextField{"operation_id", r.OperationID},
+		safeTextField{"failure_reason", r.FailureReason},
+		safeTextField{"trace_id", r.TraceID},
+	); err != nil {
+		return err
 	}
-	return nil
+	return validateSecretRotationStatusGate(r)
 }
 
 func (i SecretRotationStatusInput) normalize() (SecretRotationStatusInput, error) {
@@ -194,19 +192,31 @@ func (i SecretRotationStatusInput) normalize() (SecretRotationStatusInput, error
 	if i.UpdatedAt.IsZero() {
 		return SecretRotationStatusInput{}, fmt.Errorf("updated_at is required")
 	}
-	for field, value := range map[string]string{
-		"app_id":         i.AppID,
-		"resource_type":  i.ResourceType,
-		"secret_field":   i.SecretField,
-		"operation_id":   i.OperationID,
-		"failure_reason": i.FailureReason,
-		"trace_id":       i.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return SecretRotationStatusInput{}, err
-		}
+	if err := validateAuditRedactedFields(
+		safeTextField{"app_id", i.AppID},
+		safeTextField{"resource_type", i.ResourceType},
+		safeTextField{"secret_field", i.SecretField},
+		safeTextField{"operation_id", i.OperationID},
+		safeTextField{"failure_reason", i.FailureReason},
+		safeTextField{"trace_id", i.TraceID},
+	); err != nil {
+		return SecretRotationStatusInput{}, err
 	}
 	return i, nil
+}
+
+func validateSecretRotationStatusGate(r SecretRotationStatusReport) error {
+	switch r.Status {
+	case SecretRotationStatusFailed:
+		if strings.TrimSpace(r.FailureReason) == "" {
+			return fmt.Errorf("failure_reason is required when secret rotation status is failed")
+		}
+	case SecretRotationStatusActive, SecretRotationStatusRolledBack:
+		if strings.TrimSpace(r.PreviousRef) == "" {
+			return fmt.Errorf("previous_ref is required when secret rotation status is %s", r.Status)
+		}
+	}
+	return nil
 }
 
 func (i SecretRotationStatusInput) rotationID() string {

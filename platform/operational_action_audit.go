@@ -135,20 +135,18 @@ func (i OperationalActionAuditInput) normalize() (OperationalActionAuditInput, e
 	if len(i.DetailJSON) > 0 && !json.Valid(i.DetailJSON) {
 		return OperationalActionAuditInput{}, fmt.Errorf("detail_json must be valid json")
 	}
-	for field, value := range map[string]string{
-		"app_id":                 i.AppID,
-		"action":                 string(i.Action),
-		"operation_id":           i.OperationID,
-		"resource_type":          i.ResourceType,
-		"actor_internal_user_id": i.ActorInternalUserID,
-		"decision":               string(i.Decision),
-		"decision_reason":        i.DecisionReason,
-		"request_id":             i.RequestID,
-		"trace_id":               i.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return OperationalActionAuditInput{}, err
-		}
+	if err := validateAuditRedactedFields(
+		safeTextField{"app_id", i.AppID},
+		safeTextField{"action", string(i.Action)},
+		safeTextField{"operation_id", i.OperationID},
+		safeTextField{"resource_type", i.ResourceType},
+		safeTextField{"actor_internal_user_id", i.ActorInternalUserID},
+		safeTextField{"decision", string(i.Decision)},
+		safeTextField{"decision_reason", i.DecisionReason},
+		safeTextField{"request_id", i.RequestID},
+		safeTextField{"trace_id", i.TraceID},
+	); err != nil {
+		return OperationalActionAuditInput{}, err
 	}
 	return i, nil
 }

@@ -17,6 +17,8 @@ var (
 	ErrTenantMismatch = errors.New("storage router tenant mismatch")
 	// ErrBackendNotFound indicates that a requested backend is not registered.
 	ErrBackendNotFound = errors.New("storage router backend not found")
+	// ErrBackendIDRequired indicates that a backend registration is missing its backend_id.
+	ErrBackendIDRequired = errors.New("storage router backend id required")
 	// ErrBackendTenantMismatch indicates that a registered backend belongs to another tenant.
 	ErrBackendTenantMismatch = errors.New("storage router backend tenant mismatch")
 )

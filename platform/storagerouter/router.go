@@ -10,7 +10,6 @@ package storagerouter
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 
@@ -40,6 +39,7 @@ type Router interface {
 	Artifact(ctx context.Context, tenantID string, profileID string) (artifact.Service, error)
 	Knowledge(ctx context.Context, tenantID string, profileID string) (knowledge.Knowledge, error)
 	Audit(ctx context.Context, tenantID string, profileID string) (platform.AuditSink, error)
+	Status(ctx context.Context, tenantID string, profileID string) (StatusSummary, error)
 }
 
 // InMemoryRouter is a concurrency-safe storage router for tests and demos.
@@ -87,7 +87,7 @@ func (r *InMemoryRouter) RegisterBackend(backend BackendSet) error {
 		return platform.ErrTenantIDRequired
 	}
 	if strings.TrimSpace(backend.BackendID) == "" {
-		return fmt.Errorf("backend_id is required")
+		return ErrBackendIDRequired
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -113,6 +113,7 @@ func (r *InMemoryRouter) Profile(
 	if !ok {
 		return platform.StorageProfile{}, ErrProfileNotFound
 	}
+	// Defensive for future persistent backends that may not key by tenant_id.
 	if profile.TenantID != tenantID {
 		return platform.StorageProfile{}, ErrTenantMismatch
 	}
@@ -229,6 +230,7 @@ func (r *InMemoryRouter) backend(
 	if !ok {
 		return BackendSet{}, ErrBackendNotFound
 	}
+	// Defensive for future persistent backends that may not key by tenant_id.
 	if backend.TenantID != tenantID {
 		return BackendSet{}, ErrBackendTenantMismatch
 	}

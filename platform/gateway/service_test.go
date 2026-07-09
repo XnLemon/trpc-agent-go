@@ -1036,6 +1036,19 @@ func TestCollectAssistantTextPrefersFinalFullMessage(t *testing.T) {
 	assert.Equal(t, "hello", content)
 }
 
+func TestNewReplyPlanDerivesResultRefsAndSequences(t *testing.T) {
+	first := newReplyPlan("tenant:tenant-a:message:msg-1", 0)
+	assert.Equal(t, "tenant:tenant-a:message:msg-1:outbound:1", first.ResultRef)
+	assert.Equal(t, int64(1), first.InboundSequence)
+	assert.Equal(t, 1, first.OutboundSequence)
+	assert.Equal(t, int64(2), first.AssistantSequence)
+
+	second := newReplyPlan("tenant:tenant-a:message:msg-1", 1)
+	assert.Equal(t, "tenant:tenant-a:message:msg-1:outbound:2", second.ResultRef)
+	assert.Equal(t, 2, second.OutboundSequence)
+	assert.Equal(t, int64(3), second.AssistantSequence)
+}
+
 func registerRuntime(t *testing.T, registry *InMemoryRegistry, tenantID string, r runnerStub) {
 	t.Helper()
 	err := registry.Register(validRuntime(tenantID, r))

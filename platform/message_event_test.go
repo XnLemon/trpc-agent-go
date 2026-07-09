@@ -49,6 +49,27 @@ func TestMessageEventValidateRequiresIdentity(t *testing.T) {
 	}
 }
 
+func TestMessageEventValidateRejectsNonNormalizedRoutingIdentifiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*MessageEvent)
+		want   string
+	}{
+		{name: "tenant", mutate: func(e *MessageEvent) { e.TenantID = "tenant\n" }, want: "tenant_id"},
+		{name: "app", mutate: func(e *MessageEvent) { e.AppID = " app" }, want: "app_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := validMessageEvent()
+			tt.mutate(&event)
+			if err := event.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %s routing validation, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestMessageEventValidateRejectsInvalidRoleTypeAndSequence(t *testing.T) {
 	tests := []struct {
 		name   string

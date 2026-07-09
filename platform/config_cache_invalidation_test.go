@@ -89,13 +89,9 @@ func TestNewAppConfigCacheInvalidationBuildsRollbackMarker(t *testing.T) {
 	}
 
 	whitespace := previous
-	whitespace.TenantID = " tenant "
-	whitespace.AppID = " app "
 	whitespace.Version = " v2 "
 	whitespace.Checksum = " sha256:previous "
 	whitespaceNext := next
-	whitespaceNext.TenantID = " tenant "
-	whitespaceNext.AppID = " app "
 	whitespaceNext.Version = " v1 "
 	whitespaceNext.Checksum = " sha256:next "
 	trimmed, err := NewAppConfigCacheInvalidation(AppConfigCacheInvalidationInput{
@@ -158,6 +154,13 @@ func TestNewAppConfigCacheInvalidationRejectsInvalidInputs(t *testing.T) {
 	if _, err := NewAppConfigCacheInvalidation(nextNotActive); err == nil ||
 		!strings.Contains(err.Error(), "active") {
 		t.Fatalf("expected next active status error, got %v", err)
+	}
+
+	previousNotRollback := base
+	previousNotRollback.PreviousVersion.Status = AppConfigVersionStatusReleased
+	if _, err := NewAppConfigCacheInvalidation(previousNotRollback); err == nil ||
+		!strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("expected previous rollback status error, got %v", err)
 	}
 
 	sameVersion := base

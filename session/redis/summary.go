@@ -34,13 +34,13 @@ func (s *Service) CreateSessionSummary(ctx context.Context, sess *session.Sessio
 	}
 
 	key := session.Key{AppName: sess.AppName, UserID: sess.UserID, SessionID: sess.ID}
+	if err := key.CheckSessionKey(); err != nil {
+		return fmt.Errorf("check session key failed: %w", err)
+	}
 	ctx, span := s.startSpan(ctx, "create_session_summary", key)
 	itelemetry.MarkSummaryCreateSpan(span)
 	defer span.End()
 
-	if err := key.CheckSessionKey(); err != nil {
-		return fmt.Errorf("check session key failed: %w", err)
-	}
 	if !isummary.NewSummaryDispatchPolicy(
 		s.opts.summaryFilterAllowlist,
 		s.opts.shouldCascadeFullSessionSummary(),

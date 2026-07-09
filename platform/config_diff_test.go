@@ -96,6 +96,14 @@ func TestDiffAppConfigVersionsRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestDecodeConfigBundleRejectsTrailingJSON(t *testing.T) {
+	_, err := decodeConfigBundle(`{"model_profile_id":"model"} {"tool_policy_id":"tools"}`)
+
+	if err == nil || !strings.Contains(err.Error(), "trailing json") {
+		t.Fatalf("expected trailing json rejection, got %v", err)
+	}
+}
+
 func TestDiffAppConfigVersionsReportsArrayAddRemove(t *testing.T) {
 	from := validAppConfigVersion()
 	from.ConfigBundleJSON = `{"tools":["search","ticket"]}`

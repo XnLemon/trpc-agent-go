@@ -135,6 +135,9 @@ func (i AppConfigCacheInvalidationInput) normalize() (AppConfigCacheInvalidation
 	if err := requireSameConfigOwner(i.PreviousVersion, i.NextVersion); err != nil {
 		return AppConfigCacheInvalidationInput{}, err
 	}
+	if i.PreviousVersion.Status != AppConfigVersionStatusRollback {
+		return AppConfigCacheInvalidationInput{}, fmt.Errorf("previous config version status must be rollback")
+	}
 	if i.NextVersion.Status != AppConfigVersionStatusActive {
 		return AppConfigCacheInvalidationInput{}, fmt.Errorf("next config version status must be active")
 	}

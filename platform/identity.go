@@ -11,10 +11,14 @@ package platform
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 )
+
+// ErrThreadIDRequired indicates a missing thread identifier for threaded conversations.
+var ErrThreadIDRequired = errors.New("thread_id is required")
 
 type stableIDPart struct {
 	name  string
@@ -164,7 +168,7 @@ func sessionConversationParts(
 		if err := validateRoutingIdentifier("external_group_id", externalGroupID, ErrExternalGroupIDRequired); err != nil {
 			return nil, err
 		}
-		if err := validateRoutingIdentifier("thread_id", threadID, fmt.Errorf("thread_id is required")); err != nil {
+		if err := validateRoutingIdentifier("thread_id", threadID, ErrThreadIDRequired); err != nil {
 			return nil, err
 		}
 		return []stableIDPart{

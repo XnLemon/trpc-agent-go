@@ -10,11 +10,8 @@ package runner
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -23,6 +20,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	itrace "trpc.group/trpc-go/trpc-agent-go/internal/trace"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
@@ -160,12 +158,7 @@ func runnerSessionAttrs(key session.Key, sess *session.Session) []attribute.KeyV
 }
 
 func runnerTraceSafeHash(scope string, value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(scope + "\x00" + value))
-	return scope + "_hash_" + hex.EncodeToString(sum[:])[:24]
+	return itelemetry.TraceSafeHash(scope, value)
 }
 
 func runnerTraceErrorDescription(err error) string {

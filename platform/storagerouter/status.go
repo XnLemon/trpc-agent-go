@@ -12,9 +12,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"unicode"
 
 	"trpc.group/trpc-go/trpc-agent-go/platform"
+)
+
+var (
+	statusRedactorOnce sync.Once
+	statusRedactor     *platform.Redactor
+	statusRedactorErr  error
 )
 
 // ResourceStatus describes the routing readiness of one storage resource.
@@ -125,6 +132,7 @@ func (r *InMemoryRouter) resourceStatus(
 		entry.Reason = fmt.Sprintf("%s backend is not registered", resource)
 		return entry
 	}
+	// Defensive for future persistent backends that may not key by tenant_id.
 	if backend.TenantID != profile.TenantID {
 		entry.Status = ResourceStatusBackendTenantMismatch
 		entry.Reason = fmt.Sprintf("%s backend belongs to another tenant", resource)
@@ -162,7 +170,7 @@ func safeBackendIDForStatus(backendID string) string {
 		strings.ContainsAny(backendID, "=@/\\") {
 		return ""
 	}
-	redactor, err := platform.NewRedactor()
+	redactor, err := statusBackendIDRedactor()
 	if err != nil || redactor.Redact(backendID) != backendID {
 		return ""
 	}
@@ -178,4 +186,11 @@ func safeBackendIDForStatus(backendID string) string {
 		}
 	}
 	return backendID
+}
+
+func statusBackendIDRedactor() (*platform.Redactor, error) {
+	statusRedactorOnce.Do(func() {
+		statusRedactor, statusRedactorErr = platform.NewRedactor()
+	})
+	return statusRedactor, statusRedactorErr
 }

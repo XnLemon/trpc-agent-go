@@ -147,6 +147,32 @@ func TestNewSecretRotationStatusReportRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestSecretRotationStatusReportValidateEnforcesStatusGates(t *testing.T) {
+	base := validSecretRotationStatusInput()
+	base.Status = SecretRotationStatusFailed
+	base.FailureReason = ""
+	if _, err := NewSecretRotationStatusReport(base); err == nil ||
+		!strings.Contains(err.Error(), "failure_reason") {
+		t.Fatalf("expected failed status to require failure reason, got %v", err)
+	}
+
+	base = validSecretRotationStatusInput()
+	base.Status = SecretRotationStatusActive
+	base.PreviousRef = ""
+	if _, err := NewSecretRotationStatusReport(base); err == nil ||
+		!strings.Contains(err.Error(), "previous_ref") {
+		t.Fatalf("expected active status to require previous ref, got %v", err)
+	}
+
+	base = validSecretRotationStatusInput()
+	base.Status = SecretRotationStatusRolledBack
+	base.PreviousRef = ""
+	if _, err := NewSecretRotationStatusReport(base); err == nil ||
+		!strings.Contains(err.Error(), "previous_ref") {
+		t.Fatalf("expected rolled back status to require previous ref, got %v", err)
+	}
+}
+
 func TestSecretRotationStatusReportValidateRejectsUnsafeReport(t *testing.T) {
 	generated, err := NewSecretRotationStatusReport(validSecretRotationStatusInput())
 	if err != nil {

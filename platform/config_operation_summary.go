@@ -28,8 +28,10 @@ const (
 
 // AppConfigOperationSummaryInput describes one planned or completed config operation.
 type AppConfigOperationSummaryInput struct {
-	Operation      AppConfigOperation
+	Operation AppConfigOperation
+	// PreviousActive must already carry AppConfigVersionStatusRollback.
 	PreviousActive AppConfigVersion
+	// NextActive must carry AppConfigVersionStatusActive.
 	NextActive     AppConfigVersion
 	ResultVersions []AppConfigVersion
 	OperationID    string
@@ -200,20 +202,15 @@ func (s AppConfigOperationSummary) validateConfigOperationLinks() error {
 }
 
 func (s AppConfigOperationSummary) validateConfigOperationSafeText() error {
-	for field, value := range map[string]string{
-		"summary_id":        s.SummaryID,
-		"operation_id":      s.OperationID,
-		"previous_version":  s.PreviousVersion,
-		"previous_checksum": s.PreviousChecksum,
-		"next_version":      s.NextVersion,
-		"next_checksum":     s.NextChecksum,
-		"trace_id":          s.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateAuditRedactedFields(
+		safeTextField{"summary_id", s.SummaryID},
+		safeTextField{"operation_id", s.OperationID},
+		safeTextField{"previous_version", s.PreviousVersion},
+		safeTextField{"previous_checksum", s.PreviousChecksum},
+		safeTextField{"next_version", s.NextVersion},
+		safeTextField{"next_checksum", s.NextChecksum},
+		safeTextField{"trace_id", s.TraceID},
+	)
 }
 
 func validateConfigOperationInvalidation(s AppConfigOperationSummary) error {
@@ -265,19 +262,14 @@ func validateConfigOperationGrayStatus(s AppConfigOperationSummary) error {
 }
 
 func validateConfigOperationGrayStatusText(status ConfigGrayStatusSummary) error {
-	for field, value := range map[string]string{
-		"gray_active_version":     status.ActiveVersion,
-		"gray_active_checksum":    status.ActiveChecksum,
-		"gray_candidate_version":  status.CandidateVersion,
-		"gray_candidate_checksum": status.CandidateChecksum,
-		"gray_rollback_version":   status.RollbackVersion,
-		"gray_rollback_checksum":  status.RollbackChecksum,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return err
-		}
-	}
-	return nil
+	return validateAuditRedactedFields(
+		safeTextField{"gray_active_version", status.ActiveVersion},
+		safeTextField{"gray_active_checksum", status.ActiveChecksum},
+		safeTextField{"gray_candidate_version", status.CandidateVersion},
+		safeTextField{"gray_candidate_checksum", status.CandidateChecksum},
+		safeTextField{"gray_rollback_version", status.RollbackVersion},
+		safeTextField{"gray_rollback_checksum", status.RollbackChecksum},
+	)
 }
 
 func validateConfigOperationGrayCandidate(status ConfigGrayStatusSummary) error {
@@ -349,13 +341,11 @@ func (i AppConfigOperationSummaryInput) normalize() (AppConfigOperationSummaryIn
 			return AppConfigOperationSummaryInput{}, err
 		}
 	}
-	for field, value := range map[string]string{
-		"operation_id": i.OperationID,
-		"trace_id":     i.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return AppConfigOperationSummaryInput{}, err
-		}
+	if err := validateAuditRedactedFields(
+		safeTextField{"operation_id", i.OperationID},
+		safeTextField{"trace_id", i.TraceID},
+	); err != nil {
+		return AppConfigOperationSummaryInput{}, err
 	}
 	return i, nil
 }

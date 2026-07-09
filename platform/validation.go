@@ -28,6 +28,20 @@ var rawSecretPrefixes = []string{
 	"glpat-",
 }
 
+type safeTextField struct {
+	name  string
+	value string
+}
+
+func validateAuditRedactedFields(fields ...safeTextField) error {
+	for _, field := range fields {
+		if err := validateAuditRedactedText(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateRoutingIdentifier(field, value string, requiredErr error) error {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -78,11 +92,11 @@ func (a AgentApp) Validate() error {
 
 // Validate checks that an app config version is safe to store and route.
 func (v AppConfigVersion) Validate() error {
-	if strings.TrimSpace(v.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", v.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(v.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", v.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
 	if strings.TrimSpace(v.Version) == "" {
 		return fmt.Errorf("version is required")
@@ -252,7 +266,7 @@ func (m InboundMessage) Validate() error {
 		if err := validateRoutingIdentifier("external_group_id", m.ExternalGroupID, ErrExternalGroupIDRequired); err != nil {
 			return err
 		}
-		if err := validateRoutingIdentifier("thread_id", m.ThreadID, fmt.Errorf("thread_id is required")); err != nil {
+		if err := validateRoutingIdentifier("thread_id", m.ThreadID, ErrThreadIDRequired); err != nil {
 			return err
 		}
 		return nil
@@ -295,11 +309,11 @@ func (p StorageProfile) Validate() error {
 
 // Validate checks that audit retention and sampling policy is safe to use.
 func (p AuditPolicy) Validate() error {
-	if strings.TrimSpace(p.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", p.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(p.PolicyID) == "" {
-		return fmt.Errorf("policy_id is required")
+	if err := validateRoutingIdentifier("policy_id", p.PolicyID, fmt.Errorf("policy_id is required")); err != nil {
+		return err
 	}
 	if p.RetentionDays < 0 {
 		return fmt.Errorf("retention_days must be greater than or equal to 0")
@@ -352,11 +366,11 @@ func (r AuditRecord) Validate() error {
 
 // Validate checks that a message event has required identity and safe trace metadata.
 func (e MessageEvent) Validate() error {
-	if strings.TrimSpace(e.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", e.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(e.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", e.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
 	if strings.TrimSpace(e.SessionID) == "" {
 		return fmt.Errorf("session_id is required")
@@ -407,11 +421,11 @@ func (e MessageEvent) Validate() error {
 
 // Validate checks that a usage record has required identity and safe accounting values.
 func (r UsageRecord) Validate() error {
-	if strings.TrimSpace(r.TenantID) == "" {
-		return ErrTenantIDRequired
+	if err := validateRoutingIdentifier("tenant_id", r.TenantID, ErrTenantIDRequired); err != nil {
+		return err
 	}
-	if strings.TrimSpace(r.AppID) == "" {
-		return ErrAppIDRequired
+	if err := validateRoutingIdentifier("app_id", r.AppID, ErrAppIDRequired); err != nil {
+		return err
 	}
 	for field, value := range map[string]string{
 		"user_id_hash": r.UserIDHash,

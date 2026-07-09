@@ -45,6 +45,27 @@ func TestUsageRecordValidateRequiresTenantAndApp(t *testing.T) {
 	}
 }
 
+func TestUsageRecordValidateRejectsNonNormalizedRoutingIdentifiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*UsageRecord)
+		want   string
+	}{
+		{name: "tenant", mutate: func(r *UsageRecord) { r.TenantID = "tenant\x00" }, want: "tenant_id"},
+		{name: "app", mutate: func(r *UsageRecord) { r.AppID = "app " }, want: "app_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := validUsageRecord()
+			tt.mutate(&record)
+			if err := record.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %s routing validation, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestUsageRecordValidateRejectsNegativeTokens(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -67,22 +67,20 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 	if f.TenantID == "" {
 		return AuditQueryFilter{}, ErrTenantIDRequired
 	}
-	for field, value := range map[string]string{
-		"app_id":       f.AppID,
-		"audit_id":     f.AuditID,
-		"channel":      f.Channel,
-		"binding_id":   f.BindingID,
-		"user_id_hash": f.UserIDHash,
-		"session_id":   f.SessionID,
-		"request_id":   f.RequestID,
-		"message_id":   f.MessageID,
-		"tool_name":    f.ToolName,
-		"decision":     f.Decision,
-		"trace_id":     f.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return AuditQueryFilter{}, err
-		}
+	if err := validateAuditRedactedFields(
+		safeTextField{"app_id", f.AppID},
+		safeTextField{"audit_id", f.AuditID},
+		safeTextField{"channel", f.Channel},
+		safeTextField{"binding_id", f.BindingID},
+		safeTextField{"user_id_hash", f.UserIDHash},
+		safeTextField{"session_id", f.SessionID},
+		safeTextField{"request_id", f.RequestID},
+		safeTextField{"message_id", f.MessageID},
+		safeTextField{"tool_name", f.ToolName},
+		safeTextField{"decision", f.Decision},
+		safeTextField{"trace_id", f.TraceID},
+	); err != nil {
+		return AuditQueryFilter{}, err
 	}
 	if f.Limit < 0 {
 		return AuditQueryFilter{}, fmt.Errorf("limit must be non-negative")

@@ -285,32 +285,35 @@ func (r *Reviewer) Review(ctx context.Context, req *review.Request) (*review.Dec
 }
 
 func (p *Policy) decide(req *tool.PermissionRequest, name string) (tool.PermissionDecision, string, bool) {
-	if contains(policyDenylist(p.policy), name) {
-		reason := fmt.Sprintf("tool %q is denied by platform tool policy", name)
-		return tool.DenyPermission(reason), reason, true
-	}
-	if len(normalizedList(p.policy.ToolWhitelist)) > 0 &&
-		!contains(normalizedList(p.policy.ToolWhitelist), name) {
-		reason := fmt.Sprintf("tool %q is not in platform tool whitelist", name)
-		return tool.DenyPermission(reason), reason, true
-	}
-	if isHighRisk(p.policy, req, name) {
-		switch p.policy.DangerousToolAction {
-		case platform.DangerousToolActionDeny:
-			reason := fmt.Sprintf("high-risk tool %q is denied by platform tool policy", name)
-			return tool.DenyPermission(reason), reason, true
-		case platform.DangerousToolActionAsk:
-			reason := fmt.Sprintf("high-risk tool %q requires approval by platform tool policy", name)
-			return tool.AskPermission(reason), reason, true
-		case platform.DangerousToolActionAllowWithAudit, "":
-			reason := fmt.Sprintf("high-risk tool %q allowed with audit by platform tool policy", name)
-			return tool.AllowPermission(), reason, true
-		}
-	}
-	return tool.AllowPermission(), "", false
+	return p.decideWithOptions(req, name, decisionOptions{includeMetadataRisk: true})
 }
 
 func (p *Policy) decideNameOnly(req *tool.PermissionRequest, name string) (tool.PermissionDecision, string, bool) {
+	return p.decideWithOptions(req, name, decisionOptions{
+		includeNameRisk:     true,
+		includeMetadataRisk: true,
+	})
+}
+
+func (p *Policy) decideReviewer(req *tool.PermissionRequest, name string) (tool.PermissionDecision, string, bool) {
+	return p.decideWithOptions(req, name, decisionOptions{
+		includeNameRisk:     true,
+		includeMetadataRisk: true,
+		reviewerAsk:         true,
+	})
+}
+
+type decisionOptions struct {
+	includeNameRisk     bool
+	includeMetadataRisk bool
+	reviewerAsk         bool
+}
+
+func (p *Policy) decideWithOptions(
+	req *tool.PermissionRequest,
+	name string,
+	opts decisionOptions,
+) (tool.PermissionDecision, string, bool) {
 	if contains(policyDenylist(p.policy), name) {
 		reason := fmt.Sprintf("tool %q is denied by platform tool policy", name)
 		return tool.DenyPermission(reason), reason, true
@@ -320,12 +323,16 @@ func (p *Policy) decideNameOnly(req *tool.PermissionRequest, name string) (tool.
 		reason := fmt.Sprintf("tool %q is not in platform tool whitelist", name)
 		return tool.DenyPermission(reason), reason, true
 	}
-	if contains(normalizedList(p.policy.HighRiskTools), name) {
+	if p.highRiskForDecision(req, name, opts) {
 		switch p.policy.DangerousToolAction {
 		case platform.DangerousToolActionDeny:
 			reason := fmt.Sprintf("high-risk tool %q is denied by platform tool policy", name)
 			return tool.DenyPermission(reason), reason, true
 		case platform.DangerousToolActionAsk:
+			if opts.reviewerAsk {
+				reason := fmt.Sprintf("high-risk tool %q approved by platform approval reviewer", name)
+				return tool.AllowPermission(), reason, true
+			}
 			reason := fmt.Sprintf("high-risk tool %q requires approval by platform tool policy", name)
 			return tool.AskPermission(reason), reason, true
 		case platform.DangerousToolActionAllowWithAudit, "":
@@ -333,39 +340,22 @@ func (p *Policy) decideNameOnly(req *tool.PermissionRequest, name string) (tool.
 			return tool.AllowPermission(), reason, true
 		}
 	}
-	if req != nil && req.Metadata != (tool.ToolMetadata{}) {
-		return p.decide(req, name)
-	}
 	return tool.AllowPermission(), "", false
 }
 
-func (p *Policy) decideReviewer(req *tool.PermissionRequest, name string) (tool.PermissionDecision, string, bool) {
-	if contains(policyDenylist(p.policy), name) {
-		reason := fmt.Sprintf("tool %q is denied by platform tool policy", name)
-		return tool.DenyPermission(reason), reason, true
+func (p *Policy) highRiskForDecision(
+	req *tool.PermissionRequest,
+	name string,
+	opts decisionOptions,
+) bool {
+	if (opts.includeNameRisk || opts.includeMetadataRisk) &&
+		contains(normalizedList(p.policy.HighRiskTools), name) {
+		return true
 	}
-	if len(normalizedList(p.policy.ToolWhitelist)) > 0 &&
-		!contains(normalizedList(p.policy.ToolWhitelist), name) {
-		reason := fmt.Sprintf("tool %q is not in platform tool whitelist", name)
-		return tool.DenyPermission(reason), reason, true
+	if !opts.includeMetadataRisk || req == nil || req.Metadata == (tool.ToolMetadata{}) {
+		return false
 	}
-	if contains(normalizedList(p.policy.HighRiskTools), name) {
-		switch p.policy.DangerousToolAction {
-		case platform.DangerousToolActionDeny:
-			reason := fmt.Sprintf("high-risk tool %q is denied by platform tool policy", name)
-			return tool.DenyPermission(reason), reason, true
-		case platform.DangerousToolActionAsk:
-			reason := fmt.Sprintf("high-risk tool %q approved by platform approval reviewer", name)
-			return tool.AllowPermission(), reason, true
-		case platform.DangerousToolActionAllowWithAudit, "":
-			reason := fmt.Sprintf("high-risk tool %q allowed with audit by platform tool policy", name)
-			return tool.AllowPermission(), reason, true
-		}
-	}
-	if req != nil && req.Metadata != (tool.ToolMetadata{}) {
-		return p.decide(req, name)
-	}
-	return tool.AllowPermission(), "", false
+	return req.Metadata.Destructive || !req.Metadata.ReadOnly || req.Metadata.OpenWorld
 }
 
 func validate(policy platform.ToolPolicy) error {
@@ -646,14 +636,6 @@ func argumentDigest(args []byte) (string, int) {
 	}
 	sum := sha256.Sum256(args)
 	return "sha256:" + hex.EncodeToString(sum[:]), len(args)
-}
-
-func argumentSummary(args []byte) string {
-	digest, size := argumentDigest(args)
-	if digest == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s bytes:%d", digest, size)
 }
 
 var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)

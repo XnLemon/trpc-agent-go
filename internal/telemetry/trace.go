@@ -12,9 +12,14 @@
 package telemetry
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -31,6 +36,10 @@ import (
 	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+const traceSafeHashEnvKey = "TRPC_AGENT_TRACE_HASH_KEY"
+
+var traceSafeHashDefaultKey = []byte("trpc-agent-go-trace-safe-hash-v1")
 
 // grpcDial is a package-level variable to allow test injection of a custom dialer.
 // In production, this points to grpc.Dial.
@@ -151,6 +160,27 @@ func recordSafeSpanError(span trace.Span, err error, fallback string) {
 	span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 	span.SetStatus(codes.Error, errorType)
 	span.RecordError(errors.New(errorType))
+}
+
+// TraceSafeHash returns a stable low-cardinality HMAC digest for trace attributes.
+func TraceSafeHash(scope string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, traceSafeHashKey())
+	_, _ = mac.Write([]byte(scope))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(value))
+	return scope + "_hash_" + hex.EncodeToString(mac.Sum(nil))[:24]
+}
+
+func traceSafeHashKey() []byte {
+	key := strings.TrimSpace(os.Getenv(traceSafeHashEnvKey))
+	if key == "" {
+		return traceSafeHashDefaultKey
+	}
+	return []byte(key)
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.

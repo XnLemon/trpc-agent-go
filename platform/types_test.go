@@ -197,6 +197,34 @@ func TestValidateRejectsNonNormalizedRoutingIdentifiers(t *testing.T) {
 			},
 		},
 		{
+			name: "AppConfigVersionTenantID",
+			validate: func(value string) error {
+				version := validAppConfigVersion()
+				version.TenantID = value
+				return version.Validate()
+			},
+		},
+		{
+			name: "AppConfigVersionAppID",
+			validate: func(value string) error {
+				version := validAppConfigVersion()
+				version.AppID = value
+				return version.Validate()
+			},
+		},
+		{
+			name: "AuditPolicyTenantID",
+			validate: func(value string) error {
+				return AuditPolicy{TenantID: value, PolicyID: "policy"}.Validate()
+			},
+		},
+		{
+			name: "AuditPolicyPolicyID",
+			validate: func(value string) error {
+				return AuditPolicy{TenantID: "tenant", PolicyID: value}.Validate()
+			},
+		},
+		{
 			name: "BindingID",
 			validate: func(value string) error {
 				return ChannelBinding{

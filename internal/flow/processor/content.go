@@ -3110,23 +3110,26 @@ func (p *ContentRequestProcessor) getAdaptivePreloadMemoryMessage(
 		HybridSearch: true,
 	}
 	searchCtx, span, startedSpan := itrace.StartSpan(ctx, inv, itelemetry.NewMemorySearchSpanName())
-	memories, err := reader.SearchMemories(
+	var memories []*memory.Entry
+	if startedSpan {
+		defer func() {
+			itelemetry.TraceMemorySearch(
+				span,
+				searchOpts.MaxResults,
+				len(memories),
+				searchOpts.HybridSearch,
+				searchOpts.Deduplicate,
+				err,
+			)
+			span.End()
+		}()
+	}
+	memories, err = reader.SearchMemories(
 		searchCtx,
 		userKey,
 		query,
 		memory.WithSearchOptions(searchOpts),
 	)
-	if startedSpan {
-		itelemetry.TraceMemorySearch(
-			span,
-			searchOpts.MaxResults,
-			len(memories),
-			searchOpts.HybridSearch,
-			searchOpts.Deduplicate,
-			err,
-		)
-		span.End()
-	}
 	if err != nil {
 		log.WarnfContext(ctx, "Failed to search memories for preload: %v", err)
 		return p.loadPreloadMemoryMessage(ctx, inv, reader, userKey, budget)

@@ -41,6 +41,12 @@ func TestNormalizeStorageMigrationModeAcceptsDocumentedModes(t *testing.T) {
 	}
 }
 
+func TestNormalizeStorageMigrationModeRejectsUnknown(t *testing.T) {
+	if _, err := NormalizeStorageMigrationMode("dual-read"); err == nil {
+		t.Fatalf("expected unknown migration mode error")
+	}
+}
+
 func TestStorageProfileValidateRejectsInvalidMigrationMode(t *testing.T) {
 	profile := StorageProfile{
 		TenantID:      "tenant",

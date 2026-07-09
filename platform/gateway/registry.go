@@ -125,9 +125,9 @@ func (r *InMemoryRegistry) Lookup(
 
 func runtimeKey(tenantID, appID, bindingID, channel, accountID string) string {
 	return platform.IdempotencyKey(
-		tenantID+"|"+appID,
+		tenantID,
 		channel,
 		accountID,
-		bindingID,
+		platform.IdempotencyKey(appID, channel, accountID, bindingID),
 	)
 }

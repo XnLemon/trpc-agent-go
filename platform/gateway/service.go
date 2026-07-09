@@ -10,8 +10,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +21,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
@@ -418,7 +417,7 @@ func (s *Service) writeReply(
 	input inboundRunInput,
 	content string,
 ) (Result, error) {
-	resultRef := input.Key + ":outbound:1"
+	reply := newReplyPlan(input.Key, 0)
 	outbound := platform.OutboundMessage{
 		TenantID:                 msg.TenantID,
 		BindingID:                msg.BindingID,
@@ -427,14 +426,14 @@ func (s *Service) writeReply(
 		ReplyToPlatformMessageID: msg.PlatformMessageID,
 		Kind:                     platform.OutboundMessageKindText,
 		Content:                  content,
-		Sequence:                 1,
-		DedupKey:                 resultRef,
+		Sequence:                 reply.OutboundSequence,
+		DedupKey:                 reply.ResultRef,
 		TraceID:                  input.RequestID,
 	}
 	replyCtx, replySpan := telemetrytrace.Tracer.Start(routeCtx, "im.reply")
 	defer replySpan.End()
 	setInboundTraceAttributes(replySpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
-	if err := s.outboundStore.Save(replyCtx, resultRef, outbound); err != nil {
+	if err := s.outboundStore.Save(replyCtx, reply.ResultRef, outbound); err != nil {
 		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
 		return Result{}, err
@@ -444,7 +443,7 @@ func (s *Service) writeReply(
 		outbound,
 		channeladapter.RetryPolicyForBinding(runtime.Binding),
 	); err != nil {
-		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, input.Key, resultRef); markErr != nil {
+		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
 			recordSpanError(replySpan, markErr)
 			return Result{}, markErr
 		}
@@ -452,22 +451,40 @@ func (s *Service) writeReply(
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
-	record, err := s.idempotencyStore.Complete(replyCtx, input.Key, resultRef)
+	record, err := s.idempotencyStore.Complete(replyCtx, input.Key, reply.ResultRef)
 	if err != nil {
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
-	s.writeMessageEvent(auditCtx, messageEventFromInbound(msg, input.SessionID, input.Key, input.RequestID, 1, input.Start))
-	s.writeMessageEvent(auditCtx, messageEventFromAssistant(msg, input.SessionID, resultRef, input.RequestID, 2, s.now()))
+	s.writeMessageEvent(auditCtx, messageEventFromInbound(msg, input.SessionID, input.Key, input.RequestID, reply.InboundSequence, input.Start))
+	s.writeMessageEvent(auditCtx, messageEventFromAssistant(msg, input.SessionID, reply.ResultRef, input.RequestID, reply.AssistantSequence, s.now()))
 	s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
 	return Result{
 		RequestID:   input.RequestID,
 		SessionID:   input.SessionID,
-		ResultRef:   resultRef,
+		ResultRef:   reply.ResultRef,
 		Status:      record.Status,
 		Outbound:    outbound,
 		CompletedAt: s.now(),
 	}, nil
+}
+
+type replyPlan struct {
+	ResultRef         string
+	InboundSequence   int64
+	OutboundSequence  int
+	AssistantSequence int64
+}
+
+func newReplyPlan(idempotencyKey string, outboundIndex int) replyPlan {
+	outboundSequence := outboundIndex + 1
+	inboundSequence := int64(1)
+	return replyPlan{
+		ResultRef:         fmt.Sprintf("%s:outbound:%d", idempotencyKey, outboundSequence),
+		InboundSequence:   inboundSequence,
+		OutboundSequence:  outboundSequence,
+		AssistantSequence: inboundSequence + int64(outboundSequence),
+	}
 }
 
 func (s *Service) writeRejectAudit(
@@ -763,12 +780,7 @@ func setInboundTraceAttributes(
 }
 
 func traceSafeHash(scope string, value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(scope + "\x00" + value))
-	return scope + "_hash_" + hex.EncodeToString(sum[:])[:24]
+	return itelemetry.TraceSafeHash(scope, value)
 }
 
 func recordSpanError(span oteltrace.Span, err error) {

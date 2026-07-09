@@ -91,6 +91,26 @@ func TestNewOperationalActionAuditRecordBuildsSafeRecord(t *testing.T) {
 	}
 }
 
+func TestNewOperationalActionAuditRecordAcceptsInternalActorOnly(t *testing.T) {
+	input := validOperationalActionAuditInput()
+	input.ActorUserID = ""
+	input.ActorInternalUserID = "usr_internal"
+
+	record, err := NewOperationalActionAuditRecord(input)
+	if err != nil {
+		t.Fatalf("new internal actor operational action audit: %v", err)
+	}
+	if record.InternalUserID != "usr_internal" {
+		t.Fatalf("expected internal actor identity, got %+v", record)
+	}
+	if record.UserIDHash == "" || !strings.HasPrefix(record.UserIDHash, "user_hash_") {
+		t.Fatalf("expected internal actor hash, got %+v", record)
+	}
+	if strings.Contains(record.UserIDHash, "usr_internal") {
+		t.Fatalf("user hash leaked internal actor id: %q", record.UserIDHash)
+	}
+}
+
 func TestNewOperationalActionAuditRecordRejectsInvalidInputs(t *testing.T) {
 	base := validOperationalActionAuditInput()
 

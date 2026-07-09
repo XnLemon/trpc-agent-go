@@ -23,6 +23,8 @@ import (
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
+var _ Router = (*InMemoryRouter)(nil)
+
 func TestRouterResolvesTenantStorageServices(t *testing.T) {
 	ctx := context.Background()
 	router := NewInMemoryRouter()
@@ -58,6 +60,14 @@ func TestRouterResolvesTenantStorageServices(t *testing.T) {
 	assert.Same(t, artifactSvc, gotArtifact)
 	assert.Same(t, knowledgeSvc, gotKnowledge)
 	assert.Same(t, auditSink, gotAudit)
+}
+
+func TestRegisterBackendRequiresBackendID(t *testing.T) {
+	router := NewInMemoryRouter()
+
+	err := router.RegisterBackend(BackendSet{TenantID: "tenant-a", BackendID: " "})
+
+	require.ErrorIs(t, err, ErrBackendIDRequired)
 }
 
 func TestRouterRejectsCrossTenantLookup(t *testing.T) {
