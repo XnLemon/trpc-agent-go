@@ -12,6 +12,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 type stableIDPart struct {
@@ -188,4 +190,13 @@ func stableID(prefix string, parts ...stableIDPart) string {
 
 func writeStablePart(hash interface{ Write([]byte) (int, error) }, name, value string) {
 	fmt.Fprintf(hash, "%d:%s=%d:%s;", len(name), name, len(value), value)
+}
+
+func shortHash(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func escapeKeyPart(value string) string {
+	return url.PathEscape(strings.TrimSpace(value))
 }

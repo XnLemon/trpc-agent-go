@@ -190,7 +190,7 @@ func TestOutboxRedactsFailureDetails(t *testing.T) {
 		}
 	}
 	if !strings.Contains(failed.LastError, "Authorization: ****") ||
-		!strings.Contains(failed.LastError, "user:****@") ||
+		!strings.Contains(failed.LastError, "postgres://****@example/db") ||
 		!strings.Contains(failed.LastError, "api_key=****") {
 		t.Fatalf("expected redacted diagnostic, got %q", failed.LastError)
 	}
