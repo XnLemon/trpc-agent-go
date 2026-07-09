@@ -16,11 +16,13 @@ import (
 var defaultRedactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(Authorization:\s*Basic\s+)[A-Za-z0-9._~+/\-]+=*`),
 	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
+	regexp.MustCompile(`(?im)(authorization\s*:\s*)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*=\s*)[^\r\n]+`),
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|authorization|cookie)=([^&\s]+)`),
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|authorization|cookie):\s*([^,\s]+)`),
 	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
 	regexp.MustCompile(`(?i)(sk-[A-Za-z0-9._~+/\-]{8,})`),
-	regexp.MustCompile(`(?i)(://[^:\s/]+:)([^@\s]+)(@)`),
+	regexp.MustCompile(`(?i)(://[^\s/?#@]+:)([^\s/?#]+)(@[^\s/?#@]+)`),
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
 }
 

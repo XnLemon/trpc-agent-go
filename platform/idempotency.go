@@ -10,6 +10,8 @@ package platform
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,16 +51,14 @@ func (s *InMemoryIdempotencyStore) Start(
 	if err := ctx.Err(); err != nil {
 		return IdempotencyRecord{}, false, err
 	}
-	key := record.IdempotencyKey
-	if key == "" {
-		key = IdempotencyKey(
-			record.TenantID,
-			record.Channel,
-			record.AccountID,
-			record.PlatformMessageID,
-		)
-		record.IdempotencyKey = key
+	key, err := canonicalIdempotencyKey(record)
+	if err != nil {
+		return IdempotencyRecord{}, false, err
 	}
+	if record.IdempotencyKey != "" && record.IdempotencyKey != key {
+		return IdempotencyRecord{}, false, fmt.Errorf("idempotency_key does not match canonical key")
+	}
+	record.IdempotencyKey = key
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.records[key]; ok {
@@ -78,7 +78,7 @@ func (s *InMemoryIdempotencyStore) Complete(
 	key string,
 	resultRef string,
 ) (IdempotencyRecord, error) {
-	return s.update(ctx, key, IdempotencyStatusCompleted, resultRef)
+	return s.update(ctx, key, IdempotencyStatusProcessing, IdempotencyStatusCompleted, resultRef)
 }
 
 // MarkReplyFailed marks a completed record as needing outbound retry.
@@ -87,7 +87,7 @@ func (s *InMemoryIdempotencyStore) MarkReplyFailed(
 	key string,
 	resultRef string,
 ) (IdempotencyRecord, error) {
-	return s.update(ctx, key, IdempotencyStatusReplyFailed, resultRef)
+	return s.update(ctx, key, IdempotencyStatusCompleted, IdempotencyStatusReplyFailed, resultRef)
 }
 
 // Get returns the record for key.
@@ -107,6 +107,7 @@ func (s *InMemoryIdempotencyStore) Get(
 func (s *InMemoryIdempotencyStore) update(
 	ctx context.Context,
 	key string,
+	from IdempotencyStatus,
 	status IdempotencyStatus,
 	resultRef string,
 ) (IdempotencyRecord, error) {
@@ -119,9 +120,37 @@ func (s *InMemoryIdempotencyStore) update(
 	if !ok {
 		return IdempotencyRecord{}, ErrIdempotencyRecordNotFound
 	}
+	if record.Status != from {
+		return IdempotencyRecord{}, fmt.Errorf(
+			"invalid idempotency transition from %q to %q",
+			record.Status,
+			status,
+		)
+	}
 	record.Status = status
 	record.ResultRef = resultRef
 	record.UpdatedAt = s.now()
 	s.records[key] = record
 	return record, nil
+}
+
+func canonicalIdempotencyKey(record IdempotencyRecord) (string, error) {
+	if strings.TrimSpace(record.TenantID) == "" {
+		return "", ErrTenantIDRequired
+	}
+	if strings.TrimSpace(record.Channel) == "" {
+		return "", ErrChannelRequired
+	}
+	if strings.TrimSpace(record.AccountID) == "" {
+		return "", ErrAccountIDRequired
+	}
+	if strings.TrimSpace(record.PlatformMessageID) == "" {
+		return "", ErrPlatformMessageIDRequired
+	}
+	return IdempotencyKey(
+		record.TenantID,
+		record.Channel,
+		record.AccountID,
+		record.PlatformMessageID,
+	), nil
 }
