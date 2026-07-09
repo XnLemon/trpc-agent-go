@@ -45,6 +45,7 @@ const (
 	SpanNamePrefixExecuteTool = "execute_tool"
 
 	OperationExecuteTool     = "execute_tool"
+	OperationToolCall        = "tool.call"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
@@ -61,6 +62,19 @@ func NewChatSpanName(requestModel string) string {
 // NewExecuteToolSpanName creates a new execute tool span name.
 func NewExecuteToolSpanName(toolName string) string {
 	return OperationExecuteTool + " " + toolName
+}
+
+// NewToolCallSpanName creates the stable platform tool-call span contract name.
+func NewToolCallSpanName() string {
+	return OperationToolCall
+}
+
+// MarkToolCallSpan marks a span with the stable platform tool-call contract.
+func MarkToolCallSpan(span trace.Span) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewToolCallSpanName()))
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.
@@ -201,7 +215,9 @@ func TraceToolCall(span trace.Span, sess *session.Session, declaration *tool.Dec
 		attribute.String(semconvtrace.KeyGenAIOperationName, OperationExecuteTool),
 		attribute.String(semconvtrace.KeyGenAIToolName, declaration.Name),
 		attribute.String(semconvtrace.KeyGenAIToolDescription, declaration.Description),
+		attribute.Bool(semconvtrace.KeyGenAIToolCallArgumentsPresent, len(args) > 0),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil {
 		span.SetAttributes(attribute.String(semconvtrace.KeyEventID, rspEvent.ID))
 	}
@@ -212,23 +228,24 @@ func TraceToolCall(span trace.Span, sess *session.Session, declaration *tool.Dec
 		)
 	}
 
-	// args is json-encoded.
-	setBytesAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallArguments, args)
 	if rspEvent != nil && rspEvent.Response != nil {
 		if e := rspEvent.Response.Error; e != nil {
-			span.SetStatus(codes.Error, e.Message)
-			span.SetAttributes(responseErrorAttributes(e, semconvtrace.ValueDefaultErrorType)...)
+			errorType := FormatResponseErrorLabel(e, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		} else if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, ToErrorType(err, semconvtrace.ValueDefaultErrorType)), attribute.String(semconvtrace.KeyErrorMessage, err.Error()))
+			errorType := ToErrorType(err, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		}
 
 		if callIDs := rspEvent.Response.GetToolCallIDs(); len(callIDs) > 0 {
 			span.SetAttributes(attribute.String(semconvtrace.KeyGenAIToolCallID, callIDs[0]))
 		}
-		setStringAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallResult, "<not json serializable>", func() ([]byte, error) {
-			return json.Marshal(rspEvent.Response)
-		})
+		span.SetAttributes(attribute.Bool(
+			semconvtrace.KeyGenAIToolCallResultPresent,
+			toolCallResultPresent(rspEvent.Response),
+		))
 	}
 
 	// Setting empty llm request and response (as UI expect these) while not
@@ -251,21 +268,23 @@ func TraceMergedToolCalls(span trace.Span, rspEvent *event.Event) {
 		attribute.String(semconvtrace.KeyGenAIOperationName, OperationExecuteTool),
 		attribute.String(semconvtrace.KeyGenAIToolName, ToolNameMergedTools),
 		attribute.String(semconvtrace.KeyGenAIToolDescription, "(merged tools)"),
-		attribute.String(semconvtrace.KeyGenAIToolCallArguments, "N/A"),
+		attribute.Bool(semconvtrace.KeyGenAIToolCallArgumentsPresent, false),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil && rspEvent.Response != nil {
 		if callIDs := rspEvent.Response.GetToolCallIDs(); len(callIDs) > 0 {
 			span.SetAttributes(attribute.String(semconvtrace.KeyGenAIToolCallID, callIDs[0]))
 		}
 		if e := rspEvent.Response.Error; e != nil {
-			span.SetStatus(codes.Error, e.Message)
-			span.SetAttributes(responseErrorAttributes(e, semconvtrace.ValueDefaultErrorType)...)
+			errorType := FormatResponseErrorLabel(e, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		}
 		span.SetAttributes(attribute.String(semconvtrace.KeyEventID, rspEvent.ID))
-
-		setStringAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallResult, "<not json serializable>", func() ([]byte, error) {
-			return json.Marshal(rspEvent.Response)
-		})
+		span.SetAttributes(attribute.Bool(
+			semconvtrace.KeyGenAIToolCallResultPresent,
+			toolCallResultPresent(rspEvent.Response),
+		))
 	}
 
 	// Setting empty llm request and response (as UI expect these) while not
@@ -274,6 +293,16 @@ func TraceMergedToolCalls(span trace.Span, rspEvent *event.Event) {
 		attribute.String(semconvtrace.KeyLLMRequest, "{}"),
 		attribute.String(semconvtrace.KeyLLMResponse, "{}"),
 	)
+}
+
+func toolCallResultPresent(rsp *model.Response) bool {
+	if rsp == nil {
+		return false
+	}
+	if rsp.Error != nil {
+		return true
+	}
+	return len(rsp.Choices) > 0
 }
 
 func resolveInvocationAgentIdentity(invoke *agent.Invocation) (string, string) {

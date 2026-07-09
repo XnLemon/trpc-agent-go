@@ -781,6 +781,7 @@ func (p *FunctionCallResponseProcessor) executeSingleToolCallSequentialResult(
 ) (toolResult, error) {
 	ctx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewExecuteToolSpanName(toolCall.Function.Name))
 	if startedSpan {
+		itelemetry.MarkToolCallSpan(span)
 		defer span.End()
 	}
 	startTime := time.Now()
@@ -1023,6 +1024,7 @@ func (p *FunctionCallResponseProcessor) runParallelToolCall(
 	// Trace the tool execution for observability.
 	ctx, span, startedSpan := itrace.StartSpan(ctx, invocation, itelemetry.NewExecuteToolSpanName(tc.Function.Name))
 	if startedSpan {
+		itelemetry.MarkToolCallSpan(span)
 		defer span.End()
 	}
 	startTime := time.Now()
