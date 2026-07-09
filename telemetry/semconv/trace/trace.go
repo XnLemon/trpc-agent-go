@@ -46,6 +46,8 @@ const (
 	KeyTRPCAgentGoUserID = "trpc_go_agent.user.id"
 	// KeyTRPCAgentGoClientTimeToFirstToken is the attribute key for time to first token metric.
 	KeyTRPCAgentGoClientTimeToFirstToken = "trpc_agent_go.client.time_to_first_token" // #nosec G101 - this is a metric key name, not a credential.
+	// KeyTRPCAgentGoTraceSpan is the stable platform trace span contract name.
+	KeyTRPCAgentGoTraceSpan = "trpc.go.agent.trace.span"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"

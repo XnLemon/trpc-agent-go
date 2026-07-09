@@ -524,6 +524,16 @@ func TestNewExecuteToolSpanName(t *testing.T) {
 	}
 }
 
+func TestNewToolCallSpanName(t *testing.T) {
+	require.Equal(t, OperationToolCall, NewToolCallSpanName())
+}
+
+func TestMarkToolCallSpan(t *testing.T) {
+	span := newRecordingSpan()
+	MarkToolCallSpan(span)
+	require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
+}
+
 func TestNewSummarizeTaskType(t *testing.T) {
 	tests := []struct {
 		name string
@@ -598,6 +608,7 @@ func TestTraceToolCall_NilPaths(t *testing.T) {
 			// Verify basic attributes are always set
 			require.True(t, hasAttr(span.attrs, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent))
 			require.True(t, hasAttr(span.attrs, semconvtrace.KeyGenAIOperationName, OperationExecuteTool))
+			require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
 			require.True(t, hasAttr(span.attrs, semconvtrace.KeyGenAIToolName, "test_tool"))
 
 			// Verify error status when err is provided
@@ -630,6 +641,7 @@ func TestTraceMergedToolCalls_NilPaths(t *testing.T) {
 
 			// Verify basic attributes are always set
 			require.True(t, hasAttr(span.attrs, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent))
+			require.True(t, hasAttr(span.attrs, semconvtrace.KeyTRPCAgentGoTraceSpan, OperationToolCall))
 			require.True(t, hasAttr(span.attrs, semconvtrace.KeyGenAIToolName, ToolNameMergedTools))
 		})
 	}

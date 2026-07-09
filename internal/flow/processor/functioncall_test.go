@@ -35,6 +35,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	skillstate "trpc.group/trpc-go/trpc-agent-go/skill"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
@@ -90,6 +91,22 @@ func useSpanRecorder(t *testing.T) *tracetest.SpanRecorder {
 		trace.Tracer = originalTracer
 	})
 	return recorder
+}
+
+func requireRecordedSpanAttribute(t *testing.T, recorder *tracetest.SpanRecorder, spanName, key, value string) {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() != spanName {
+			continue
+		}
+		for _, attr := range span.Attributes() {
+			if string(attr.Key) == key && attr.Value.AsString() == value {
+				return
+			}
+		}
+		t.Fatalf("span %q missing attribute %s=%q; attributes=%v", spanName, key, value, span.Attributes())
+	}
+	t.Fatalf("span %q not recorded; ended spans=%v", spanName, recorder.Ended())
 }
 
 // Minimal callable tool used by tests above
@@ -226,6 +243,90 @@ func TestExecuteSingleToolCallSequential_DisableTracingSkipsSpanCreation(t *test
 	require.Empty(t, recorder.Ended())
 }
 
+func TestExecuteSingleToolCallSequential_RecordsToolCallTraceContract(t *testing.T) {
+	recorder := useSpanRecorder(t)
+	p := NewFunctionCallResponseProcessor(false, nil)
+	invocation := agent.NewInvocation()
+	invocation.AgentName = "test-agent"
+	response := &model.Response{Model: "mock-model"}
+	toolCall := model.ToolCall{
+		ID: "call-1",
+		Function: model.FunctionDefinitionParam{
+			Name:      "echo",
+			Arguments: []byte(`{"message":"hello"}`),
+		},
+	}
+	tools := map[string]tool.Tool{
+		"echo": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "echo"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return "ok", nil
+			},
+		},
+	}
+
+	toolEvent, err := p.executeSingleToolCallSequential(
+		context.Background(),
+		invocation,
+		response,
+		tools,
+		make(chan *event.Event, 1),
+		0,
+		toolCall,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, toolEvent)
+	requireRecordedSpanAttribute(
+		t,
+		recorder,
+		"execute_tool echo",
+		semconvtrace.KeyTRPCAgentGoTraceSpan,
+		"tool.call",
+	)
+}
+
+func TestExecuteSingleToolCallSequential_RecordsToolCallTraceContractOnCriticalError(t *testing.T) {
+	recorder := useSpanRecorder(t)
+	p := NewFunctionCallResponseProcessor(false, nil)
+	invocation := agent.NewInvocation()
+	invocation.AgentName = "test-agent"
+	response := &model.Response{Model: "mock-model"}
+	toolCall := model.ToolCall{
+		ID: "call-stop",
+		Function: model.FunctionDefinitionParam{
+			Name:      "stopper",
+			Arguments: []byte(`{}`),
+		},
+	}
+	tools := map[string]tool.Tool{
+		"stopper": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "stopper"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return nil, agent.NewStopError("stop")
+			},
+		},
+	}
+
+	toolEvent, err := p.executeSingleToolCallSequential(
+		context.Background(),
+		invocation,
+		response,
+		tools,
+		make(chan *event.Event, 1),
+		0,
+		toolCall,
+	)
+	require.Error(t, err)
+	require.Nil(t, toolEvent)
+	requireRecordedSpanAttribute(
+		t,
+		recorder,
+		"execute_tool stopper",
+		semconvtrace.KeyTRPCAgentGoTraceSpan,
+		"tool.call",
+	)
+}
+
 func TestExecuteSingleToolCallSequential_AddsToolCallArgsExtension(t *testing.T) {
 	const (
 		originalArgs = `{"action":"query"}`
@@ -326,6 +427,124 @@ func TestExecuteToolCallsInParallel_DisableTracingSkipsSpanCreation(t *testing.T
 	require.NoError(t, err)
 	require.NotNil(t, mergedEvent)
 	require.Empty(t, recorder.Ended())
+}
+
+func TestExecuteToolCallsInParallel_RecordsToolCallTraceContract(t *testing.T) {
+	recorder := useSpanRecorder(t)
+	p := NewFunctionCallResponseProcessor(true, nil)
+	invocation := agent.NewInvocation()
+	invocation.AgentName = "test-agent"
+	response := &model.Response{Model: "mock-model"}
+	toolCalls := []model.ToolCall{
+		{
+			ID: "call-1",
+			Function: model.FunctionDefinitionParam{
+				Name:      "tool1",
+				Arguments: []byte(`{}`),
+			},
+		},
+		{
+			ID: "call-2",
+			Function: model.FunctionDefinitionParam{
+				Name:      "tool2",
+				Arguments: []byte(`{}`),
+			},
+		},
+	}
+	tools := map[string]tool.Tool{
+		"tool1": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "tool1"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return "ok-1", nil
+			},
+		},
+		"tool2": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "tool2"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return "ok-2", nil
+			},
+		},
+	}
+
+	mergedEvent, err := p.executeToolCallsInParallel(
+		context.Background(),
+		invocation,
+		response,
+		toolCalls,
+		tools,
+		make(chan *event.Event, 2),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, mergedEvent)
+	for _, spanName := range []string{
+		"execute_tool tool1",
+		"execute_tool tool2",
+		"execute_tool (merged tools)",
+	} {
+		requireRecordedSpanAttribute(
+			t,
+			recorder,
+			spanName,
+			semconvtrace.KeyTRPCAgentGoTraceSpan,
+			"tool.call",
+		)
+	}
+}
+
+func TestExecuteToolCallsInParallel_RecordsToolCallTraceContractOnCriticalError(t *testing.T) {
+	recorder := useSpanRecorder(t)
+	p := NewFunctionCallResponseProcessor(true, nil)
+	invocation := agent.NewInvocation()
+	invocation.AgentName = "test-agent"
+	response := &model.Response{Model: "mock-model"}
+	toolCalls := []model.ToolCall{
+		{
+			ID: "call-stop",
+			Function: model.FunctionDefinitionParam{
+				Name:      "stopper",
+				Arguments: []byte(`{}`),
+			},
+		},
+		{
+			ID: "call-ok",
+			Function: model.FunctionDefinitionParam{
+				Name:      "echo",
+				Arguments: []byte(`{}`),
+			},
+		},
+	}
+	tools := map[string]tool.Tool{
+		"stopper": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "stopper"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return nil, agent.NewStopError("stop")
+			},
+		},
+		"echo": &mockCallableTool{
+			declaration: &tool.Declaration{Name: "echo"},
+			callFn: func(context.Context, []byte) (any, error) {
+				return "ok", nil
+			},
+		},
+	}
+
+	mergedEvent, err := p.executeToolCallsInParallel(
+		context.Background(),
+		invocation,
+		response,
+		toolCalls,
+		tools,
+		make(chan *event.Event, 2),
+	)
+	require.Error(t, err)
+	require.NotNil(t, mergedEvent)
+	requireRecordedSpanAttribute(
+		t,
+		recorder,
+		"execute_tool stopper",
+		semconvtrace.KeyTRPCAgentGoTraceSpan,
+		"tool.call",
+	)
 }
 
 type mockInvocationStateDeltaTool struct {

@@ -45,6 +45,7 @@ const (
 	SpanNamePrefixExecuteTool = "execute_tool"
 
 	OperationExecuteTool     = "execute_tool"
+	OperationToolCall        = "tool.call"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
@@ -61,6 +62,19 @@ func NewChatSpanName(requestModel string) string {
 // NewExecuteToolSpanName creates a new execute tool span name.
 func NewExecuteToolSpanName(toolName string) string {
 	return OperationExecuteTool + " " + toolName
+}
+
+// NewToolCallSpanName creates the stable platform tool-call span contract name.
+func NewToolCallSpanName() string {
+	return OperationToolCall
+}
+
+// MarkToolCallSpan marks a span with the stable platform tool-call contract.
+func MarkToolCallSpan(span trace.Span) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewToolCallSpanName()))
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.
@@ -202,6 +216,7 @@ func TraceToolCall(span trace.Span, sess *session.Session, declaration *tool.Dec
 		attribute.String(semconvtrace.KeyGenAIToolName, declaration.Name),
 		attribute.String(semconvtrace.KeyGenAIToolDescription, declaration.Description),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil {
 		span.SetAttributes(attribute.String(semconvtrace.KeyEventID, rspEvent.ID))
 	}
@@ -253,6 +268,7 @@ func TraceMergedToolCalls(span trace.Span, rspEvent *event.Event) {
 		attribute.String(semconvtrace.KeyGenAIToolDescription, "(merged tools)"),
 		attribute.String(semconvtrace.KeyGenAIToolCallArguments, "N/A"),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil && rspEvent.Response != nil {
 		if callIDs := rspEvent.Response.GetToolCallIDs(); len(callIDs) > 0 {
 			span.SetAttributes(attribute.String(semconvtrace.KeyGenAIToolCallID, callIDs[0]))
