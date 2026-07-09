@@ -508,6 +508,33 @@ func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	assert.Empty(t, record.ResultRef)
 }
 
+func TestServiceHandleInboundRunnerErrorRedactsAuditReason(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("runner failed Authorization: Bearer raw-token api_key=sk-1234567890abcdef")
+	r := &recordingRunner{runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, runnerErr)
+	records := audit.Records()
+	require.Len(t, records, 1)
+	assert.Equal(t, "runner_error", records[0].Decision)
+	assert.NotContains(t, records[0].DecisionReason, "raw-token")
+	assert.NotContains(t, records[0].DecisionReason, "sk-1234567890abcdef")
+	assert.Contains(t, records[0].DecisionReason, "Authorization: ****")
+	assert.Contains(t, records[0].DecisionReason, "api_key=****")
+}
+
 func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()

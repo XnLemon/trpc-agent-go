@@ -424,7 +424,7 @@ func auditFromMessage(
 		MessageID:      msg.PlatformMessageID,
 		RequestID:      requestIDFor(msg),
 		Decision:       decision,
-		DecisionReason: reason,
+		DecisionReason: redactAuditReason(reason),
 		LatencyMS:      time.Since(start).Milliseconds(),
 		CreatedAt:      time.Now(),
 	}
@@ -432,6 +432,17 @@ func auditFromMessage(
 		record.ErrorType = fmt.Sprintf("%T", err)
 	}
 	return record
+}
+
+func redactAuditReason(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return reason
+	}
+	return redactor.Redact(reason)
 }
 
 func (s *Service) writeAudit(ctx context.Context, record platform.AuditRecord) {
