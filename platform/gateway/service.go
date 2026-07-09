@@ -10,15 +10,22 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
+	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 // Service handles normalized inbound platform messages.
@@ -97,64 +104,91 @@ func (s *Service) HandleInbound(
 	msg platform.InboundMessage,
 ) (Result, error) {
 	start := s.now()
+	ctx, callbackSpan := telemetrytrace.Tracer.Start(ctx, "im.callback")
+	defer callbackSpan.End()
+	setInboundTraceAttributes(callbackSpan, msg, "", "", "")
 	if err := s.validateService(); err != nil {
+		recordSpanError(callbackSpan, err)
 		return Result{}, err
 	}
 	if err := msg.Validate(); err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		recordSpanError(callbackSpan, err)
 		return Result{}, err
 	}
-	runtime, ok, err := s.registry.Lookup(ctx, msg)
+	requestID := requestIDFor(msg)
+	setInboundTraceAttributes(callbackSpan, msg, "", requestID, "")
+	routeCtx, routeSpan := telemetrytrace.Tracer.Start(ctx, "gateway.route")
+	defer routeSpan.End()
+	setInboundTraceAttributes(routeSpan, msg, "", requestID, "")
+	runtime, ok, err := s.registry.Lookup(routeCtx, msg)
 	if err != nil {
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	if !ok {
 		err := ErrRuntimeNotFound
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	if err := runtime.Validate(); err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	if !runtime.matchesInbound(msg) {
 		err := ErrRuntimeMismatch
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	text, err := inboundText(msg)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	sessionID, err := platform.SessionIDForInbound(msg)
 	if err != nil {
+		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	internalUserID := platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID)
-	requestID := requestIDFor(msg)
+	setInboundTraceAttributes(callbackSpan, msg, sessionID, requestID, internalUserID)
+	setInboundTraceAttributes(routeSpan, msg, sessionID, requestID, internalUserID)
 	key := platform.IdempotencyKey(
 		msg.TenantID,
 		msg.Channel,
 		msg.ChannelAccountID,
 		msg.PlatformMessageID,
 	)
-	existing, ok, err := s.idempotencyStore.Get(ctx, key)
+	idempotencyCtx, idempotencySpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.idempotency")
+	setInboundTraceAttributes(idempotencySpan, msg, sessionID, requestID, internalUserID)
+	existing, ok, err := s.idempotencyStore.Get(idempotencyCtx, key)
 	if err != nil {
+		recordSpanError(idempotencySpan, err)
+		idempotencySpan.End()
 		return Result{}, err
 	}
 	if ok {
+		idempotencySpan.End()
 		return s.duplicateResult(ctx, existing)
 	}
-	lease, acquired, err := s.leaseStore.Acquire(ctx, SessionLeaseKey{
+	leaseCtx, leaseSpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.session_lock")
+	setInboundTraceAttributes(leaseSpan, msg, sessionID, requestID, internalUserID)
+	lease, acquired, err := s.leaseStore.Acquire(leaseCtx, SessionLeaseKey{
 		TenantID:  msg.TenantID,
 		AppID:     msg.AppID,
 		SessionID: sessionID,
 	})
 	if err != nil {
+		recordSpanError(leaseSpan, err)
+		leaseSpan.End()
 		return Result{}, err
 	}
 	if !acquired {
+		leaseSpan.End()
 		return Result{
 			RequestID:  requestID,
 			SessionID:  sessionID,
@@ -167,7 +201,8 @@ func (s *Service) HandleInbound(
 		defer cancel()
 		_ = lease.Release(cleanupCtx)
 	}()
-	record, started, err := s.idempotencyStore.Start(ctx, platform.IdempotencyRecord{
+	leaseSpan.End()
+	record, started, err := s.idempotencyStore.Start(idempotencyCtx, platform.IdempotencyRecord{
 		TenantID:          msg.TenantID,
 		Channel:           msg.Channel,
 		AccountID:         msg.ChannelAccountID,
@@ -177,14 +212,20 @@ func (s *Service) HandleInbound(
 		SessionID:         sessionID,
 	})
 	if err != nil {
+		recordSpanError(idempotencySpan, err)
+		idempotencySpan.End()
 		return Result{}, err
 	}
 	if !started {
+		idempotencySpan.End()
 		return s.duplicateResult(ctx, record)
 	}
+	idempotencySpan.End()
 
+	runnerCtx, runnerSpan := telemetrytrace.Tracer.Start(routeCtx, "runner.run")
+	setInboundTraceAttributes(runnerSpan, msg, sessionID, requestID, internalUserID)
 	ch, err := runtime.Runner.Run(
-		ctx,
+		runnerCtx,
 		internalUserID,
 		sessionID,
 		model.NewUserMessage(text),
@@ -192,13 +233,18 @@ func (s *Service) HandleInbound(
 	)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
+		recordSpanError(runnerSpan, err)
+		runnerSpan.End()
 		return Result{}, err
 	}
 	content, err := collectAssistantText(ctx, ch)
 	if err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
+		recordSpanError(runnerSpan, err)
+		runnerSpan.End()
 		return Result{}, err
 	}
+	runnerSpan.End()
 	resultRef := key + ":outbound:1"
 	outbound := platform.OutboundMessage{
 		TenantID:                 msg.TenantID,
@@ -212,25 +258,36 @@ func (s *Service) HandleInbound(
 		DedupKey:                 resultRef,
 		TraceID:                  requestID,
 	}
-	if err := s.outboundStore.Save(ctx, resultRef, outbound); err != nil {
+	replyCtx, replySpan := telemetrytrace.Tracer.Start(routeCtx, "im.reply")
+	setInboundTraceAttributes(replySpan, msg, sessionID, requestID, internalUserID)
+	if err := s.outboundStore.Save(replyCtx, resultRef, outbound); err != nil {
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
+		recordSpanError(replySpan, err)
+		replySpan.End()
 		return Result{}, err
 	}
 	if err := s.outboundStore.Enqueue(
-		ctx,
+		replyCtx,
 		outbound,
 		channeladapter.RetryPolicyForBinding(runtime.Binding),
 	); err != nil {
-		if _, markErr := s.idempotencyStore.MarkReplyFailed(ctx, key, resultRef); markErr != nil {
+		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, key, resultRef); markErr != nil {
+			recordSpanError(replySpan, markErr)
+			replySpan.End()
 			return Result{}, markErr
 		}
 		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
+		recordSpanError(replySpan, err)
+		replySpan.End()
 		return Result{}, err
 	}
-	record, err = s.idempotencyStore.Complete(ctx, key, resultRef)
+	record, err = s.idempotencyStore.Complete(replyCtx, key, resultRef)
 	if err != nil {
+		recordSpanError(replySpan, err)
+		replySpan.End()
 		return Result{}, err
 	}
+	replySpan.End()
 	s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "completed", "", start, nil))
 	return Result{
 		RequestID:   requestID,
@@ -407,4 +464,46 @@ func (s *Service) writeAudit(ctx context.Context, record platform.AuditRecord) {
 		return
 	}
 	_ = s.auditSink.WriteAudit(ctx, record)
+}
+
+func setInboundTraceAttributes(
+	span interface{ SetAttributes(...attribute.KeyValue) },
+	msg platform.InboundMessage,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+) {
+	attrs := []attribute.KeyValue{
+		attribute.String("tenant_id", msg.TenantID),
+		attribute.String("app_id", msg.AppID),
+		attribute.String("channel", msg.Channel),
+		attribute.String("binding_id", msg.BindingID),
+		attribute.String("request_id_hash", traceSafeHash("request", requestID)),
+		attribute.String("user_id", platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID)),
+		attribute.String("user_id_hash", platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID)),
+	}
+	if sessionID != "" {
+		attrs = append(attrs, attribute.String("session_id_hash", traceSafeHash("session", sessionID)))
+	}
+	if internalUserID != "" {
+		attrs = append(attrs, attribute.String("internal_user_id_hash", traceSafeHash("internal_user", internalUserID)))
+	}
+	span.SetAttributes(attrs...)
+}
+
+func traceSafeHash(scope string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(scope + "\x00" + value))
+	return scope + "_hash_" + hex.EncodeToString(sum[:])[:24]
+}
+
+func recordSpanError(span oteltrace.Span, err error) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }
