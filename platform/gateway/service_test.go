@@ -795,6 +795,8 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 
 	require.Len(t, r.calls, 1)
 	assert.Equal(t, "req-123", r.calls[0].requestID)
+	assert.True(t, r.calls[0].runOptions.LatencyDiagnosticsEnabled)
+	assert.False(t, r.calls[0].runOptions.LatencyDiagnosticsEmitEvents)
 	assert.Equal(t, "hello", result.Outbound.Content)
 	assert.Equal(t, "req-123", result.Outbound.TraceID)
 	require.Len(t, audit.Records(), 1)
@@ -1149,10 +1151,11 @@ type runnerStub interface {
 }
 
 type runnerCall struct {
-	userID    string
-	sessionID string
-	message   model.Message
-	requestID string
+	userID     string
+	sessionID  string
+	message    model.Message
+	requestID  string
+	runOptions agent.RunOptions
 }
 
 type recordingRunner struct {
@@ -1192,11 +1195,13 @@ func (r *recordingRunner) Run(
 	if r.runErr != nil {
 		return nil, r.runErr
 	}
+	runOptions := runOptionsFromOptions(runOpts...)
 	r.calls = append(r.calls, runnerCall{
-		userID:    userID,
-		sessionID: sessionID,
-		message:   message,
-		requestID: requestIDFromOptions(runOpts...),
+		userID:     userID,
+		sessionID:  sessionID,
+		message:    message,
+		requestID:  runOptions.RequestID,
+		runOptions: runOptions,
 	})
 	out := make(chan *event.Event, 2)
 	go func() {
@@ -1255,11 +1260,13 @@ func (r *blockingRunner) Run(
 	if r.done == nil {
 		r.done = make(chan string, 1)
 	}
+	runOptions := runOptionsFromOptions(runOpts...)
 	r.calls = append(r.calls, runnerCall{
-		userID:    userID,
-		sessionID: sessionID,
-		message:   message,
-		requestID: requestIDFromOptions(runOpts...),
+		userID:     userID,
+		sessionID:  sessionID,
+		message:    message,
+		requestID:  runOptions.RequestID,
+		runOptions: runOptions,
 	})
 	r.startedOnce.Do(func() {
 		close(r.started)
@@ -1293,11 +1300,13 @@ func (r *cancelingRunner) Run(
 	message model.Message,
 	runOpts ...agent.RunOption,
 ) (<-chan *event.Event, error) {
+	runOptions := runOptionsFromOptions(runOpts...)
 	r.calls = append(r.calls, runnerCall{
-		userID:    userID,
-		sessionID: sessionID,
-		message:   message,
-		requestID: requestIDFromOptions(runOpts...),
+		userID:     userID,
+		sessionID:  sessionID,
+		message:    message,
+		requestID:  runOptions.RequestID,
+		runOptions: runOptions,
 	})
 	r.cancel()
 	return nil, r.runErr
@@ -1324,11 +1333,13 @@ func (r *hangingFirstRunner) Run(
 ) (<-chan *event.Event, error) {
 	r.mu.Lock()
 	callIndex := len(r.calls)
+	runOptions := runOptionsFromOptions(runOpts...)
 	r.calls = append(r.calls, runnerCall{
-		userID:    userID,
-		sessionID: sessionID,
-		message:   message,
-		requestID: requestIDFromOptions(runOpts...),
+		userID:     userID,
+		sessionID:  sessionID,
+		message:    message,
+		requestID:  runOptions.RequestID,
+		runOptions: runOptions,
 	})
 	if callIndex == 0 {
 		r.startedOnce.Do(func() {
@@ -1406,13 +1417,17 @@ func chunkEvent(content string, partial bool) *event.Event {
 }
 
 func requestIDFromOptions(opts ...agent.RunOption) string {
+	return runOptionsFromOptions(opts...).RequestID
+}
+
+func runOptionsFromOptions(opts ...agent.RunOption) agent.RunOptions {
 	var runOptions agent.RunOptions
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&runOptions)
 		}
 	}
-	return runOptions.RequestID
+	return runOptions
 }
 
 func useGatewaySpanRecorder(t *testing.T) *tracetest.SpanRecorder {

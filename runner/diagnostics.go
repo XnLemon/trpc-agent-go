@@ -10,6 +10,11 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -95,8 +100,9 @@ func finishRunnerLatencySpan(span oteltrace.Span, started bool, err error) {
 		return
 	}
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		description := runnerTraceErrorDescription(err)
+		span.RecordError(errors.New(description))
+		span.SetStatus(codes.Error, description)
 	}
 	span.End()
 }
@@ -110,9 +116,9 @@ func runnerRunAttrs(
 ) []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.String("runner.app", appName),
-		attribute.String("runner.user_id", userID),
-		attribute.String("runner.session_id", sessionID),
-		attribute.String("runner.request_id", ro.RequestID),
+		attribute.String("runner.user_id_hash", runnerTraceSafeHash("user", userID)),
+		attribute.String("runner.session_id_hash", runnerTraceSafeHash("session", sessionID)),
+		attribute.String("runner.request_id_hash", runnerTraceSafeHash("request", ro.RequestID)),
 		attribute.String("runner.message.role", string(message.Role)),
 		attribute.Bool("runner.message.has_payload", model.HasPayload(message)),
 		attribute.Int("runner.options.seed_messages", len(ro.Messages)),
@@ -126,15 +132,15 @@ func runnerInvocationAttrs(inv *agent.Invocation) []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.String("runner.invocation_id", inv.InvocationID),
 		attribute.String("runner.agent", inv.AgentName),
-		attribute.String("runner.request_id", inv.RunOptions.RequestID),
+		attribute.String("runner.request_id_hash", runnerTraceSafeHash("request", inv.RunOptions.RequestID)),
 	}
 }
 
 func runnerSessionAttrs(key session.Key, sess *session.Session) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		attribute.String("runner.session.app", key.AppName),
-		attribute.String("runner.session.user", key.UserID),
-		attribute.String("runner.session.id", key.SessionID),
+		attribute.String("runner.session.user_hash", runnerTraceSafeHash("user", key.UserID)),
+		attribute.String("runner.session.id_hash", runnerTraceSafeHash("session", key.SessionID)),
 	}
 	if sess != nil {
 		attrs = append(
@@ -151,6 +157,22 @@ func runnerSessionAttrs(key session.Key, sess *session.Session) []attribute.KeyV
 		)
 	}
 	return attrs
+}
+
+func runnerTraceSafeHash(scope string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(scope + "\x00" + value))
+	return scope + "_hash_" + hex.EncodeToString(sum[:])[:24]
+}
+
+func runnerTraceErrorDescription(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", err)
 }
 
 func runnerSessionSummaryCount(sess *session.Session) int {
