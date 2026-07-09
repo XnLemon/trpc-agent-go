@@ -126,6 +126,26 @@ func NewBudgetDecisionAuditRecord(input BudgetDecisionAuditInput) (AuditRecord, 
 
 // Validate checks that the summary is complete and safe to expose.
 func (s BudgetDecisionSummary) Validate() error {
+	if err := s.validateIdentityAndText(); err != nil {
+		return err
+	}
+	expected, err := s.validateEstimateAndQuota()
+	if err != nil {
+		return err
+	}
+	if err := s.validateOutcome(expected); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.RedactionVersion) == "" {
+		return fmt.Errorf("redaction_version is required")
+	}
+	if s.CreatedAt.IsZero() {
+		return fmt.Errorf("created_at is required")
+	}
+	return validateAuditRedactedText("redacted_detail_ref", s.DetailRef())
+}
+
+func (s BudgetDecisionSummary) validateIdentityAndText() error {
 	if strings.TrimSpace(s.TenantID) == "" {
 		return ErrTenantIDRequired
 	}
@@ -147,6 +167,10 @@ func (s BudgetDecisionSummary) Validate() error {
 	if strings.TrimSpace(s.Reason) == "" && s.Outcome != BudgetDecisionOutcomeAllow {
 		return fmt.Errorf("reason is required for non-allow budget outcomes")
 	}
+	return nil
+}
+
+func (s BudgetDecisionSummary) validateEstimateAndQuota() (BudgetDecision, error) {
 	estimate := UsageEstimate{
 		PromptTokens:     s.EstimatedPrompt,
 		CompletionTokens: s.EstimatedCompletion,
@@ -154,23 +178,27 @@ func (s BudgetDecisionSummary) Validate() error {
 		Cost:             s.EstimatedCost,
 	}
 	if err := validateUsageEstimate(estimate); err != nil {
-		return err
+		return BudgetDecision{}, err
 	}
 	canonicalTotal, err := estimate.effectiveTotalTokens()
 	if err != nil {
-		return err
+		return BudgetDecision{}, err
 	}
 	if canonicalTotal != s.EstimatedTotalTokens {
-		return fmt.Errorf("estimated_total_tokens must match effective total tokens")
+		return BudgetDecision{}, fmt.Errorf("estimated_total_tokens must match effective total tokens")
 	}
 	quota := s.quota()
 	if err := quota.Validate(); err != nil {
-		return err
+		return BudgetDecision{}, err
 	}
 	expected, err := quota.Check(estimate)
 	if err != nil {
-		return err
+		return BudgetDecision{}, err
 	}
+	return expected, nil
+}
+
+func (s BudgetDecisionSummary) validateOutcome(expected BudgetDecision) error {
 	switch s.Outcome {
 	case BudgetDecisionOutcomeAllow:
 		if !expected.Allowed {
@@ -206,15 +234,6 @@ func (s BudgetDecisionSummary) Validate() error {
 		return fmt.Errorf("outcome is required")
 	default:
 		return fmt.Errorf("invalid budget decision outcome %q", s.Outcome)
-	}
-	if strings.TrimSpace(s.RedactionVersion) == "" {
-		return fmt.Errorf("redaction_version is required")
-	}
-	if s.CreatedAt.IsZero() {
-		return fmt.Errorf("created_at is required")
-	}
-	if err := validateAuditRedactedText("redacted_detail_ref", s.DetailRef()); err != nil {
-		return err
 	}
 	return nil
 }

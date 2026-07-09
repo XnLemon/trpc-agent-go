@@ -807,7 +807,7 @@ func TestServiceHandleInboundRunnerErrorRedactsAuditReason(t *testing.T) {
 func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
-	r := &recordingRunner{chunks: []string{"hel", "lo"}}
+	r := &recordingRunner{chunks: []string{"he", "llo"}}
 	registerRuntime(t, registry, "tenant-a", r)
 	audit := platform.NewInMemoryAuditSink()
 	messageEvents := platform.NewInMemoryMessageEventSink()
@@ -1025,8 +1025,8 @@ func TestCollectAssistantTextStopsAtRunnerCompletion(t *testing.T) {
 
 func TestCollectAssistantTextPrefersFinalFullMessage(t *testing.T) {
 	ch := make(chan *event.Event, 3)
-	ch <- chunkEvent("hel", true)
-	ch <- chunkEvent("lo", true)
+	ch <- chunkEvent("he", true)
+	ch <- chunkEvent("llo", true)
 	ch <- responseEvent("hello", true)
 	close(ch)
 

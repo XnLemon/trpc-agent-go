@@ -140,6 +140,16 @@ func NewBackendMigrationStatusReport(input BackendMigrationStatusInput) (Backend
 
 // Validate checks that a backend migration status report is safe to expose or store.
 func (r BackendMigrationStatusReport) Validate() error {
+	if err := r.validateBackendMigrationIdentity(); err != nil {
+		return err
+	}
+	if err := r.validateBackendMigrationState(); err != nil {
+		return err
+	}
+	return r.validateBackendMigrationSafeText()
+}
+
+func (r BackendMigrationStatusReport) validateBackendMigrationIdentity() error {
 	if strings.TrimSpace(r.TenantID) == "" {
 		return ErrTenantIDRequired
 	}
@@ -175,6 +185,10 @@ func (r BackendMigrationStatusReport) Validate() error {
 	if strings.TrimSpace(r.SourceBackendID) == strings.TrimSpace(r.TargetBackendID) {
 		return fmt.Errorf("source_backend_id and target_backend_id must differ")
 	}
+	return nil
+}
+
+func (r BackendMigrationStatusReport) validateBackendMigrationState() error {
 	mode, err := NormalizeStorageMigrationMode(string(r.MigrationMode))
 	if err != nil {
 		return err
@@ -200,6 +214,10 @@ func (r BackendMigrationStatusReport) Validate() error {
 	if r.UpdatedAt.IsZero() {
 		return fmt.Errorf("updated_at is required")
 	}
+	return nil
+}
+
+func (r BackendMigrationStatusReport) validateBackendMigrationSafeText() error {
 	for field, value := range map[string]string{
 		"app_id":            r.AppID,
 		"profile_id":        r.ProfileID,

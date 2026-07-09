@@ -130,36 +130,12 @@ func (s *Service) HandleInbound(
 	routeCtx, routeSpan := telemetrytrace.Tracer.Start(ctx, "gateway.route")
 	defer routeSpan.End()
 	setInboundTraceAttributes(routeSpan, msg, "", requestID, "")
-	runtime, ok, err := s.registry.Lookup(routeCtx, msg)
+	runtime, err := s.lookupRuntime(routeCtx, ctx, routeSpan, msg, start)
 	if err != nil {
-		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
-	if !ok {
-		err := ErrRuntimeNotFound
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
-		recordSpanError(routeSpan, err)
-		return Result{}, err
-	}
-	if err := runtime.Validate(); err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
-		recordSpanError(routeSpan, err)
-		return Result{}, err
-	}
-	if !runtime.matchesInbound(msg) {
-		err := ErrRuntimeMismatch
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
-		recordSpanError(routeSpan, err)
-		return Result{}, err
-	}
-	if err := authorizeBinding(runtime.Binding, msg); err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
-		return Result{}, err
-	}
-	text, err := inboundText(msg)
+	text, err := s.validateInboundContent(ctx, routeSpan, msg, start)
 	if err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
-		recordSpanError(routeSpan, err)
 		return Result{}, err
 	}
 	sessionID, err := platform.SessionIDForInbound(msg)
@@ -176,45 +152,159 @@ func (s *Service) HandleInbound(
 		msg.ChannelAccountID,
 		msg.PlatformMessageID,
 	)
+	record, handled, result, err := s.startInboundRun(
+		routeCtx,
+		ctx,
+		msg,
+		sessionID,
+		requestID,
+		internalUserID,
+		key,
+	)
+	if err != nil {
+		return Result{}, err
+	}
+	if handled {
+		return result, nil
+	}
+	defer s.releaseSessionLease(ctx, record.SessionLease)
+
+	return s.runAndReply(
+		routeCtx,
+		ctx,
+		runtime,
+		msg,
+		inboundRunInput{
+			Text:           text,
+			SessionID:      sessionID,
+			InternalUserID: internalUserID,
+			RequestID:      requestID,
+			Key:            key,
+			Start:          start,
+		},
+	)
+}
+
+type inboundRunRecord struct {
+	Record       platform.IdempotencyRecord
+	SessionLease SessionLease
+}
+
+type inboundRunInput struct {
+	Text           string
+	SessionID      string
+	InternalUserID string
+	RequestID      string
+	Key            string
+	Start          time.Time
+}
+
+func (s *Service) lookupRuntime(
+	routeCtx context.Context,
+	auditCtx context.Context,
+	routeSpan oteltrace.Span,
+	msg platform.InboundMessage,
+	start time.Time,
+) (Runtime, error) {
+	runtime, ok, err := s.registry.Lookup(routeCtx, msg)
+	if err != nil {
+		recordSpanError(routeSpan, err)
+		return Runtime{}, err
+	}
+	if !ok {
+		err := ErrRuntimeNotFound
+		s.writeRejectAudit(auditCtx, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return Runtime{}, err
+	}
+	if err := validateRuntimeForMessage(runtime, msg); err != nil {
+		s.writeRejectAudit(auditCtx, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return Runtime{}, err
+	}
+	return runtime, nil
+}
+
+func validateRuntimeForMessage(runtime Runtime, msg platform.InboundMessage) error {
+	if err := runtime.Validate(); err != nil {
+		return err
+	}
+	if !runtime.matchesInbound(msg) {
+		return ErrRuntimeMismatch
+	}
+	return authorizeBinding(runtime.Binding, msg)
+}
+
+func (s *Service) validateInboundContent(
+	ctx context.Context,
+	routeSpan oteltrace.Span,
+	msg platform.InboundMessage,
+	start time.Time,
+) (string, error) {
+	text, err := inboundText(msg)
+	if err != nil {
+		s.writeRejectAudit(ctx, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return "", err
+	}
+	return text, nil
+}
+
+func (s *Service) startInboundRun(
+	routeCtx context.Context,
+	resultCtx context.Context,
+	msg platform.InboundMessage,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+	key string,
+) (inboundRunRecord, bool, Result, error) {
 	idempotencyCtx, idempotencySpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.idempotency")
+	defer idempotencySpan.End()
 	setInboundTraceAttributes(idempotencySpan, msg, sessionID, requestID, internalUserID)
 	existing, ok, err := s.idempotencyStore.Get(idempotencyCtx, key)
 	if err != nil {
 		recordSpanError(idempotencySpan, err)
-		idempotencySpan.End()
-		return Result{}, err
+		return inboundRunRecord{}, false, Result{}, err
 	}
 	if ok {
-		idempotencySpan.End()
-		return s.duplicateResult(ctx, existing)
+		result, err := s.duplicateResult(resultCtx, existing)
+		return inboundRunRecord{}, true, result, err
 	}
-	leaseCtx, leaseSpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.session_lock")
-	setInboundTraceAttributes(leaseSpan, msg, sessionID, requestID, internalUserID)
-	lease, acquired, err := s.leaseStore.Acquire(leaseCtx, SessionLeaseKey{
-		TenantID:  msg.TenantID,
-		AppID:     msg.AppID,
-		SessionID: sessionID,
-	})
-	if err != nil {
-		recordSpanError(leaseSpan, err)
-		leaseSpan.End()
-		return Result{}, err
+	return s.acquireSessionLeaseAndStart(
+		routeCtx,
+		resultCtx,
+		idempotencyCtx,
+		idempotencySpan,
+		msg,
+		sessionID,
+		requestID,
+		internalUserID,
+		key,
+	)
+}
+
+func (s *Service) acquireSessionLeaseAndStart(
+	routeCtx context.Context,
+	resultCtx context.Context,
+	idempotencyCtx context.Context,
+	idempotencySpan oteltrace.Span,
+	msg platform.InboundMessage,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+	key string,
+) (inboundRunRecord, bool, Result, error) {
+	lease, handled, result, err := s.acquireSessionLease(
+		routeCtx,
+		msg,
+		sessionID,
+		requestID,
+		internalUserID,
+	)
+	if err != nil || handled {
+		return inboundRunRecord{}, handled, result, err
 	}
-	if !acquired {
-		leaseSpan.End()
-		return Result{
-			RequestID:  requestID,
-			SessionID:  sessionID,
-			Status:     platform.IdempotencyStatusProcessing,
-			Processing: true,
-		}, nil
-	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_ = lease.Release(cleanupCtx)
-	}()
-	leaseSpan.End()
 	record, started, err := s.idempotencyStore.Start(idempotencyCtx, platform.IdempotencyRecord{
 		TenantID:          msg.TenantID,
 		Channel:           msg.Channel,
@@ -225,60 +315,128 @@ func (s *Service) HandleInbound(
 		SessionID:         sessionID,
 	})
 	if err != nil {
+		s.releaseSessionLease(resultCtx, lease)
 		recordSpanError(idempotencySpan, err)
-		idempotencySpan.End()
-		return Result{}, err
+		return inboundRunRecord{}, false, Result{}, err
 	}
 	if !started {
-		idempotencySpan.End()
-		return s.duplicateResult(ctx, record)
+		s.releaseSessionLease(resultCtx, lease)
+		result, err := s.duplicateResult(resultCtx, record)
+		return inboundRunRecord{}, true, result, err
 	}
-	idempotencySpan.End()
+	return inboundRunRecord{Record: record, SessionLease: lease}, false, Result{}, nil
+}
 
+func (s *Service) acquireSessionLease(
+	routeCtx context.Context,
+	msg platform.InboundMessage,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+) (SessionLease, bool, Result, error) {
+	leaseCtx, leaseSpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.session_lock")
+	defer leaseSpan.End()
+	setInboundTraceAttributes(leaseSpan, msg, sessionID, requestID, internalUserID)
+	lease, acquired, err := s.leaseStore.Acquire(leaseCtx, SessionLeaseKey{
+		TenantID:  msg.TenantID,
+		AppID:     msg.AppID,
+		SessionID: sessionID,
+	})
+	if err != nil {
+		recordSpanError(leaseSpan, err)
+		return nil, false, Result{}, err
+	}
+	if acquired {
+		return lease, false, Result{}, nil
+	}
+	return nil, true, Result{
+		RequestID:  requestID,
+		SessionID:  sessionID,
+		Status:     platform.IdempotencyStatusProcessing,
+		Processing: true,
+	}, nil
+}
+
+func (s *Service) releaseSessionLease(ctx context.Context, lease SessionLease) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = lease.Release(cleanupCtx)
+}
+
+func (s *Service) runAndReply(
+	routeCtx context.Context,
+	auditCtx context.Context,
+	runtime Runtime,
+	msg platform.InboundMessage,
+	input inboundRunInput,
+) (Result, error) {
+	content, err := s.runGatewayRunner(routeCtx, auditCtx, runtime, msg, input)
+	if err != nil {
+		return Result{}, err
+	}
+	return s.writeReply(routeCtx, auditCtx, runtime, msg, input, content)
+}
+
+func (s *Service) runGatewayRunner(
+	routeCtx context.Context,
+	auditCtx context.Context,
+	runtime Runtime,
+	msg platform.InboundMessage,
+	input inboundRunInput,
+) (string, error) {
 	runnerCtx, runnerSpan := telemetrytrace.Tracer.Start(routeCtx, "runner.run")
-	setInboundTraceAttributes(runnerSpan, msg, sessionID, requestID, internalUserID)
+	defer runnerSpan.End()
+	setInboundTraceAttributes(runnerSpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	ch, err := runtime.Runner.Run(
 		runnerCtx,
-		internalUserID,
-		sessionID,
-		model.NewUserMessage(text),
-		agent.WithRequestID(requestID),
+		input.InternalUserID,
+		input.SessionID,
+		model.NewUserMessage(input.Text),
+		agent.WithRequestID(input.RequestID),
 		agent.WithLatencyDiagnostics(true),
 		agent.WithLatencyDiagnosticsEvents(false),
 	)
 	if err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
+		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
-		runnerSpan.End()
-		return Result{}, err
+		return "", err
 	}
-	content, err := collectAssistantText(ctx, ch)
+	content, err := collectAssistantText(auditCtx, ch)
 	if err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "runner_error", err.Error(), start, err))
+		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
-		runnerSpan.End()
-		return Result{}, err
+		return "", err
 	}
-	runnerSpan.End()
-	resultRef := key + ":outbound:1"
+	return content, nil
+}
+
+func (s *Service) writeReply(
+	routeCtx context.Context,
+	auditCtx context.Context,
+	runtime Runtime,
+	msg platform.InboundMessage,
+	input inboundRunInput,
+	content string,
+) (Result, error) {
+	resultRef := input.Key + ":outbound:1"
 	outbound := platform.OutboundMessage{
 		TenantID:                 msg.TenantID,
 		BindingID:                msg.BindingID,
 		Channel:                  msg.Channel,
-		SessionID:                sessionID,
+		SessionID:                input.SessionID,
 		ReplyToPlatformMessageID: msg.PlatformMessageID,
 		Kind:                     platform.OutboundMessageKindText,
 		Content:                  content,
 		Sequence:                 1,
 		DedupKey:                 resultRef,
-		TraceID:                  requestID,
+		TraceID:                  input.RequestID,
 	}
 	replyCtx, replySpan := telemetrytrace.Tracer.Start(routeCtx, "im.reply")
-	setInboundTraceAttributes(replySpan, msg, sessionID, requestID, internalUserID)
+	defer replySpan.End()
+	setInboundTraceAttributes(replySpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	if err := s.outboundStore.Save(replyCtx, resultRef, outbound); err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
+		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
-		replySpan.End()
 		return Result{}, err
 	}
 	if err := s.outboundStore.Enqueue(
@@ -286,34 +444,39 @@ func (s *Service) HandleInbound(
 		outbound,
 		channeladapter.RetryPolicyForBinding(runtime.Binding),
 	); err != nil {
-		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, key, resultRef); markErr != nil {
+		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, input.Key, resultRef); markErr != nil {
 			recordSpanError(replySpan, markErr)
-			replySpan.End()
 			return Result{}, markErr
 		}
-		s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "outbound_error", err.Error(), start, err))
+		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
-		replySpan.End()
 		return Result{}, err
 	}
-	record, err = s.idempotencyStore.Complete(replyCtx, key, resultRef)
+	record, err := s.idempotencyStore.Complete(replyCtx, input.Key, resultRef)
 	if err != nil {
 		recordSpanError(replySpan, err)
-		replySpan.End()
 		return Result{}, err
 	}
-	replySpan.End()
-	s.writeMessageEvent(ctx, messageEventFromInbound(msg, sessionID, key, requestID, 1, start))
-	s.writeMessageEvent(ctx, messageEventFromAssistant(msg, sessionID, resultRef, requestID, 2, s.now()))
-	s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "completed", "", start, nil))
+	s.writeMessageEvent(auditCtx, messageEventFromInbound(msg, input.SessionID, input.Key, input.RequestID, 1, input.Start))
+	s.writeMessageEvent(auditCtx, messageEventFromAssistant(msg, input.SessionID, resultRef, input.RequestID, 2, s.now()))
+	s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
 	return Result{
-		RequestID:   requestID,
-		SessionID:   sessionID,
+		RequestID:   input.RequestID,
+		SessionID:   input.SessionID,
 		ResultRef:   resultRef,
 		Status:      record.Status,
 		Outbound:    outbound,
 		CompletedAt: s.now(),
 	}, nil
+}
+
+func (s *Service) writeRejectAudit(
+	ctx context.Context,
+	msg platform.InboundMessage,
+	start time.Time,
+	err error,
+) {
+	s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
 }
 
 func (s *Service) validateService() error {
@@ -619,50 +782,39 @@ func recordSpanError(span oteltrace.Span, err error) {
 }
 
 func traceErrorType(err error) string {
-	switch {
-	case err == nil:
+	if err == nil {
 		return ""
-	case errors.Is(err, context.Canceled):
-		return "context_canceled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "context_deadline_exceeded"
-	case errors.Is(err, platform.ErrTenantIDRequired):
-		return "tenant_id_required"
-	case errors.Is(err, platform.ErrAppIDRequired):
-		return "app_id_required"
-	case errors.Is(err, platform.ErrBindingIDRequired):
-		return "binding_id_required"
-	case errors.Is(err, platform.ErrChannelRequired):
-		return "channel_required"
-	case errors.Is(err, platform.ErrAccountIDRequired):
-		return "account_id_required"
-	case errors.Is(err, platform.ErrPlatformMessageIDRequired):
-		return "platform_message_id_required"
-	case errors.Is(err, platform.ErrExternalUserIDRequired):
-		return "external_user_id_required"
-	case errors.Is(err, platform.ErrExternalGroupIDRequired):
-		return "external_group_id_required"
-	case errors.Is(err, platform.ErrConversationTypeRequired):
-		return "conversation_type_required"
-	case errors.Is(err, platform.ErrInvalidConversationType):
-		return "invalid_conversation_type"
-	case errors.Is(err, ErrRuntimeNotFound):
-		return "runtime_not_found"
-	case errors.Is(err, ErrRuntimeInactive):
-		return "runtime_inactive"
-	case errors.Is(err, ErrRuntimeMismatch):
-		return "runtime_mismatch"
-	case errors.Is(err, ErrBindingAccessDenied):
-		return "binding_access_denied"
-	case errors.Is(err, ErrBindingMentionRequired):
-		return "binding_mention_required"
-	case errors.Is(err, ErrUnsupportedMessageType):
-		return "unsupported_message_type"
-	case errors.Is(err, ErrEmptyText):
-		return "empty_text"
-	case errors.Is(err, ErrRunnerResponseEmpty):
-		return "runner_response_empty"
-	default:
-		return "gateway_error"
 	}
+	for _, candidate := range traceErrorTypes {
+		if errors.Is(err, candidate.err) {
+			return candidate.name
+		}
+	}
+	return "gateway_error"
+}
+
+var traceErrorTypes = []struct {
+	err  error
+	name string
+}{
+	{context.Canceled, "context_canceled"},
+	{context.DeadlineExceeded, "context_deadline_exceeded"},
+	{platform.ErrTenantIDRequired, "tenant_id_required"},
+	{platform.ErrAppIDRequired, "app_id_required"},
+	{platform.ErrBindingIDRequired, "binding_id_required"},
+	{platform.ErrChannelRequired, "channel_required"},
+	{platform.ErrAccountIDRequired, "account_id_required"},
+	{platform.ErrPlatformMessageIDRequired, "platform_message_id_required"},
+	{platform.ErrExternalUserIDRequired, "external_user_id_required"},
+	{platform.ErrExternalGroupIDRequired, "external_group_id_required"},
+	{platform.ErrConversationTypeRequired, "conversation_type_required"},
+	{platform.ErrInvalidConversationType, "invalid_conversation_type"},
+	{ErrRuntimeNotFound, "runtime_not_found"},
+	{ErrRuntimeInactive, "runtime_inactive"},
+	{ErrRuntimeMismatch, "runtime_mismatch"},
+	{ErrBindingAccessDenied, "binding_access_denied"},
+	{ErrBindingMentionRequired, "binding_mention_required"},
+	{ErrUnsupportedMessageType, "unsupported_message_type"},
+	{ErrEmptyText, "empty_text"},
+	{ErrRunnerResponseEmpty, "runner_response_empty"},
 }

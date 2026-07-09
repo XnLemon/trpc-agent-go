@@ -500,6 +500,25 @@ func (p *Policy) ApprovalSummary(
 
 // Validate checks that the summary is safe to expose outside the tool runtime.
 func (s ApprovalSummary) Validate() error {
+	if err := s.validateIdentity(); err != nil {
+		return err
+	}
+	if err := s.validateArguments(); err != nil {
+		return err
+	}
+	if err := s.validateDecision(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.RedactionVersion) == "" {
+		return fmt.Errorf("redaction_version is required")
+	}
+	if s.CreatedAt.IsZero() {
+		return fmt.Errorf("created_at is required")
+	}
+	return platformSafeText("detail_ref", s.DetailRef())
+}
+
+func (s ApprovalSummary) validateIdentity() error {
 	if strings.TrimSpace(s.TenantID) == "" {
 		return fmt.Errorf("tenant_id is required")
 	}
@@ -530,6 +549,10 @@ func (s ApprovalSummary) Validate() error {
 	if err := platformSafeText("reason", s.Reason); err != nil {
 		return err
 	}
+	return nil
+}
+
+func (s ApprovalSummary) validateArguments() error {
 	if s.ArgumentsBytes < 0 {
 		return fmt.Errorf("arguments_bytes must be greater than or equal to 0")
 	}
@@ -543,6 +566,10 @@ func (s ApprovalSummary) Validate() error {
 	if s.MaxResultSize < 0 {
 		return fmt.Errorf("max_result_size must be greater than or equal to 0")
 	}
+	return nil
+}
+
+func (s ApprovalSummary) validateDecision() error {
 	switch s.Decision {
 	case tool.PermissionActionAllow:
 		if s.RequiresApproval {
@@ -560,15 +587,6 @@ func (s ApprovalSummary) Validate() error {
 		return fmt.Errorf("decision is required")
 	default:
 		return fmt.Errorf("invalid decision %q", s.Decision)
-	}
-	if strings.TrimSpace(s.RedactionVersion) == "" {
-		return fmt.Errorf("redaction_version is required")
-	}
-	if s.CreatedAt.IsZero() {
-		return fmt.Errorf("created_at is required")
-	}
-	if err := platformSafeText("detail_ref", s.DetailRef()); err != nil {
-		return err
 	}
 	return nil
 }

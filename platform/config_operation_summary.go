@@ -106,6 +106,19 @@ func NewAppConfigOperationSummary(input AppConfigOperationSummaryInput) (AppConf
 
 // Validate checks that a config operation summary is safe to expose or store.
 func (s AppConfigOperationSummary) Validate() error {
+	if err := s.validateConfigOperationIdentity(); err != nil {
+		return err
+	}
+	if err := s.validateConfigOperationState(); err != nil {
+		return err
+	}
+	if err := s.validateConfigOperationLinks(); err != nil {
+		return err
+	}
+	return s.validateConfigOperationSafeText()
+}
+
+func (s AppConfigOperationSummary) validateConfigOperationIdentity() error {
 	if strings.TrimSpace(s.TenantID) == "" {
 		return ErrTenantIDRequired
 	}
@@ -134,6 +147,10 @@ func (s AppConfigOperationSummary) Validate() error {
 	if strings.TrimSpace(s.OperationID) == "" {
 		return fmt.Errorf("operation_id is required")
 	}
+	return nil
+}
+
+func (s AppConfigOperationSummary) validateConfigOperationState() error {
 	if strings.TrimSpace(s.PreviousVersion) == "" {
 		return fmt.Errorf("previous_version is required")
 	}
@@ -156,6 +173,10 @@ func (s AppConfigOperationSummary) Validate() error {
 	if s.CreatedAt.IsZero() {
 		return fmt.Errorf("created_at is required")
 	}
+	return nil
+}
+
+func (s AppConfigOperationSummary) validateConfigOperationLinks() error {
 	if err := s.CacheInvalidation.Validate(); err != nil {
 		return fmt.Errorf("cache_invalidation: %w", err)
 	}
@@ -175,6 +196,10 @@ func (s AppConfigOperationSummary) Validate() error {
 		s.GrayStatus.ActiveChecksum != s.NextChecksum {
 		return fmt.Errorf("gray_status active version must match next active version")
 	}
+	return nil
+}
+
+func (s AppConfigOperationSummary) validateConfigOperationSafeText() error {
 	for field, value := range map[string]string{
 		"summary_id":        s.SummaryID,
 		"operation_id":      s.OperationID,
@@ -218,41 +243,16 @@ func validateConfigOperationInvalidation(s AppConfigOperationSummary) error {
 }
 
 func validateConfigOperationGrayStatus(s AppConfigOperationSummary) error {
-	for field, value := range map[string]string{
-		"gray_active_version":     s.GrayStatus.ActiveVersion,
-		"gray_active_checksum":    s.GrayStatus.ActiveChecksum,
-		"gray_candidate_version":  s.GrayStatus.CandidateVersion,
-		"gray_candidate_checksum": s.GrayStatus.CandidateChecksum,
-		"gray_rollback_version":   s.GrayStatus.RollbackVersion,
-		"gray_rollback_checksum":  s.GrayStatus.RollbackChecksum,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return err
-		}
+	if err := validateConfigOperationGrayStatusText(s.GrayStatus); err != nil {
+		return err
 	}
 	if s.GrayStatus.ActiveTrafficPercent < 0 || s.GrayStatus.ActiveTrafficPercent > 100 ||
 		s.GrayStatus.CandidateGrayPercent < 0 || s.GrayStatus.CandidateGrayPercent > 100 ||
 		s.GrayStatus.CandidateTrafficPercent < 0 || s.GrayStatus.CandidateTrafficPercent > 100 {
 		return fmt.Errorf("gray_status traffic percentages must be between 0 and 100")
 	}
-	if s.GrayStatus.HasCandidate {
-		if strings.TrimSpace(s.GrayStatus.CandidateVersion) == "" ||
-			strings.TrimSpace(s.GrayStatus.CandidateChecksum) == "" {
-			return fmt.Errorf("gray_status candidate version and checksum are required")
-		}
-		if s.GrayStatus.CandidateGrayPercent != s.GrayStatus.CandidateTrafficPercent {
-			return fmt.Errorf("gray_status candidate traffic must match candidate gray percent")
-		}
-		if s.GrayStatus.ActiveTrafficPercent != 100-s.GrayStatus.CandidateTrafficPercent {
-			return fmt.Errorf("gray_status active traffic must complement candidate traffic")
-		}
-	} else if s.GrayStatus.CandidateVersion != "" ||
-		s.GrayStatus.CandidateChecksum != "" ||
-		s.GrayStatus.CandidateGrayPercent != 0 ||
-		s.GrayStatus.CandidateTrafficPercent != 0 {
-		return fmt.Errorf("gray_status candidate fields require has_candidate")
-	} else if s.GrayStatus.ActiveTrafficPercent != 100 {
-		return fmt.Errorf("gray_status active traffic must be 100 when there is no candidate")
+	if err := validateConfigOperationGrayCandidate(s.GrayStatus); err != nil {
+		return err
 	}
 	if !s.GrayStatus.HasRollback {
 		return fmt.Errorf("gray_status rollback version is required")
@@ -260,6 +260,52 @@ func validateConfigOperationGrayStatus(s AppConfigOperationSummary) error {
 	if s.GrayStatus.RollbackVersion != s.PreviousVersion ||
 		s.GrayStatus.RollbackChecksum != s.PreviousChecksum {
 		return fmt.Errorf("gray_status rollback version must match previous active version")
+	}
+	return nil
+}
+
+func validateConfigOperationGrayStatusText(status ConfigGrayStatusSummary) error {
+	for field, value := range map[string]string{
+		"gray_active_version":     status.ActiveVersion,
+		"gray_active_checksum":    status.ActiveChecksum,
+		"gray_candidate_version":  status.CandidateVersion,
+		"gray_candidate_checksum": status.CandidateChecksum,
+		"gray_rollback_version":   status.RollbackVersion,
+		"gray_rollback_checksum":  status.RollbackChecksum,
+	} {
+		if err := validateAuditRedactedText(field, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateConfigOperationGrayCandidate(status ConfigGrayStatusSummary) error {
+	if !status.HasCandidate {
+		return validateConfigOperationNoGrayCandidate(status)
+	}
+	if strings.TrimSpace(status.CandidateVersion) == "" ||
+		strings.TrimSpace(status.CandidateChecksum) == "" {
+		return fmt.Errorf("gray_status candidate version and checksum are required")
+	}
+	if status.CandidateGrayPercent != status.CandidateTrafficPercent {
+		return fmt.Errorf("gray_status candidate traffic must match candidate gray percent")
+	}
+	if status.ActiveTrafficPercent != 100-status.CandidateTrafficPercent {
+		return fmt.Errorf("gray_status active traffic must complement candidate traffic")
+	}
+	return nil
+}
+
+func validateConfigOperationNoGrayCandidate(status ConfigGrayStatusSummary) error {
+	if status.CandidateVersion != "" ||
+		status.CandidateChecksum != "" ||
+		status.CandidateGrayPercent != 0 ||
+		status.CandidateTrafficPercent != 0 {
+		return fmt.Errorf("gray_status candidate fields require has_candidate")
+	}
+	if status.ActiveTrafficPercent != 100 {
+		return fmt.Errorf("gray_status active traffic must be 100 when there is no candidate")
 	}
 	return nil
 }
