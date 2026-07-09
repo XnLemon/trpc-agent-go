@@ -384,6 +384,110 @@ func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
 	assert.NotEqual(t, "user-1", audit.Records()[0].UserID)
 }
 
+func TestServiceHandleInboundRejectsDisallowedUser(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.AllowedUsers = []string{"allowed-user"}
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "blocked-user", "hello"))
+
+	require.ErrorIs(t, err, ErrBindingAccessDenied)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrBindingAccessDenied.Error(), audit.Records()[0].DecisionReason)
+}
+
+func TestServiceHandleInboundRejectsDisallowedGroup(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.AllowedGroups = []string{"allowed-group"}
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.ConversationType = platform.ConversationTypeGroup
+	msg.ExternalGroupID = "blocked-group"
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrBindingAccessDenied)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundRejectsMissingRequiredMention(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.RequiredMention = true
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.ConversationType = platform.ConversationTypeGroup
+	msg.ExternalGroupID = "group-1"
+	msg.RequiredMentionSeen = false
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrBindingMentionRequired)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrBindingMentionRequired.Error(), audit.Records()[0].DecisionReason)
+}
+
+func TestServiceHandleInboundAllowsAuthorizedGroupMention(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "authorized"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.AllowedUsers = []string{"user-1"}
+	runtime.Binding.AllowedGroups = []string{"group-1"}
+	runtime.Binding.RequiredMention = true
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.ConversationType = platform.ConversationTypeGroup
+	msg.ExternalGroupID = "group-1"
+	msg.RequiredMentionSeen = true
+
+	result, err := svc.HandleInbound(ctx, msg)
+
+	require.NoError(t, err)
+	assert.Equal(t, "authorized", result.Outbound.Content)
+	require.Len(t, r.calls, 1)
+}
+
 func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
