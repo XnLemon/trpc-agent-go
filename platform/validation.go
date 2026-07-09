@@ -350,6 +350,61 @@ func (r AuditRecord) Validate() error {
 	return nil
 }
 
+// Validate checks that a message event has required identity and safe trace metadata.
+func (e MessageEvent) Validate() error {
+	if strings.TrimSpace(e.TenantID) == "" {
+		return ErrTenantIDRequired
+	}
+	if strings.TrimSpace(e.AppID) == "" {
+		return ErrAppIDRequired
+	}
+	if strings.TrimSpace(e.SessionID) == "" {
+		return fmt.Errorf("session_id is required")
+	}
+	if strings.TrimSpace(e.EventID) == "" {
+		return fmt.Errorf("event_id is required")
+	}
+	if e.Sequence <= 0 {
+		return fmt.Errorf("sequence must be greater than 0")
+	}
+	if strings.TrimSpace(e.IdempotencyKey) == "" {
+		return fmt.Errorf("idempotency_key is required")
+	}
+	for field, value := range map[string]string{
+		"tenant_id":       e.TenantID,
+		"app_id":          e.AppID,
+		"session_id":      e.SessionID,
+		"event_id":        e.EventID,
+		"idempotency_key": e.IdempotencyKey,
+	} {
+		if err := validateAuditRedactedText(field, value); err != nil {
+			return err
+		}
+	}
+	switch e.Role {
+	case MessageEventRoleUser, MessageEventRoleAssistant, MessageEventRoleTool, MessageEventRoleSystem:
+	default:
+		return fmt.Errorf("invalid role %q", e.Role)
+	}
+	switch e.EventType {
+	case MessageEventTypeMessage, MessageEventTypeToolCall, MessageEventTypeToolResult,
+		MessageEventTypeError, MessageEventTypeRevoke, MessageEventTypeEdit:
+	default:
+		return fmt.Errorf("invalid event_type %q", e.EventType)
+	}
+	for field, value := range map[string]string{
+		"trace_id":        e.TraceID,
+		"content_json":    e.ContentJSON,
+		"tool_calls_json": e.ToolCallsJSON,
+		"metadata_json":   e.MetadataJSON,
+	} {
+		if err := validateAuditRedactedText(field, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Validate checks that a usage record has required identity and safe accounting values.
 func (r UsageRecord) Validate() error {
 	if strings.TrimSpace(r.TenantID) == "" {

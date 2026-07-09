@@ -132,6 +132,38 @@ const (
 	OutboundMessageKindStatus OutboundMessageKind = "status"
 )
 
+// MessageEventRole describes the normalized message actor.
+type MessageEventRole string
+
+const (
+	// MessageEventRoleUser records an inbound user message.
+	MessageEventRoleUser MessageEventRole = "user"
+	// MessageEventRoleAssistant records an assistant reply message.
+	MessageEventRoleAssistant MessageEventRole = "assistant"
+	// MessageEventRoleTool records a tool event.
+	MessageEventRoleTool MessageEventRole = "tool"
+	// MessageEventRoleSystem records a system event.
+	MessageEventRoleSystem MessageEventRole = "system"
+)
+
+// MessageEventType describes the immutable conversation event kind.
+type MessageEventType string
+
+const (
+	// MessageEventTypeMessage records a normal conversational message.
+	MessageEventTypeMessage MessageEventType = "message"
+	// MessageEventTypeToolCall records a tool call request.
+	MessageEventTypeToolCall MessageEventType = "tool_call"
+	// MessageEventTypeToolResult records a tool call result.
+	MessageEventTypeToolResult MessageEventType = "tool_result"
+	// MessageEventTypeError records an execution error event.
+	MessageEventTypeError MessageEventType = "error"
+	// MessageEventTypeRevoke records a revoked prior event.
+	MessageEventTypeRevoke MessageEventType = "revoke"
+	// MessageEventTypeEdit records an edited prior event.
+	MessageEventTypeEdit MessageEventType = "edit"
+)
+
 // IdempotencyStatus is the state of one inbound platform message.
 type IdempotencyStatus string
 
@@ -379,6 +411,23 @@ type OutboundMessage struct {
 	DedupKey                 string
 	RetryPolicy              string
 	TraceID                  string
+}
+
+// MessageEvent stores immutable conversation event metadata for trace correlation.
+type MessageEvent struct {
+	TenantID       string
+	AppID          string
+	SessionID      string
+	EventID        string
+	Sequence       int64
+	IdempotencyKey string
+	Role           MessageEventRole
+	EventType      MessageEventType
+	ContentJSON    string
+	ToolCallsJSON  string
+	MetadataJSON   string
+	TraceID        string
+	CreatedAt      time.Time
 }
 
 // IdempotencyRecord stores duplicate delivery state for an inbound message.

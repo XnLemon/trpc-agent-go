@@ -36,6 +36,7 @@ type Service struct {
 	outboundStore    OutboundStore
 	leaseStore       SessionLeaseStore
 	auditSink        platform.AuditSink
+	messageEventSink platform.MessageEventSink
 	now              func() time.Time
 }
 
@@ -46,6 +47,13 @@ type Option func(*Service)
 func WithAuditSink(sink platform.AuditSink) Option {
 	return func(s *Service) {
 		s.auditSink = sink
+	}
+}
+
+// WithMessageEventSink sets the message event sink used by the service.
+func WithMessageEventSink(sink platform.MessageEventSink) Option {
+	return func(s *Service) {
+		s.messageEventSink = sink
 	}
 }
 
@@ -295,6 +303,8 @@ func (s *Service) HandleInbound(
 		return Result{}, err
 	}
 	replySpan.End()
+	s.writeMessageEvent(ctx, messageEventFromInbound(msg, sessionID, key, requestID, 1, start))
+	s.writeMessageEvent(ctx, messageEventFromAssistant(msg, sessionID, resultRef, requestID, 2, s.now()))
 	s.writeAudit(ctx, auditFromMessage(msg, sessionID, internalUserID, "completed", "", start, nil))
 	return Result{
 		RequestID:   requestID,
@@ -511,6 +521,57 @@ func (s *Service) writeAudit(ctx context.Context, record platform.AuditRecord) {
 		return
 	}
 	_ = s.auditSink.WriteAudit(ctx, record)
+}
+
+func (s *Service) writeMessageEvent(ctx context.Context, event platform.MessageEvent) {
+	if s.messageEventSink == nil {
+		return
+	}
+	_ = s.messageEventSink.WriteMessageEvent(ctx, event)
+}
+
+func messageEventFromInbound(
+	msg platform.InboundMessage,
+	sessionID string,
+	idempotencyKey string,
+	traceID string,
+	sequence int64,
+	createdAt time.Time,
+) platform.MessageEvent {
+	return platform.MessageEvent{
+		TenantID:       msg.TenantID,
+		AppID:          msg.AppID,
+		SessionID:      sessionID,
+		EventID:        idempotencyKey + ":user",
+		Sequence:       sequence,
+		IdempotencyKey: idempotencyKey,
+		Role:           platform.MessageEventRoleUser,
+		EventType:      platform.MessageEventTypeMessage,
+		TraceID:        traceID,
+		CreatedAt:      createdAt,
+	}
+}
+
+func messageEventFromAssistant(
+	msg platform.InboundMessage,
+	sessionID string,
+	resultRef string,
+	traceID string,
+	sequence int64,
+	createdAt time.Time,
+) platform.MessageEvent {
+	return platform.MessageEvent{
+		TenantID:       msg.TenantID,
+		AppID:          msg.AppID,
+		SessionID:      sessionID,
+		EventID:        resultRef + ":assistant",
+		Sequence:       sequence,
+		IdempotencyKey: resultRef,
+		Role:           platform.MessageEventRoleAssistant,
+		EventType:      platform.MessageEventTypeMessage,
+		TraceID:        traceID,
+		CreatedAt:      createdAt,
+	}
 }
 
 func setInboundTraceAttributes(
