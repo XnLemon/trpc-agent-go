@@ -287,6 +287,14 @@ func (r AuditRecord) Validate() error {
 	if math.IsNaN(r.Cost) || math.IsInf(r.Cost, 0) || r.Cost < 0 {
 		return fmt.Errorf("cost must be greater than or equal to 0")
 	}
+	for field, value := range map[string]string{
+		"request_id": r.RequestID,
+		"trace_id":   r.TraceID,
+	} {
+		if err := validateAuditRedactedText(field, value); err != nil {
+			return err
+		}
+	}
 	if err := validateAuditRedactedText("decision_reason", r.DecisionReason); err != nil {
 		return err
 	}

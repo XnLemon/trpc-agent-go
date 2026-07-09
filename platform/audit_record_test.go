@@ -80,6 +80,39 @@ func TestAuditRecordValidateRejectsSensitiveDecisionReason(t *testing.T) {
 	}
 }
 
+func TestAuditRecordValidateRejectsSensitiveRequestAndTraceIDs(t *testing.T) {
+	tests := []struct {
+		name  string
+		mut   func(*AuditRecord)
+		field string
+	}{
+		{
+			name: "request_id",
+			mut: func(record *AuditRecord) {
+				record.RequestID = "Authorization: Bearer raw-token"
+			},
+			field: "request_id",
+		},
+		{
+			name: "trace_id",
+			mut: func(record *AuditRecord) {
+				record.TraceID = "password=plain"
+			},
+			field: "trace_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := validAuditRecord()
+			tt.mut(&record)
+			if err := record.Validate(); err == nil || !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("expected sensitive %s rejection, got %v", tt.field, err)
+			}
+		})
+	}
+}
+
 func TestAuditRecordValidateRejectsSensitiveErrorType(t *testing.T) {
 	record := validAuditRecord()
 	record.ErrorType = "storage_error password=plain"
