@@ -10,6 +10,7 @@ package toolpolicy
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -190,6 +191,9 @@ func TestPolicyBuildsApprovalSummaryWithoutRawArguments(t *testing.T) {
 func TestApprovalSummaryValidationRejectsUnsafeOrInconsistentFields(t *testing.T) {
 	now := time.Unix(300, 0)
 	valid := ApprovalSummary{
+		TenantID:         "tenant",
+		AppID:            "app",
+		PolicyID:         "policy",
 		ToolName:         "workspace_write",
 		ToolCallID:       "call-1",
 		Decision:         tool.PermissionActionAsk,
@@ -362,9 +366,60 @@ func TestPolicyDeniesDestructiveMetadata(t *testing.T) {
 }
 
 func TestPolicyRejectsInvalidDangerousAction(t *testing.T) {
-	_, err := New(platform.ToolPolicy{DangerousToolAction: platform.DangerousToolAction("bad")})
+	_, err := New(defaultPolicy(platform.ToolPolicy{
+		DangerousToolAction: platform.DangerousToolAction("bad"),
+	}))
 	if err == nil {
 		t.Fatalf("expected invalid action to fail")
+	}
+}
+
+func TestPolicyRejectsMissingRuntimeIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy platform.ToolPolicy
+		want   string
+	}{
+		{
+			name:   "tenant",
+			policy: platform.ToolPolicy{AppID: "app", PolicyID: "policy"},
+			want:   "tenant_id",
+		},
+		{
+			name:   "app",
+			policy: platform.ToolPolicy{TenantID: "tenant", PolicyID: "policy"},
+			want:   "app_id",
+		},
+		{
+			name:   "policy",
+			policy: platform.ToolPolicy{TenantID: "tenant", AppID: "app"},
+			want:   "policy_id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := New(tc.policy); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %s validation error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestPolicyReturnsAuditSinkErrors(t *testing.T) {
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+			HighRiskTools:       []string{"http_post"},
+		},
+		WithAuditSink(failingAuditSink{}),
+	)
+
+	_, err := p.CheckToolPermission(
+		context.Background(),
+		request("http_post", tool.ToolMetadata{}, []byte(`{"url":"https://example.com"}`)),
+	)
+	if err == nil || !strings.Contains(err.Error(), "write tool policy audit") {
+		t.Fatalf("expected audit sink error, got %v", err)
 	}
 }
 
@@ -470,9 +525,9 @@ func TestPolicyRegisterDoesNotTreatUnknownMetadataAsHighRisk(t *testing.T) {
 }
 
 func TestReviewerMapsPolicyDecisionToApprovalDecision(t *testing.T) {
-	reviewer, err := NewReviewer(platform.ToolPolicy{
+	reviewer, err := NewReviewer(defaultPolicy(platform.ToolPolicy{
 		ToolWhitelist: []string{"search"},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewReviewer: %v", err)
 	}
@@ -489,10 +544,10 @@ func TestReviewerMapsPolicyDecisionToApprovalDecision(t *testing.T) {
 }
 
 func TestReviewerApprovesAskDecisionForApprovalPluginFlow(t *testing.T) {
-	reviewer, err := NewReviewer(platform.ToolPolicy{
+	reviewer, err := NewReviewer(defaultPolicy(platform.ToolPolicy{
 		DangerousToolAction: platform.DangerousToolActionAsk,
 		HighRiskTools:       []string{"workspace_write"},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewReviewer: %v", err)
 	}
@@ -509,11 +564,11 @@ func TestReviewerApprovesAskDecisionForApprovalPluginFlow(t *testing.T) {
 }
 
 func TestApprovalOptionsWithReviewerAllowsWhitelistedHighRiskAsk(t *testing.T) {
-	policy := platform.ToolPolicy{
+	policy := defaultPolicy(platform.ToolPolicy{
 		ToolWhitelist:       []string{"workspace_write"},
 		DangerousToolAction: platform.DangerousToolActionAsk,
 		HighRiskTools:       []string{"workspace_write"},
-	}
+	})
 	reviewer, err := NewReviewer(policy)
 	if err != nil {
 		t.Fatalf("NewReviewer: %v", err)
@@ -539,11 +594,25 @@ func TestApprovalOptionsWithReviewerAllowsWhitelistedHighRiskAsk(t *testing.T) {
 
 func newPolicy(t *testing.T, policy platform.ToolPolicy, opts ...Option) *Policy {
 	t.Helper()
+	policy = defaultPolicy(policy)
 	p, err := New(policy, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return p
+}
+
+func defaultPolicy(policy platform.ToolPolicy) platform.ToolPolicy {
+	if strings.TrimSpace(policy.TenantID) == "" {
+		policy.TenantID = "tenant"
+	}
+	if strings.TrimSpace(policy.AppID) == "" {
+		policy.AppID = "app"
+	}
+	if strings.TrimSpace(policy.PolicyID) == "" {
+		policy.PolicyID = "policy"
+	}
+	return policy
 }
 
 func request(name string, metadata tool.ToolMetadata, args ...[]byte) *tool.PermissionRequest {
@@ -563,4 +632,10 @@ type allowReviewer struct{}
 
 func (allowReviewer) Review(context.Context, *review.Request) (*review.Decision, error) {
 	return &review.Decision{Approved: true}, nil
+}
+
+type failingAuditSink struct{}
+
+func (failingAuditSink) WriteAudit(context.Context, platform.AuditRecord) error {
+	return errors.New("audit unavailable")
 }

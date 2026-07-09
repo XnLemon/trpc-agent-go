@@ -76,7 +76,8 @@ func WithAuditSink(sink platform.AuditSink) Option {
 	}
 }
 
-// WithRedactor sets the redactor used before writing tool arguments to audit.
+// WithRedactor overrides the configured redactor. Approval summaries still
+// store only argument digests and never include raw tool arguments.
 func WithRedactor(redactor *platform.Redactor) Option {
 	return func(p *Policy) {
 		if redactor != nil {
@@ -97,6 +98,9 @@ func WithNow(now func() time.Time) Option {
 // New creates a runtime permission policy from platform tool governance.
 func New(policy platform.ToolPolicy, opts ...Option) (*Policy, error) {
 	if err := validate(policy); err != nil {
+		return nil, err
+	}
+	if err := validateRuntimeIdentity(policy); err != nil {
 		return nil, err
 	}
 	redactor, err := platform.NewRedactor(policy.ArgumentRedactionRules...)
@@ -153,7 +157,9 @@ func (p *Policy) CheckToolPermission(
 		if err != nil {
 			return tool.PermissionDecision{}, err
 		}
-		p.writeAudit(ctx, summary)
+		if err := p.writeAudit(ctx, summary); err != nil {
+			return tool.PermissionDecision{}, err
+		}
 	}
 	return decision, nil
 }
@@ -175,13 +181,11 @@ func (p *Policy) beforeTool() tool.BeforeToolCallbackStructured {
 			if err != nil {
 				return nil, err
 			}
-			p.writeAudit(ctx, summary)
+			if err := p.writeAudit(ctx, summary); err != nil {
+				return nil, err
+			}
 		}
-		var err error
-		if err != nil {
-			return nil, err
-		}
-		decision, err = tool.NormalizePermissionDecision(decision)
+		decision, err := tool.NormalizePermissionDecision(decision)
 		if err != nil {
 			return nil, err
 		}
@@ -264,7 +268,9 @@ func (r *Reviewer) Review(ctx context.Context, req *review.Request) (*review.Dec
 		if err != nil {
 			return nil, err
 		}
-		r.policy.writeAudit(ctx, summary)
+		if err := r.policy.writeAudit(ctx, summary); err != nil {
+			return nil, err
+		}
 	}
 	var err error
 	decision, err = tool.NormalizePermissionDecision(decision)
@@ -371,6 +377,19 @@ func validate(policy platform.ToolPolicy) error {
 	default:
 		return fmt.Errorf("invalid dangerous tool action %q", policy.DangerousToolAction)
 	}
+}
+
+func validateRuntimeIdentity(policy platform.ToolPolicy) error {
+	if strings.TrimSpace(policy.TenantID) == "" {
+		return fmt.Errorf("tenant_id is required")
+	}
+	if strings.TrimSpace(policy.AppID) == "" {
+		return fmt.Errorf("app_id is required")
+	}
+	if strings.TrimSpace(policy.PolicyID) == "" {
+		return fmt.Errorf("policy_id is required")
+	}
+	return nil
 }
 
 func isHighRisk(policy platform.ToolPolicy, req *tool.PermissionRequest, name string) bool {
@@ -481,6 +500,24 @@ func (p *Policy) ApprovalSummary(
 
 // Validate checks that the summary is safe to expose outside the tool runtime.
 func (s ApprovalSummary) Validate() error {
+	if strings.TrimSpace(s.TenantID) == "" {
+		return fmt.Errorf("tenant_id is required")
+	}
+	if strings.TrimSpace(s.AppID) == "" {
+		return fmt.Errorf("app_id is required")
+	}
+	if strings.TrimSpace(s.PolicyID) == "" {
+		return fmt.Errorf("policy_id is required")
+	}
+	if err := platformSafeText("tenant_id", s.TenantID); err != nil {
+		return err
+	}
+	if err := platformSafeText("app_id", s.AppID); err != nil {
+		return err
+	}
+	if err := platformSafeText("policy_id", s.PolicyID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(s.ToolName) == "" {
 		return fmt.Errorf("tool_name is required")
 	}
@@ -536,12 +573,12 @@ func (s ApprovalSummary) Validate() error {
 	return nil
 }
 
-func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) {
+func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) error {
 	if p.audit == nil {
-		return
+		return nil
 	}
 	detailRef := summary.DetailRef()
-	_ = p.audit.WriteAudit(ctx, platform.AuditRecord{
+	if err := p.audit.WriteAudit(ctx, platform.AuditRecord{
 		AuditID:           platform.AuditID(summary.TenantID, summary.AppID, summary.ToolName, summary.ToolCallID, string(summary.Decision), detailRef),
 		TenantID:          summary.TenantID,
 		AppID:             summary.AppID,
@@ -551,7 +588,10 @@ func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) {
 		RedactedDetailRef: detailRef,
 		RedactionVersion:  summary.RedactionVersion,
 		CreatedAt:         summary.CreatedAt,
-	})
+	}); err != nil {
+		return fmt.Errorf("write tool policy audit: %w", err)
+	}
+	return nil
 }
 
 // DetailRef returns compact non-secret detail that can be stored in audit logs.
