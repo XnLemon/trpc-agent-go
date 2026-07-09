@@ -13,6 +13,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,28 @@ type Policy struct {
 	audit    platform.AuditSink
 	redactor *platform.Redactor
 	now      func() time.Time
+}
+
+// ApprovalSummary is the safe approval-facing summary of one tool call.
+type ApprovalSummary struct {
+	TenantID         string
+	AppID            string
+	PolicyID         string
+	ToolName         string
+	ToolCallID       string
+	Decision         tool.PermissionAction
+	Reason           string
+	ArgumentsDigest  string
+	ArgumentsBytes   int
+	RequiresApproval bool
+	ReadOnly         bool
+	Destructive      bool
+	OpenWorld        bool
+	ConcurrencySafe  bool
+	SearchOrRead     bool
+	MaxResultSize    int
+	RedactionVersion string
+	CreatedAt        time.Time
 }
 
 // Option configures Policy.
@@ -52,7 +76,8 @@ func WithAuditSink(sink platform.AuditSink) Option {
 	}
 }
 
-// WithRedactor sets the redactor used before writing tool arguments to audit.
+// WithRedactor overrides the configured redactor. Approval summaries still
+// store only argument digests and never include raw tool arguments.
 func WithRedactor(redactor *platform.Redactor) Option {
 	return func(p *Policy) {
 		if redactor != nil {
@@ -73,6 +98,9 @@ func WithNow(now func() time.Time) Option {
 // New creates a runtime permission policy from platform tool governance.
 func New(policy platform.ToolPolicy, opts ...Option) (*Policy, error) {
 	if err := validate(policy); err != nil {
+		return nil, err
+	}
+	if err := validateRuntimeIdentity(policy); err != nil {
 		return nil, err
 	}
 	redactor, err := platform.NewRedactor(policy.ArgumentRedactionRules...)
@@ -125,7 +153,13 @@ func (p *Policy) CheckToolPermission(
 	}
 	decision, reason, audit := p.decide(req, name)
 	if audit {
-		p.writeAudit(ctx, req, name, string(decision.Action), reason)
+		summary, err := p.ApprovalSummary(req, decision, reason)
+		if err != nil {
+			return tool.PermissionDecision{}, err
+		}
+		if err := p.writeAudit(ctx, summary); err != nil {
+			return tool.PermissionDecision{}, err
+		}
 	}
 	return decision, nil
 }
@@ -143,13 +177,15 @@ func (p *Policy) beforeTool() tool.BeforeToolCallbackStructured {
 		}
 		decision, reason, audit := p.decideNameOnly(req, req.ToolName)
 		if audit {
-			p.writeAudit(ctx, req, req.ToolName, string(decision.Action), reason)
+			summary, err := p.ApprovalSummary(req, decision, reason)
+			if err != nil {
+				return nil, err
+			}
+			if err := p.writeAudit(ctx, summary); err != nil {
+				return nil, err
+			}
 		}
-		var err error
-		if err != nil {
-			return nil, err
-		}
-		decision, err = tool.NormalizePermissionDecision(decision)
+		decision, err := tool.NormalizePermissionDecision(decision)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +264,13 @@ func (r *Reviewer) Review(ctx context.Context, req *review.Request) (*review.Dec
 	}
 	decision, reason, audit := r.policy.decideReviewer(permissionReq, permissionReq.ToolName)
 	if audit {
-		r.policy.writeAudit(ctx, permissionReq, permissionReq.ToolName, string(decision.Action), reason)
+		summary, err := r.policy.ApprovalSummary(permissionReq, decision, reason)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.policy.writeAudit(ctx, summary); err != nil {
+			return nil, err
+		}
 	}
 	var err error
 	decision, err = tool.NormalizePermissionDecision(decision)
@@ -337,6 +379,19 @@ func validate(policy platform.ToolPolicy) error {
 	}
 }
 
+func validateRuntimeIdentity(policy platform.ToolPolicy) error {
+	if strings.TrimSpace(policy.TenantID) == "" {
+		return fmt.Errorf("tenant_id is required")
+	}
+	if strings.TrimSpace(policy.AppID) == "" {
+		return fmt.Errorf("app_id is required")
+	}
+	if strings.TrimSpace(policy.PolicyID) == "" {
+		return fmt.Errorf("policy_id is required")
+	}
+	return nil
+}
+
 func isHighRisk(policy platform.ToolPolicy, req *tool.PermissionRequest, name string) bool {
 	if contains(normalizedList(policy.HighRiskTools), name) {
 		return true
@@ -379,34 +434,227 @@ func contains(items []string, target string) bool {
 	return false
 }
 
-func (p *Policy) writeAudit(
-	ctx context.Context,
+// ApprovalSummary builds a redacted approval summary suitable for audit,
+// approval messages, and logs. Raw tool arguments are never included.
+func (p *Policy) ApprovalSummary(
 	req *tool.PermissionRequest,
-	toolName string,
-	decision string,
+	decision tool.PermissionDecision,
 	reason string,
-) {
-	if p.audit == nil {
-		return
+) (ApprovalSummary, error) {
+	if p == nil {
+		return ApprovalSummary{}, fmt.Errorf("policy is nil")
 	}
-	argsSummary := argumentSummary(req.Arguments)
-	_ = p.audit.WriteAudit(ctx, platform.AuditRecord{
-		AuditID:           platform.AuditID(p.policy.TenantID, p.policy.AppID, toolName, req.ToolCallID, decision, argsSummary),
-		TenantID:          p.policy.TenantID,
-		AppID:             p.policy.AppID,
-		ToolName:          toolName,
-		Decision:          decision,
-		DecisionReason:    reason,
-		RedactedDetailRef: argsSummary,
-		RedactionVersion:  "platform-toolpolicy-v1",
-		CreatedAt:         p.now(),
-	})
+	if req == nil {
+		return ApprovalSummary{}, fmt.Errorf("permission request is nil")
+	}
+	name := strings.TrimSpace(req.ToolName)
+	if name == "" && req.Declaration != nil {
+		name = strings.TrimSpace(req.Declaration.Name)
+	}
+	if name == "" {
+		return ApprovalSummary{}, fmt.Errorf("tool_name is required")
+	}
+	decision, err := tool.NormalizePermissionDecision(decision)
+	if err != nil {
+		return ApprovalSummary{}, err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = strings.TrimSpace(decision.Reason)
+	}
+	if err := platformSafeText("tool_name", name); err != nil {
+		return ApprovalSummary{}, err
+	}
+	if err := platformSafeText("tool_call_id", req.ToolCallID); err != nil {
+		return ApprovalSummary{}, err
+	}
+	if err := platformSafeText("reason", reason); err != nil {
+		return ApprovalSummary{}, err
+	}
+	argumentsDigest, argumentsBytes := argumentDigest(req.Arguments)
+	summary := ApprovalSummary{
+		TenantID:         strings.TrimSpace(p.policy.TenantID),
+		AppID:            strings.TrimSpace(p.policy.AppID),
+		PolicyID:         strings.TrimSpace(p.policy.PolicyID),
+		ToolName:         name,
+		ToolCallID:       strings.TrimSpace(req.ToolCallID),
+		Decision:         decision.Action,
+		Reason:           reason,
+		ArgumentsDigest:  argumentsDigest,
+		ArgumentsBytes:   argumentsBytes,
+		RequiresApproval: decision.Action == tool.PermissionActionAsk,
+		ReadOnly:         req.Metadata.ReadOnly,
+		Destructive:      req.Metadata.Destructive,
+		OpenWorld:        req.Metadata.OpenWorld,
+		ConcurrencySafe:  req.Metadata.ConcurrencySafe,
+		SearchOrRead:     req.Metadata.SearchOrRead,
+		MaxResultSize:    req.Metadata.MaxResultSize,
+		RedactionVersion: "platform-toolpolicy-v1",
+		CreatedAt:        p.now(),
+	}
+	if err := summary.Validate(); err != nil {
+		return ApprovalSummary{}, err
+	}
+	return summary, nil
+}
+
+// Validate checks that the summary is safe to expose outside the tool runtime.
+func (s ApprovalSummary) Validate() error {
+	if strings.TrimSpace(s.TenantID) == "" {
+		return fmt.Errorf("tenant_id is required")
+	}
+	if strings.TrimSpace(s.AppID) == "" {
+		return fmt.Errorf("app_id is required")
+	}
+	if strings.TrimSpace(s.PolicyID) == "" {
+		return fmt.Errorf("policy_id is required")
+	}
+	if err := platformSafeText("tenant_id", s.TenantID); err != nil {
+		return err
+	}
+	if err := platformSafeText("app_id", s.AppID); err != nil {
+		return err
+	}
+	if err := platformSafeText("policy_id", s.PolicyID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.ToolName) == "" {
+		return fmt.Errorf("tool_name is required")
+	}
+	if err := platformSafeText("tool_name", s.ToolName); err != nil {
+		return err
+	}
+	if err := platformSafeText("tool_call_id", s.ToolCallID); err != nil {
+		return err
+	}
+	if err := platformSafeText("reason", s.Reason); err != nil {
+		return err
+	}
+	if s.ArgumentsBytes < 0 {
+		return fmt.Errorf("arguments_bytes must be greater than or equal to 0")
+	}
+	if s.ArgumentsBytes == 0 {
+		if s.ArgumentsDigest != "" {
+			return fmt.Errorf("arguments_digest must be empty when arguments_bytes is 0")
+		}
+	} else if !validSHA256Digest(s.ArgumentsDigest) {
+		return fmt.Errorf("arguments_digest must be sha256 followed by a 64 character hex digest")
+	}
+	if s.MaxResultSize < 0 {
+		return fmt.Errorf("max_result_size must be greater than or equal to 0")
+	}
+	switch s.Decision {
+	case tool.PermissionActionAllow:
+		if s.RequiresApproval {
+			return fmt.Errorf("requires_approval must be false for allow decisions")
+		}
+	case tool.PermissionActionDeny:
+		if s.RequiresApproval {
+			return fmt.Errorf("requires_approval must be false for deny decisions")
+		}
+	case tool.PermissionActionAsk:
+		if !s.RequiresApproval {
+			return fmt.Errorf("requires_approval must be true for ask decisions")
+		}
+	case "":
+		return fmt.Errorf("decision is required")
+	default:
+		return fmt.Errorf("invalid decision %q", s.Decision)
+	}
+	if strings.TrimSpace(s.RedactionVersion) == "" {
+		return fmt.Errorf("redaction_version is required")
+	}
+	if s.CreatedAt.IsZero() {
+		return fmt.Errorf("created_at is required")
+	}
+	if err := platformSafeText("detail_ref", s.DetailRef()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) error {
+	if p.audit == nil {
+		return nil
+	}
+	detailRef := summary.DetailRef()
+	if err := p.audit.WriteAudit(ctx, platform.AuditRecord{
+		AuditID:           platform.AuditID(summary.TenantID, summary.AppID, summary.ToolName, summary.ToolCallID, string(summary.Decision), detailRef),
+		TenantID:          summary.TenantID,
+		AppID:             summary.AppID,
+		ToolName:          summary.ToolName,
+		Decision:          string(summary.Decision),
+		DecisionReason:    summary.Reason,
+		RedactedDetailRef: detailRef,
+		RedactionVersion:  summary.RedactionVersion,
+		CreatedAt:         summary.CreatedAt,
+	}); err != nil {
+		return fmt.Errorf("write tool policy audit: %w", err)
+	}
+	return nil
+}
+
+// DetailRef returns compact non-secret detail that can be stored in audit logs.
+func (s ApprovalSummary) DetailRef() string {
+	parts := []string{
+		"tool:" + s.ToolName,
+		"decision:" + string(s.Decision),
+	}
+	if s.ToolCallID != "" {
+		parts = append(parts, "tool_call_id:"+s.ToolCallID)
+	}
+	if s.ArgumentsDigest != "" {
+		parts = append(parts, "args:"+s.ArgumentsDigest)
+		parts = append(parts, "args_bytes:"+strconv.Itoa(s.ArgumentsBytes))
+	}
+	if s.RequiresApproval {
+		parts = append(parts, "requires_approval:true")
+	}
+	if s.ReadOnly {
+		parts = append(parts, "read_only:true")
+	}
+	if s.Destructive {
+		parts = append(parts, "destructive:true")
+	}
+	if s.OpenWorld {
+		parts = append(parts, "open_world:true")
+	}
+	return strings.Join(parts, " ")
+}
+
+func argumentDigest(args []byte) (string, int) {
+	if len(args) == 0 {
+		return "", 0
+	}
+	sum := sha256.Sum256(args)
+	return "sha256:" + hex.EncodeToString(sum[:]), len(args)
 }
 
 func argumentSummary(args []byte) string {
-	if len(args) == 0 {
+	digest, size := argumentDigest(args)
+	if digest == "" {
 		return ""
 	}
-	sum := sha256.Sum256(args)
-	return fmt.Sprintf("sha256:%s bytes:%d", hex.EncodeToString(sum[:]), len(args))
+	return fmt.Sprintf("%s bytes:%d", digest, size)
+}
+
+var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+
+func validSHA256Digest(value string) bool {
+	return sha256DigestPattern.MatchString(value)
+}
+
+func platformSafeText(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return fmt.Errorf("%s: redactor unavailable: %w", field, err)
+	}
+	if redactor.Redact(value) != value {
+		return fmt.Errorf("%s contains unredacted sensitive content", field)
+	}
+	return nil
 }
