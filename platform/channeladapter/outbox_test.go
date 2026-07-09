@@ -11,6 +11,7 @@ package channeladapter
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,79 @@ func TestOutboxFailureSchedulesRetryThenDeadLetter(t *testing.T) {
 	}
 	if dead.Status != platform.OutboundStatusDeadLetter || dead.Attempts != 2 {
 		t.Fatalf("unexpected dead letter record: %+v", dead)
+	}
+}
+
+func TestOutboxRedactsFailureDetails(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, RetryPolicy{MaxAttempts: 2})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+
+	failed, err := store.MarkFailed(
+		ctx,
+		msg.DedupKey,
+		claimed[0].LeaseToken,
+		errors.New("provider failed Authorization: Bearer raw-token postgres://user:pass@example/db api_key=sk-1234567890abcdef"),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	for _, leaked := range []string{"raw-token", ":pass@", "sk-1234567890abcdef"} {
+		if strings.Contains(failed.LastError, leaked) {
+			t.Fatalf("failure detail leaked %q: %q", leaked, failed.LastError)
+		}
+	}
+	if !strings.Contains(failed.LastError, "Authorization: ****") ||
+		!strings.Contains(failed.LastError, "user:****@") ||
+		!strings.Contains(failed.LastError, "api_key=****") {
+		t.Fatalf("expected redacted diagnostic, got %q", failed.LastError)
+	}
+}
+
+func TestOutboxRedactsDeadLetterDetails(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryOutboxStore()
+	msg := outbound("reply-1")
+	_, _, err := store.Enqueue(ctx, msg, RetryPolicy{MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	now := time.Now().Add(time.Hour)
+	claimed, err := store.ClaimDue(ctx, now, 1, time.Minute)
+	if err != nil {
+		t.Fatalf("claim due: %v", err)
+	}
+
+	dead, err := store.MarkDeadLetter(
+		ctx,
+		msg.DedupKey,
+		claimed[0].LeaseToken,
+		errors.New("permanent token=secret-value cookie=session-secret"),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("mark dead letter: %v", err)
+	}
+
+	for _, leaked := range []string{"secret-value", "session-secret"} {
+		if strings.Contains(dead.LastError, leaked) {
+			t.Fatalf("dead-letter detail leaked %q: %q", leaked, dead.LastError)
+		}
+	}
+	if !strings.Contains(dead.LastError, "token=****") ||
+		!strings.Contains(dead.LastError, "cookie=****") {
+		t.Fatalf("expected redacted diagnostic, got %q", dead.LastError)
 	}
 }
 
