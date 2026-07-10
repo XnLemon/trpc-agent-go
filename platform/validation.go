@@ -298,6 +298,9 @@ func (p StorageProfile) Validate() error {
 	if err := validateRoutingIdentifier("profile_id", p.ProfileID, fmt.Errorf("profile_id is required")); err != nil {
 		return err
 	}
+	if err := validateStorageNamespace(p.TenantID, p.Namespace); err != nil {
+		return err
+	}
 	if err := validateSecretReference("dsn_ref", p.DSNRef); err != nil {
 		return err
 	}
@@ -305,6 +308,35 @@ func (p StorageProfile) Validate() error {
 		return err
 	}
 	return nil
+}
+
+func validateStorageNamespace(tenantID, namespace string) error {
+	if err := validateRoutingIdentifier("namespace", namespace, fmt.Errorf("namespace is required")); err != nil {
+		return err
+	}
+	if err := validateAuditRedactedText("namespace", namespace); err != nil {
+		return err
+	}
+	if !namespaceContainsSegment(namespace, tenantID) {
+		return fmt.Errorf("namespace must include tenant_id")
+	}
+	return nil
+}
+
+func namespaceContainsSegment(namespace, tenantID string) bool {
+	for _, segment := range strings.FieldsFunc(namespace, func(r rune) bool {
+		switch r {
+		case '/', '\\', ':', '|':
+			return true
+		default:
+			return false
+		}
+	}) {
+		if segment == tenantID {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate checks that audit retention and sampling policy is safe to use.

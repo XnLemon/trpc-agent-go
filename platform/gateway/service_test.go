@@ -583,6 +583,26 @@ func TestServiceHandleInboundReleaseIgnoresCanceledRequestContext(t *testing.T) 
 	require.NoError(t, lease.ctxErr)
 }
 
+func TestServiceHandleInboundPropagatesLeaseFencingToken(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	registerRuntime(t, registry, "tenant-a", r)
+	lease := &recordingLease{token: 42}
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithSessionLeaseStore(&recordingLeaseStore{lease: lease}),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, int64(42), r.calls[0].fencingToken)
+}
+
 func TestServiceHandleInboundCancellationDuringEventCollectionReleasesSessionLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	registry := NewInMemoryRegistry()
@@ -1213,11 +1233,12 @@ type runnerStub interface {
 }
 
 type runnerCall struct {
-	userID     string
-	sessionID  string
-	message    model.Message
-	requestID  string
-	runOptions agent.RunOptions
+	userID       string
+	sessionID    string
+	message      model.Message
+	requestID    string
+	fencingToken int64
+	runOptions   agent.RunOptions
 }
 
 type recordingRunner struct {
@@ -1258,12 +1279,14 @@ func (r *recordingRunner) Run(
 		return nil, r.runErr
 	}
 	runOptions := runOptionsFromOptions(runOpts...)
+	fencingToken, _ := platform.StorageFencingTokenFromContext(ctx)
 	r.calls = append(r.calls, runnerCall{
-		userID:     userID,
-		sessionID:  sessionID,
-		message:    message,
-		requestID:  runOptions.RequestID,
-		runOptions: runOptions,
+		userID:       userID,
+		sessionID:    sessionID,
+		message:      message,
+		requestID:    runOptions.RequestID,
+		fencingToken: fencingToken,
+		runOptions:   runOptions,
 	})
 	out := make(chan *event.Event, 2)
 	go func() {
@@ -1439,6 +1462,14 @@ func (s *recordingLeaseStore) Acquire(
 type recordingLease struct {
 	released bool
 	ctxErr   error
+	token    int64
+}
+
+func (l *recordingLease) FencingToken() int64 {
+	if l.token == 0 {
+		return 1
+	}
+	return l.token
 }
 
 func (l *recordingLease) Release(ctx context.Context) error {

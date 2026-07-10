@@ -179,6 +179,7 @@ func (s *Service) HandleInbound(
 			InternalUserID: internalUserID,
 			RequestID:      requestID,
 			Key:            key,
+			FencingToken:   record.SessionLease.FencingToken(),
 			Start:          start,
 		},
 	)
@@ -195,6 +196,7 @@ type inboundRunInput struct {
 	InternalUserID string
 	RequestID      string
 	Key            string
+	FencingToken   int64
 	Start          time.Time
 }
 
@@ -395,7 +397,11 @@ func (s *Service) runGatewayRunner(
 ) (string, error) {
 	runnerCtx, runnerSpan := telemetrytrace.Tracer.Start(routeCtx, "runner.run")
 	defer runnerSpan.End()
+	runnerCtx = platform.ContextWithStorageFencingToken(runnerCtx, input.FencingToken)
 	setInboundTraceAttributes(runnerSpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
+	if input.FencingToken > 0 {
+		runnerSpan.SetAttributes(attribute.Int64("storage.fencing_token", input.FencingToken))
+	}
 	ch, err := runtime.Runner.Run(
 		runnerCtx,
 		input.InternalUserID,

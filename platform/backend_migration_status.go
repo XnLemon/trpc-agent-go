@@ -22,6 +22,8 @@ type BackendMigrationResource string
 const (
 	// BackendMigrationResourceSession covers session event storage migrations.
 	BackendMigrationResourceSession BackendMigrationResource = "session"
+	// BackendMigrationResourceSummary covers session summary storage migrations.
+	BackendMigrationResourceSummary BackendMigrationResource = "summary"
 	// BackendMigrationResourceMemory covers memory store migrations.
 	BackendMigrationResourceMemory BackendMigrationResource = "memory"
 	// BackendMigrationResourceArtifact covers artifact object storage migrations.
@@ -427,6 +429,7 @@ func backendMigrationLag(sourceCount, targetCount int64) int64 {
 func (r BackendMigrationResource) valid() bool {
 	switch r {
 	case BackendMigrationResourceSession,
+		BackendMigrationResourceSummary,
 		BackendMigrationResourceMemory,
 		BackendMigrationResourceArtifact,
 		BackendMigrationResourceKnowledge,
