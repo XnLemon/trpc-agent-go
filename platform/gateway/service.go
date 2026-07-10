@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -133,7 +134,8 @@ func (s *Service) HandleInbound(
 	if err != nil {
 		return Result{}, err
 	}
-	text, err := s.validateInboundContent(ctx, routeSpan, msg, start)
+	auditSink := s.auditSinkForRuntime(runtime)
+	text, err := s.validateInboundContent(ctx, routeSpan, msg, start, auditSink)
 	if err != nil {
 		return Result{}, err
 	}
@@ -172,6 +174,7 @@ func (s *Service) HandleInbound(
 		routeCtx,
 		ctx,
 		runtime,
+		auditSink,
 		msg,
 		inboundRunInput{
 			Text:           text,
@@ -223,6 +226,17 @@ func (s *Service) lookupRuntime(
 		recordSpanError(routeSpan, err)
 		return Runtime{}, err
 	}
+	if err := authorizeBinding(runtime.Binding, msg); err != nil {
+		s.writeRejectAuditTo(
+			auditCtx,
+			s.auditSinkForRuntime(runtime),
+			msg,
+			start,
+			err,
+		)
+		recordSpanError(routeSpan, err)
+		return Runtime{}, err
+	}
 	return runtime, nil
 }
 
@@ -233,7 +247,7 @@ func validateRuntimeForMessage(runtime Runtime, msg platform.InboundMessage) err
 	if !runtime.matchesInbound(msg) {
 		return ErrRuntimeMismatch
 	}
-	return authorizeBinding(runtime.Binding, msg)
+	return nil
 }
 
 func (s *Service) validateInboundContent(
@@ -241,10 +255,11 @@ func (s *Service) validateInboundContent(
 	routeSpan oteltrace.Span,
 	msg platform.InboundMessage,
 	start time.Time,
+	auditSink platform.AuditSink,
 ) (string, error) {
 	text, err := inboundText(msg)
 	if err != nil {
-		s.writeRejectAudit(ctx, msg, start, err)
+		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
 		recordSpanError(routeSpan, err)
 		return "", err
 	}
@@ -368,17 +383,33 @@ func (s *Service) runAndReply(
 	routeCtx context.Context,
 	auditCtx context.Context,
 	runtime Runtime,
+	auditSink platform.AuditSink,
 	msg platform.InboundMessage,
 	input inboundRunInput,
 ) (Result, error) {
-	content, err := s.runGatewayRunner(routeCtx, auditCtx, runtime, msg, input)
+	content, err := s.runGatewayRunner(
+		routeCtx,
+		auditCtx,
+		runtime,
+		auditSink,
+		msg,
+		input,
+	)
 	if err != nil {
 		if markErr := s.markRunDeadLetter(routeCtx, input.Key); markErr != nil {
 			return Result{}, markErr
 		}
 		return Result{}, err
 	}
-	return s.writeReply(routeCtx, auditCtx, runtime, msg, input, content)
+	return s.writeReply(
+		routeCtx,
+		auditCtx,
+		runtime,
+		auditSink,
+		msg,
+		input,
+		content,
+	)
 }
 
 func (s *Service) markRunDeadLetter(ctx context.Context, key string) error {
@@ -392,6 +423,7 @@ func (s *Service) runGatewayRunner(
 	routeCtx context.Context,
 	auditCtx context.Context,
 	runtime Runtime,
+	auditSink platform.AuditSink,
 	msg platform.InboundMessage,
 	input inboundRunInput,
 ) (string, error) {
@@ -412,13 +444,13 @@ func (s *Service) runGatewayRunner(
 		agent.WithLatencyDiagnosticsEvents(false),
 	)
 	if err != nil {
-		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
 		return "", err
 	}
 	content, err := collectAssistantText(auditCtx, ch)
 	if err != nil {
-		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
 		return "", err
 	}
@@ -429,6 +461,7 @@ func (s *Service) writeReply(
 	routeCtx context.Context,
 	auditCtx context.Context,
 	runtime Runtime,
+	auditSink platform.AuditSink,
 	msg platform.InboundMessage,
 	input inboundRunInput,
 	content string,
@@ -450,7 +483,7 @@ func (s *Service) writeReply(
 	defer replySpan.End()
 	setInboundTraceAttributes(replySpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	if err := s.outboundStore.Save(replyCtx, reply.ResultRef, outbound); err != nil {
-		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
@@ -463,7 +496,7 @@ func (s *Service) writeReply(
 			recordSpanError(replySpan, markErr)
 			return Result{}, markErr
 		}
-		s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
@@ -474,7 +507,7 @@ func (s *Service) writeReply(
 	}
 	s.writeMessageEvent(auditCtx, messageEventFromInbound(msg, input.SessionID, input.Key, input.RequestID, reply.InboundSequence, input.Start))
 	s.writeMessageEvent(auditCtx, messageEventFromAssistant(msg, input.SessionID, reply.ResultRef, input.RequestID, reply.AssistantSequence, s.now()))
-	s.writeAudit(auditCtx, auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
+	s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
 	return Result{
 		RequestID:   input.RequestID,
 		SessionID:   input.SessionID,
@@ -510,6 +543,20 @@ func (s *Service) writeRejectAudit(
 	err error,
 ) {
 	s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+}
+
+func (s *Service) writeRejectAuditTo(
+	ctx context.Context,
+	auditSink platform.AuditSink,
+	msg platform.InboundMessage,
+	start time.Time,
+	err error,
+) {
+	s.writeAuditTo(
+		ctx,
+		auditSink,
+		auditFromMessage(msg, "", "", "reject", err.Error(), start, err),
+	)
 }
 
 func (s *Service) validateService() error {
@@ -713,10 +760,43 @@ func redactAuditReason(reason string) string {
 }
 
 func (s *Service) writeAudit(ctx context.Context, record platform.AuditRecord) {
-	if s.auditSink == nil {
+	s.writeAuditTo(ctx, s.auditSink, record)
+}
+
+func (s *Service) writeAuditTo(
+	ctx context.Context,
+	auditSink platform.AuditSink,
+	record platform.AuditRecord,
+) {
+	if isNilAuditSink(auditSink) {
 		return
 	}
-	_ = s.auditSink.WriteAudit(ctx, record)
+	_ = auditSink.WriteAudit(ctx, record)
+}
+
+func (s *Service) auditSinkForRuntime(runtime Runtime) platform.AuditSink {
+	if !isNilAuditSink(runtime.Audit) {
+		return runtime.Audit
+	}
+	return s.auditSink
+}
+
+func isNilAuditSink(auditSink platform.AuditSink) bool {
+	if auditSink == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(auditSink)
+	switch reflected.Kind() {
+	case reflect.Chan,
+		reflect.Func,
+		reflect.Interface,
+		reflect.Map,
+		reflect.Pointer,
+		reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func (s *Service) writeMessageEvent(ctx context.Context, event platform.MessageEvent) {
