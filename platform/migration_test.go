@@ -51,10 +51,41 @@ func TestStorageProfileValidateRejectsInvalidMigrationMode(t *testing.T) {
 	profile := StorageProfile{
 		TenantID:      "tenant",
 		ProfileID:     "profile",
+		Namespace:     "tenant/tenant",
 		MigrationMode: "dual-read",
 	}
 	if err := profile.Validate(); err == nil {
 		t.Fatalf("expected invalid migration mode error")
+	}
+}
+
+func TestStorageProfileValidateRequiresTenantScopedNamespace(t *testing.T) {
+	valid := StorageProfile{
+		TenantID:  "tenant-a",
+		ProfileID: "profile",
+		Namespace: "tenant/tenant-a/profile/profile",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected tenant-scoped namespace to pass, got %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		namespace string
+	}{
+		{name: "missing", namespace: ""},
+		{name: "other_tenant", namespace: "tenant/tenant-b/profile/profile"},
+		{name: "shared", namespace: "shared/profile"},
+		{name: "whitespace", namespace: " tenant/tenant-a/profile/profile "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := valid
+			profile.Namespace = tt.namespace
+			if err := profile.Validate(); err == nil {
+				t.Fatalf("expected namespace %q to fail", tt.namespace)
+			}
+		})
 	}
 }
 

@@ -18,8 +18,10 @@ import (
 
 	artifactmemory "trpc.group/trpc-go/trpc-agent-go/artifact/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	"trpc.group/trpc-go/trpc-agent-go/memory"
 	memoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
@@ -29,11 +31,14 @@ func TestRouterResolvesTenantStorageServices(t *testing.T) {
 	ctx := context.Background()
 	router := NewInMemoryRouter()
 	sessionSvc := sessioninmemory.NewSessionService()
+	summarySvc := sessioninmemory.NewSessionService()
 	memorySvc := memoryinmemory.NewMemoryService()
 	artifactSvc := artifactmemory.NewService()
 	knowledgeSvc := &stubKnowledge{}
 	auditSink := platform.NewInMemoryAuditSink()
-	require.NoError(t, router.RegisterProfile(profile("tenant-a", "profile-a", "hot")))
+	p := profile("tenant-a", "profile-a", "hot")
+	p.SummaryBackend = "summary-hot"
+	require.NoError(t, router.RegisterProfile(p))
 	require.NoError(t, router.RegisterBackend(BackendSet{
 		TenantID:  "tenant-a",
 		BackendID: "hot",
@@ -43,8 +48,15 @@ func TestRouterResolvesTenantStorageServices(t *testing.T) {
 		Knowledge: knowledgeSvc,
 		Audit:     auditSink,
 	}))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "summary-hot",
+		Summary:   summarySvc,
+	}))
 
 	gotSession, err := router.Session(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	gotSummary, err := router.Summary(ctx, "tenant-a", "profile-a")
 	require.NoError(t, err)
 	gotMemory, err := router.Memory(ctx, "tenant-a", "profile-a")
 	require.NoError(t, err)
@@ -56,6 +68,7 @@ func TestRouterResolvesTenantStorageServices(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Same(t, sessionSvc, gotSession)
+	assert.Same(t, summarySvc, gotSummary)
 	assert.Same(t, memorySvc, gotMemory)
 	assert.Same(t, artifactSvc, gotArtifact)
 	assert.Same(t, knowledgeSvc, gotKnowledge)
@@ -109,6 +122,144 @@ func TestRouterRejectsMissingResourceService(t *testing.T) {
 	require.ErrorIs(t, err, ErrBackendNotFound)
 }
 
+func TestRouterRouteReturnsTenantScopedMetadata(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	p := profile("tenant-a", "profile-a", "hot")
+	p.SessionBackend = "session-hot"
+	p.MigrationMode = string(platform.StorageMigrationModeDualWrite)
+	require.NoError(t, router.RegisterProfile(p))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "session-hot",
+		Session:   sessioninmemory.NewSessionService(),
+	}))
+
+	route, err := router.Route(ctx, "tenant-a", "profile-a", platform.BackendMigrationResourceSession)
+	require.NoError(t, err)
+
+	assert.Equal(t, "tenant-a", route.TenantID)
+	assert.Equal(t, "profile-a", route.ProfileID)
+	assert.Equal(t, platform.BackendMigrationResourceSession, route.Resource)
+	assert.Equal(t, "session-hot", route.BackendID)
+	assert.Equal(t, "tenant/tenant-a", route.Namespace)
+	assert.Equal(t, platform.StorageMigrationModeDualWrite, route.MigrationMode)
+	assert.True(t, route.IsMigrating)
+}
+
+func TestRouterAdapterReturnsScopedStores(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	sessionSvc := sessioninmemory.NewSessionService()
+	p := profile("tenant-a", "profile-a", "hot")
+	p.SessionBackend = "session-hot"
+	require.NoError(t, router.RegisterProfile(p))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "session-hot",
+		Session:   sessionSvc,
+	}))
+
+	adapter, err := router.Adapter(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	sessionStore, err := adapter.Session(ctx)
+	require.NoError(t, err)
+	scopedApp := adapter.Scope().ScopedAppName("app-a")
+
+	created, err := sessionStore.CreateSession(ctx, session.Key{
+		AppName:   scopedApp,
+		UserID:    "user-a",
+		SessionID: "session-a",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant/tenant-a/app-a", created.AppName)
+
+	route, err := adapter.Route(ctx, platform.BackendMigrationResourceSession)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-a", route.TenantID)
+	assert.Equal(t, "profile-a", route.ProfileID)
+	assert.Equal(t, "tenant/tenant-a", route.Namespace)
+}
+
+func TestRouterAdapterRejectsUnscopedKeys(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	p := profile("tenant-a", "profile-a", "hot")
+	require.NoError(t, router.RegisterProfile(p))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "hot",
+		Session:   sessioninmemory.NewSessionService(),
+		Memory:    memoryinmemory.NewMemoryService(),
+	}))
+
+	adapter, err := router.Adapter(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	sessionStore, err := adapter.Session(ctx)
+	require.NoError(t, err)
+	memoryStore, err := adapter.Memory(ctx)
+	require.NoError(t, err)
+
+	_, err = sessionStore.CreateSession(ctx, session.Key{
+		AppName:   "app-a",
+		UserID:    "user-a",
+		SessionID: "session-a",
+	}, nil)
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+
+	err = memoryStore.AddMemory(ctx, memory.UserKey{
+		AppName: "app-a",
+		UserID:  "user-a",
+	}, "prefers tea", []string{"preference"})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+}
+
+func TestRouterAdapterScopesKnowledgeQueries(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	knowledgeSvc := &capturingKnowledge{}
+	p := profile("tenant-a", "profile-a", "hot")
+	require.NoError(t, router.RegisterProfile(p))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "hot",
+		Knowledge: knowledgeSvc,
+	}))
+	adapter, err := router.Adapter(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	knowledgeStore, err := adapter.Knowledge(ctx)
+	require.NoError(t, err)
+	req := &knowledge.SearchRequest{
+		Query: "deployment",
+		SearchFilter: &knowledge.SearchFilter{
+			Metadata: map[string]any{"category": "runbook"},
+		},
+	}
+
+	_, err = knowledgeStore.Search(ctx, req)
+	require.NoError(t, err)
+
+	assert.Equal(t, "tenant-a", knowledgeSvc.last.SearchFilter.Metadata["tenant_id"])
+	assert.Equal(t, "runbook", knowledgeSvc.last.SearchFilter.Metadata["category"])
+	assert.NotContains(t, req.SearchFilter.Metadata, "tenant_id")
+
+	_, err = knowledgeStore.Search(ctx, &knowledge.SearchRequest{
+		Query: "deployment",
+		SearchFilter: &knowledge.SearchFilter{
+			Metadata: map[string]any{"tenant_id": "tenant-b"},
+		},
+	})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+
+	_, err = knowledgeStore.Search(ctx, &knowledge.SearchRequest{
+		Query: "deployment",
+		SearchFilter: &knowledge.SearchFilter{
+			Metadata: map[string]any{"tenant_id": []string{"tenant-a"}},
+		},
+	})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+}
+
 func TestRegisterProfileValidatesSecretRefs(t *testing.T) {
 	router := NewInMemoryRouter()
 	p := profile("tenant-a", "profile-a", "hot")
@@ -135,6 +286,7 @@ func profile(tenantID string, profileID string, backendID string) platform.Stora
 		TenantID:         tenantID,
 		ProfileID:        profileID,
 		SessionBackend:   backendID,
+		SummaryBackend:   backendID,
 		MemoryBackend:    backendID,
 		ArtifactBackend:  backendID,
 		KnowledgeBackend: backendID,
@@ -153,5 +305,20 @@ func (s *stubKnowledge) Search(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	return &knowledge.SearchResult{}, nil
+}
+
+type capturingKnowledge struct {
+	last knowledge.SearchRequest
+}
+
+func (s *capturingKnowledge) Search(
+	ctx context.Context,
+	req *knowledge.SearchRequest,
+) (*knowledge.SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.last = *req
 	return &knowledge.SearchResult{}, nil
 }

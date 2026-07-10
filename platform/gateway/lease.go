@@ -27,19 +27,22 @@ type SessionLeaseKey struct {
 
 // SessionLease releases one acquired session execution slot.
 type SessionLease interface {
+	FencingToken() int64
 	Release(ctx context.Context) error
 }
 
 // InMemorySessionLeaseStore is a process-local lease store for tests and demos.
 type InMemorySessionLeaseStore struct {
-	mu     sync.Mutex
-	leases map[SessionLeaseKey]struct{}
+	mu      sync.Mutex
+	leases  map[SessionLeaseKey]int64
+	counter map[SessionLeaseKey]int64
 }
 
 // NewInMemorySessionLeaseStore creates an empty process-local session lease store.
 func NewInMemorySessionLeaseStore() *InMemorySessionLeaseStore {
 	return &InMemorySessionLeaseStore{
-		leases: make(map[SessionLeaseKey]struct{}),
+		leases:  make(map[SessionLeaseKey]int64),
+		counter: make(map[SessionLeaseKey]int64),
 	}
 }
 
@@ -56,17 +59,28 @@ func (s *InMemorySessionLeaseStore) Acquire(
 	if _, ok := s.leases[key]; ok {
 		return nil, false, nil
 	}
-	s.leases[key] = struct{}{}
+	token := s.counter[key] + 1
+	s.counter[key] = token
+	s.leases[key] = token
 	return &inMemorySessionLease{
-		store: s,
-		key:   key,
+		store:        s,
+		key:          key,
+		fencingToken: token,
 	}, true, nil
 }
 
 type inMemorySessionLease struct {
-	store *InMemorySessionLeaseStore
-	key   SessionLeaseKey
-	once  sync.Once
+	store        *InMemorySessionLeaseStore
+	key          SessionLeaseKey
+	fencingToken int64
+	once         sync.Once
+}
+
+func (l *inMemorySessionLease) FencingToken() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.fencingToken
 }
 
 func (l *inMemorySessionLease) Release(ctx context.Context) error {

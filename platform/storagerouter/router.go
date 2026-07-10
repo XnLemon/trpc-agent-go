@@ -10,6 +10,7 @@ package storagerouter
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -25,16 +26,38 @@ type BackendSet struct {
 	TenantID  string
 	BackendID string
 	Session   session.Service
+	Summary   SummaryStore
 	Memory    memory.Service
 	Artifact  artifact.Service
 	Knowledge knowledge.Knowledge
 	Audit     platform.AuditSink
 }
 
+// SummaryStore is the summary-specific storage surface selected by SummaryBackend.
+type SummaryStore interface {
+	CreateSessionSummary(ctx context.Context, sess *session.Session, filterKey string, force bool) error
+	EnqueueSummaryJob(ctx context.Context, sess *session.Session, filterKey string, force bool) error
+	GetSessionSummaryText(ctx context.Context, sess *session.Session, opts ...session.SummaryOption) (string, bool)
+}
+
+// RouteBinding describes the concrete backend route selected for one resource.
+type RouteBinding struct {
+	TenantID      string
+	ProfileID     string
+	Resource      platform.BackendMigrationResource
+	BackendID     string
+	Namespace     string
+	MigrationMode platform.StorageMigrationMode
+	IsMigrating   bool
+}
+
 // Router resolves tenant/app storage services from platform storage profiles.
 type Router interface {
 	Profile(ctx context.Context, tenantID string, profileID string) (platform.StorageProfile, error)
+	Adapter(ctx context.Context, tenantID string, profileID string) (StorageAdapter, error)
+	Route(ctx context.Context, tenantID string, profileID string, resource platform.BackendMigrationResource) (RouteBinding, error)
 	Session(ctx context.Context, tenantID string, profileID string) (session.Service, error)
+	Summary(ctx context.Context, tenantID string, profileID string) (SummaryStore, error)
 	Memory(ctx context.Context, tenantID string, profileID string) (memory.Service, error)
 	Artifact(ctx context.Context, tenantID string, profileID string) (artifact.Service, error)
 	Knowledge(ctx context.Context, tenantID string, profileID string) (knowledge.Knowledge, error)
@@ -120,6 +143,72 @@ func (r *InMemoryRouter) Profile(
 	return profile, nil
 }
 
+// Adapter returns a tenant/profile-bound storage adapter.
+func (r *InMemoryRouter) Adapter(
+	ctx context.Context,
+	tenantID string,
+	profileID string,
+) (StorageAdapter, error) {
+	profile, err := r.Profile(ctx, tenantID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	return &tenantStorageAdapter{
+		router: r,
+		scope: StorageScope{
+			TenantID:  profile.TenantID,
+			ProfileID: profile.ProfileID,
+			Namespace: profile.Namespace,
+		},
+	}, nil
+}
+
+// Route resolves the concrete tenant-scoped backend route for one resource.
+func (r *InMemoryRouter) Route(
+	ctx context.Context,
+	tenantID string,
+	profileID string,
+	resource platform.BackendMigrationResource,
+) (RouteBinding, error) {
+	profile, err := r.Profile(ctx, tenantID, profileID)
+	if err != nil {
+		return RouteBinding{}, err
+	}
+	kind, err := resourceKindFor(resource)
+	if err != nil {
+		return RouteBinding{}, err
+	}
+	backendID := backendIDFor(profile, kind)
+	if strings.TrimSpace(backendID) == "" {
+		return RouteBinding{}, ErrBackendNotFound
+	}
+	mode, err := platform.NormalizeStorageMigrationMode(profile.MigrationMode)
+	if err != nil {
+		return RouteBinding{}, err
+	}
+	r.mu.RLock()
+	backend, ok := r.backends[backendKey{tenantID: tenantID, backendID: backendID}]
+	r.mu.RUnlock()
+	if !ok {
+		return RouteBinding{}, ErrBackendNotFound
+	}
+	if backend.TenantID != tenantID {
+		return RouteBinding{}, ErrBackendTenantMismatch
+	}
+	if !backendHasResource(backend, kind) {
+		return RouteBinding{}, ErrBackendNotFound
+	}
+	return RouteBinding{
+		TenantID:      profile.TenantID,
+		ProfileID:     profile.ProfileID,
+		Resource:      resource,
+		BackendID:     strings.TrimSpace(backendID),
+		Namespace:     profile.Namespace,
+		MigrationMode: mode,
+		IsMigrating:   platform.IsActiveStorageMigrationMode(mode),
+	}, nil
+}
+
 // Session resolves the session service selected by a tenant storage profile.
 func (r *InMemoryRouter) Session(
 	ctx context.Context,
@@ -134,6 +223,22 @@ func (r *InMemoryRouter) Session(
 		return nil, ErrBackendNotFound
 	}
 	return backend.Session, nil
+}
+
+// Summary resolves the summary store selected by a tenant storage profile.
+func (r *InMemoryRouter) Summary(
+	ctx context.Context,
+	tenantID string,
+	profileID string,
+) (SummaryStore, error) {
+	backend, err := r.backend(ctx, tenantID, profileID, resourceSummary)
+	if err != nil {
+		return nil, err
+	}
+	if backend.Summary == nil {
+		return nil, ErrBackendNotFound
+	}
+	return backend.Summary, nil
 }
 
 // Memory resolves the memory service selected by a tenant storage profile.
@@ -204,6 +309,7 @@ type resourceKind string
 
 const (
 	resourceSession   resourceKind = "session"
+	resourceSummary   resourceKind = "summary"
 	resourceMemory    resourceKind = "memory"
 	resourceArtifact  resourceKind = "artifact"
 	resourceKnowledge resourceKind = "knowledge"
@@ -241,6 +347,8 @@ func backendIDFor(profile platform.StorageProfile, kind resourceKind) string {
 	switch kind {
 	case resourceSession:
 		return strings.TrimSpace(profile.SessionBackend)
+	case resourceSummary:
+		return strings.TrimSpace(profile.SummaryBackend)
 	case resourceMemory:
 		return strings.TrimSpace(profile.MemoryBackend)
 	case resourceArtifact:
@@ -251,5 +359,24 @@ func backendIDFor(profile platform.StorageProfile, kind resourceKind) string {
 		return strings.TrimSpace(profile.AuditBackend)
 	default:
 		return ""
+	}
+}
+
+func resourceKindFor(resource platform.BackendMigrationResource) (resourceKind, error) {
+	switch resource {
+	case platform.BackendMigrationResourceSession:
+		return resourceSession, nil
+	case platform.BackendMigrationResourceSummary:
+		return resourceSummary, nil
+	case platform.BackendMigrationResourceMemory:
+		return resourceMemory, nil
+	case platform.BackendMigrationResourceArtifact:
+		return resourceArtifact, nil
+	case platform.BackendMigrationResourceKnowledge:
+		return resourceKnowledge, nil
+	case platform.BackendMigrationResourceAudit:
+		return resourceAudit, nil
+	default:
+		return "", fmt.Errorf("unsupported storage resource %q", resource)
 	}
 }
