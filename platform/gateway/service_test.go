@@ -956,6 +956,197 @@ func TestServiceHandleInboundSkipsFileLimitWhenChannelLimitUnset(t *testing.T) {
 	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
 }
 
+func TestServiceHandleInboundRejectsRateLimitedBeforeBudgetAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RateLimitQPS = 1
+	runtime.Binding.ChannelLimits.Burst = 1
+	require.NoError(t, registry.Register(runtime))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	audit := platform.NewInMemoryAuditSink()
+	estimateCalls := 0
+	svc := NewService(
+		registry,
+		idempotency,
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+		WithBudgetEstimator(BudgetEstimatorFunc(func(
+			ctx context.Context,
+			request BudgetEstimateRequest,
+		) (platform.UsageEstimate, error) {
+			estimateCalls++
+			return platform.UsageEstimate{}, nil
+		})),
+	)
+	first := inbound("tenant-a", "msg-1", "user-1", "hello")
+	second := inbound("tenant-a", "msg-2", "user-1", "again")
+
+	firstResult, err := svc.HandleInbound(ctx, first)
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, second)
+
+	require.ErrorIs(t, err, ErrRateLimited)
+	assert.Equal(t, "unused", firstResult.Outbound.Content)
+	assert.Len(t, r.calls, 1)
+	assert.Equal(t, 1, estimateCalls)
+	_, ok, getErr := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-2"))
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	require.Len(t, audit.Records(), 2)
+	assert.Equal(t, "completed", audit.Records()[0].Decision)
+	assert.Equal(t, "reject", audit.Records()[1].Decision)
+	assert.Equal(t, ErrRateLimited.Error(), audit.Records()[1].DecisionReason)
+}
+
+func TestServiceHandleInboundRateLimitRefillsOverTime(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RateLimitQPS = 2
+	runtime.Binding.ChannelLimits.Burst = 2
+	require.NoError(t, registry.Register(runtime))
+	now := time.Unix(1000, 0)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithNow(func() time.Time { return now }),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "first"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-2", "user-1", "second"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-3", "user-1", "third"))
+	require.ErrorIs(t, err, ErrRateLimited)
+
+	now = now.Add(500 * time.Millisecond)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-4", "user-1", "fourth"))
+
+	require.NoError(t, err)
+	assert.Len(t, r.calls, 3)
+}
+
+func TestServiceHandleInboundSkipsRateLimitWhenUnset(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RateLimitQPS = 0
+	runtime.Binding.ChannelLimits.Burst = 1
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "first"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-2", "user-1", "second"))
+
+	require.NoError(t, err)
+	assert.Len(t, r.calls, 2)
+}
+
+func TestServiceHandleInboundRateLimitKeepsDefaultLimiterOnNilOption(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RateLimitQPS = 1
+	runtime.Binding.ChannelLimits.Burst = 1
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithRateLimiter(nil),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "first"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-2", "user-1", "second"))
+
+	require.ErrorIs(t, err, ErrRateLimited)
+	assert.Len(t, r.calls, 1)
+}
+
+func TestServiceHandleInboundRateLimitUsesQPSAsDefaultBurst(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.RateLimitQPS = 2
+	runtime.Binding.ChannelLimits.Burst = 0
+	require.NoError(t, registry.Register(runtime))
+	now := time.Unix(1000, 0)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithNow(func() time.Time { return now }),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "first"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-2", "user-1", "second"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-3", "user-1", "third"))
+
+	require.ErrorIs(t, err, ErrRateLimited)
+	assert.Len(t, r.calls, 2)
+}
+
+func TestServiceHandleInboundRateLimitIsolatesBindings(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	firstRuntime := validRuntime("tenant-a", r)
+	firstRuntime.Binding.ChannelLimits.RateLimitQPS = 1
+	firstRuntime.Binding.ChannelLimits.Burst = 1
+	require.NoError(t, registry.Register(firstRuntime))
+	secondRuntime := validRuntimeForBinding(
+		"tenant-a",
+		"app-alt",
+		"binding-alt",
+		"wecom",
+		"acct-alt",
+		r,
+	)
+	secondRuntime.Binding.ChannelLimits.RateLimitQPS = 1
+	secondRuntime.Binding.ChannelLimits.Burst = 1
+	require.NoError(t, registry.Register(secondRuntime))
+	now := time.Unix(1000, 0)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithNow(func() time.Time { return now }),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "first"))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inboundForRuntime(
+		"tenant-a",
+		"app-alt",
+		"binding-alt",
+		"wecom",
+		"acct-alt",
+		"msg-2",
+		"user-1",
+		"second",
+	))
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, inbound("tenant-a", "msg-3", "user-1", "third"))
+
+	require.ErrorIs(t, err, ErrRateLimited)
+	assert.Len(t, r.calls, 2)
+}
+
 func TestServiceHandleInboundRejectsDisallowedUser(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
