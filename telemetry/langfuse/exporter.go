@@ -24,11 +24,18 @@ import (
 
 	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/telemetry/tracetransform"
 )
 
 var _ trace.SpanExporter = (*exporter)(nil)
+
+var (
+	observationRedactorOnce sync.Once
+	observationRedactor     *platform.Redactor
+	observationRedactorErr  error
+)
 
 type exporter struct {
 	client otlptrace.Client
@@ -152,10 +159,10 @@ func transformInvokeAgent(span *tracepb.Span) {
 		}
 	}
 	if input := otelObservationInput(inputMessagesOTel); input != nil {
-		newAttributes = append(newAttributes, stringKV(observationInput, *input))
+		newAttributes = append(newAttributes, observationStringKV(observationInput, *input))
 	}
 	if output := otelObservationOutput(outputMessagesOTel); output != nil {
-		newAttributes = append(newAttributes, stringKV(observationOutput, *output))
+		newAttributes = append(newAttributes, observationStringKV(observationOutput, *output))
 	}
 	span.Attributes = newAttributes
 }
@@ -184,10 +191,10 @@ func transformCallLLM(span *tracepb.Span) {
 	newAttributes = append(newAttributes, collected.attrs...)
 
 	// observation.input
-	newAttributes = append(newAttributes, stringKV(observationInput, buildLLMObservationInput(collected)))
+	newAttributes = append(newAttributes, observationStringKV(observationInput, buildLLMObservationInput(collected)))
 
 	// observation.output
-	newAttributes = append(newAttributes, stringKV(observationOutput, buildLLMObservationOutput(collected)))
+	newAttributes = append(newAttributes, observationStringKV(observationOutput, buildLLMObservationOutput(collected)))
 
 	// observation.model_parameters (generation_config from llm request)
 	if kv := extractModelParameters(collected.llmRequest); kv != nil {
@@ -321,6 +328,25 @@ func stringKV(key, value string) *commonpb.KeyValue {
 	}
 }
 
+func observationStringKV(key, value string) *commonpb.KeyValue {
+	return stringKV(key, redactObservationValue(value))
+}
+
+func redactObservationValue(value string) string {
+	redactor, err := observationValueRedactor()
+	if err != nil {
+		return ""
+	}
+	return redactor.Redact(value)
+}
+
+func observationValueRedactor() (*platform.Redactor, error) {
+	observationRedactorOnce.Do(func() {
+		observationRedactor, observationRedactorErr = platform.NewRedactor()
+	})
+	return observationRedactor, observationRedactorErr
+}
+
 // getStringPtr returns a pointer to the string value of v, or nil if v is nil.
 func getStringPtr(v *commonpb.AnyValue) *string {
 	if v == nil {
@@ -346,6 +372,7 @@ func stringPtrValueOrNA(v *string) string {
 }
 
 func truncateObservationInputMessages(raw string) string {
+	raw = redactObservationValue(raw)
 	maxLeafBytes := getObservationMaxBytes()
 	if maxLeafBytes == 0 {
 		return ""
@@ -359,7 +386,7 @@ func truncateObservationInputMessages(raw string) string {
 
 	var msgs []observationTelemetryMessage
 	if err := json.Unmarshal([]byte(raw), &msgs); err != nil {
-		return truncateObservationValue(raw)
+		return redactObservationValue(truncateObservationValue(raw))
 	}
 
 	if maxLeafBytes > 0 {
@@ -367,12 +394,13 @@ func truncateObservationInputMessages(raw string) string {
 		sanitizeTelemetryMessagesForObservation(msgs, plan)
 	}
 	if b, err := json.Marshal(msgs); err == nil {
-		return string(b)
+		return redactObservationValue(string(b))
 	}
-	return truncateObservationValue(raw)
+	return redactObservationValue(truncateObservationValue(raw))
 }
 
 func truncateObservationOutputChoices(raw string) string {
+	raw = redactObservationValue(raw)
 	maxLeafBytes := getObservationMaxBytes()
 	if maxLeafBytes == 0 {
 		return ""
@@ -386,7 +414,7 @@ func truncateObservationOutputChoices(raw string) string {
 
 	var choices []observationTelemetryChoice
 	if err := json.Unmarshal([]byte(raw), &choices); err != nil {
-		return truncateObservationValue(raw)
+		return redactObservationValue(truncateObservationValue(raw))
 	}
 
 	if maxLeafBytes > 0 {
@@ -397,9 +425,9 @@ func truncateObservationOutputChoices(raw string) string {
 		}
 	}
 	if b, err := json.Marshal(choices); err == nil {
-		return string(b)
+		return redactObservationValue(string(b))
 	}
-	return truncateObservationValue(raw)
+	return redactObservationValue(truncateObservationValue(raw))
 }
 
 func isOTelMessagesPayload(raw string) bool {
@@ -416,6 +444,7 @@ func isOTelMessagesPayload(raw string) bool {
 }
 
 func truncateObservationLLMInput(raw string) string {
+	raw = redactObservationValue(raw)
 	maxLeafBytes := getObservationMaxBytes()
 	if maxLeafBytes < 0 {
 		return raw
@@ -438,7 +467,7 @@ func truncateObservationLLMInput(raw string) string {
 			prompt.Tools = json.RawMessage([]byte(tools))
 		}
 		if b, err := json.Marshal(prompt); err == nil {
-			return string(b)
+			return redactObservationValue(string(b))
 		}
 	}
 	if isOTelMessagesPayload(raw) {
@@ -450,7 +479,7 @@ func truncateObservationLLMInput(raw string) string {
 		plan := truncateMessagesPlan{textLimit: maxLeafBytes, binaryLimit: maxLeafBytes}
 		sanitizeTelemetryMessagesForObservation(msgs, plan)
 		if b, err := json.Marshal(msgs); err == nil {
-			return string(b)
+			return redactObservationValue(string(b))
 		}
 	}
 
@@ -462,6 +491,7 @@ func truncateObservationLLMResponse(raw string) string {
 }
 
 func truncateObservationJSONLeafValues(raw string) string {
+	raw = redactObservationValue(raw)
 	maxLeafBytes := getObservationMaxBytes()
 	if maxLeafBytes < 0 {
 		return raw
@@ -475,13 +505,13 @@ func truncateObservationJSONLeafValues(raw string) string {
 
 	var v any
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
-		return truncateObservationValue(raw)
+		return redactObservationValue(truncateObservationValue(raw))
 	}
 	v = truncateJSONLeafValue(v, maxLeafBytes)
 	if b, err := json.Marshal(v); err == nil {
-		return string(b)
+		return redactObservationValue(string(b))
 	}
-	return truncateObservationValue(raw)
+	return redactObservationValue(truncateObservationValue(raw))
 }
 
 func truncateJSONLeafValue(v any, maxLeafBytes int) any {
@@ -660,36 +690,22 @@ func transformExecuteTool(span *tracepb.Span) {
 			newAttributes = append(newAttributes, &commonpb.KeyValue{Key: traceUserID, Value: attr.Value})
 		case semconvtrace.KeyGenAIToolCallArguments:
 			if attr.Value != nil {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationInput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: truncateObservationJSONLeafValues(attr.Value.GetStringValue())},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(
+					observationInput,
+					truncateObservationJSONLeafValues(attr.Value.GetStringValue()),
+				))
 			} else {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationInput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: "N/A"},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(observationInput, "N/A"))
 			}
 			// Skip this attribute (delete it)
 		case semconvtrace.KeyGenAIToolCallResult:
 			if attr.Value != nil {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationOutput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: truncateObservationJSONLeafValues(attr.Value.GetStringValue())},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(
+					observationOutput,
+					truncateObservationJSONLeafValues(attr.Value.GetStringValue()),
+				))
 			} else {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationOutput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: "N/A"},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(observationOutput, "N/A"))
 			}
 			// Skip this attribute (delete it)
 		default:
@@ -727,36 +743,22 @@ func transformWorkflow(span *tracepb.Span) {
 			newAttributes = append(newAttributes, &commonpb.KeyValue{Key: traceUserID, Value: attr.Value})
 		case semconvtrace.KeyGenAIWorkflowRequest:
 			if attr.Value != nil {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationInput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: truncateObservationJSONLeafValues(attr.Value.GetStringValue())},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(
+					observationInput,
+					truncateObservationJSONLeafValues(attr.Value.GetStringValue()),
+				))
 			} else {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationInput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: "N/A"},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(observationInput, "N/A"))
 			}
 			// Skip this attribute (delete it)
 		case semconvtrace.KeyGenAIWorkflowResponse:
 			if attr.Value != nil {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationOutput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: truncateObservationJSONLeafValues(attr.Value.GetStringValue())},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(
+					observationOutput,
+					truncateObservationJSONLeafValues(attr.Value.GetStringValue()),
+				))
 			} else {
-				newAttributes = append(newAttributes, &commonpb.KeyValue{
-					Key: observationOutput,
-					Value: &commonpb.AnyValue{
-						Value: &commonpb.AnyValue_StringValue{StringValue: "N/A"},
-					},
-				})
+				newAttributes = append(newAttributes, observationStringKV(observationOutput, "N/A"))
 			}
 			// Skip this attribute (delete it)
 		default:
