@@ -30,6 +30,7 @@ type AuditContext struct {
 }
 
 type auditContextKey struct{}
+type approvedToolCallContextKey struct{}
 
 // ContextWithAuditContext attaches trusted platform audit context.
 func ContextWithAuditContext(ctx context.Context, auditCtx AuditContext) context.Context {
@@ -37,6 +38,56 @@ func ContextWithAuditContext(ctx context.Context, auditCtx AuditContext) context
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, auditContextKey{}, auditCtx)
+}
+
+// ApprovedToolCall binds approval to the exact tool call payload reviewed by
+// the approval plugin.
+type ApprovedToolCall struct {
+	ToolCallID     string
+	ToolName       string
+	ArgumentsHash  string
+	ArgumentsBytes int
+}
+
+// contextWithApprovedToolCall marks a reviewed tool call as approved so later
+// mandatory permission checks do not ask for the same approval again.
+func contextWithApprovedToolCall(ctx context.Context, args *tool.BeforeToolArgs) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fingerprint := approvedToolCallFingerprint(args)
+	if fingerprint.ToolCallID == "" {
+		return ctx
+	}
+	return context.WithValue(
+		ctx,
+		approvedToolCallContextKey{},
+		fingerprint,
+	)
+}
+
+// ApprovedToolCallFromContext returns the approved tool call fingerprint, if any.
+func ApprovedToolCallFromContext(ctx context.Context) (ApprovedToolCall, bool) {
+	if ctx == nil {
+		return ApprovedToolCall{}, false
+	}
+	fingerprint, ok := ctx.Value(approvedToolCallContextKey{}).(ApprovedToolCall)
+	fingerprint.ToolCallID = strings.TrimSpace(fingerprint.ToolCallID)
+	fingerprint.ToolName = strings.TrimSpace(fingerprint.ToolName)
+	return fingerprint, ok && fingerprint.ToolCallID != ""
+}
+
+func approvedToolCallFingerprint(args *tool.BeforeToolArgs) ApprovedToolCall {
+	if args == nil {
+		return ApprovedToolCall{}
+	}
+	hash, bytes := argumentDigest(args.Arguments)
+	return ApprovedToolCall{
+		ToolCallID:     strings.TrimSpace(args.ToolCallID),
+		ToolName:       strings.TrimSpace(args.ToolName),
+		ArgumentsHash:  hash,
+		ArgumentsBytes: bytes,
+	}
 }
 
 func (p *Plugin) writeApprovalAudit(
@@ -110,11 +161,19 @@ func approvalAuditContextFrom(ctx context.Context) AuditContext {
 }
 
 func argumentSummaryRef(args []byte) string {
-	if len(args) == 0 {
+	hash, bytes := argumentDigest(args)
+	if hash == "" {
 		return ""
 	}
+	return "args:sha256:" + hash + " args_bytes:" + strconv.Itoa(bytes)
+}
+
+func argumentDigest(args []byte) (string, int) {
+	if len(args) == 0 {
+		return "", 0
+	}
 	sum := sha256.Sum256(args)
-	return "args:sha256:" + hex.EncodeToString(sum[:]) + " args_bytes:" + strconv.Itoa(len(args))
+	return hex.EncodeToString(sum[:]), len(args)
 }
 
 func approvalAuditDecisionReason(decision platform.ToolApprovalDecision) string {

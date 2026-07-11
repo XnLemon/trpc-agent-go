@@ -198,6 +198,11 @@ func (p *Policy) CheckToolPermission(
 		name = strings.TrimSpace(req.Declaration.Name)
 	}
 	decision, reason, audit := p.decide(req, name)
+	if decision.Action == tool.PermissionActionAsk && approvedToolCall(ctx, req) {
+		decision = tool.AllowPermission()
+		reason = ""
+		audit = false
+	}
 	if audit {
 		summary, err := p.ApprovalSummary(req, decision, reason)
 		if err != nil {
@@ -208,6 +213,36 @@ func (p *Policy) CheckToolPermission(
 		}
 	}
 	return decision, nil
+}
+
+func approvedToolCall(ctx context.Context, req *tool.PermissionRequest) bool {
+	if req == nil || strings.TrimSpace(req.ToolCallID) == "" {
+		return false
+	}
+	fingerprint, ok := approval.ApprovedToolCallFromContext(ctx)
+	if !ok {
+		return false
+	}
+	if fingerprint.ToolCallID != strings.TrimSpace(req.ToolCallID) {
+		return false
+	}
+	name := strings.TrimSpace(req.ToolName)
+	if name == "" && req.Declaration != nil {
+		name = strings.TrimSpace(req.Declaration.Name)
+	}
+	if fingerprint.ToolName != name {
+		return false
+	}
+	return fingerprint.ArgumentsHash == argumentsHash(req.Arguments) &&
+		fingerprint.ArgumentsBytes == len(req.Arguments)
+}
+
+func argumentsHash(args []byte) string {
+	if len(args) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(args)
+	return hex.EncodeToString(sum[:])
 }
 
 func (p *Policy) beforeTool() tool.BeforeToolCallbackStructured {

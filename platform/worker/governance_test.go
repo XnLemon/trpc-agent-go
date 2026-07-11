@@ -10,6 +10,8 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,8 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/platform/artifactstore"
 	"trpc.group/trpc-go/trpc-agent-go/platform/gateway"
 	"trpc.group/trpc-go/trpc-agent-go/platform/storagerouter"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -100,6 +104,122 @@ func TestRuntimeBuilderAppliesToolGovernanceEndToEnd(t *testing.T) {
 	assert.Equal(t, tenant.TenantID, records[0].TenantID)
 	assert.Equal(t, app.AppID, records[0].AppID)
 	assert.Equal(t, "completed", records[1].Decision)
+}
+
+func TestRuntimeBuilderRunsApprovalPluginBeforeMandatoryPolicy(t *testing.T) {
+	ctx := context.Background()
+	router, auditSink := governanceTestRouter(t)
+	tenant, app, binding := governanceRuntimeConfig()
+	app.ToolPolicyID = "policy-a"
+	policy := platform.ToolPolicy{
+		TenantID:            tenant.TenantID,
+		AppID:               app.AppID,
+		PolicyID:            app.ToolPolicyID,
+		ToolWhitelist:       []string{"read_file", "shell"},
+		HighRiskTools:       []string{"shell"},
+		DangerousToolAction: platform.DangerousToolActionAsk,
+	}
+	var captured AgentDependencies
+	builder, err := NewRuntimeBuilder(
+		router,
+		AgentFactoryFunc(func(
+			_ context.Context,
+			dependencies AgentDependencies,
+		) (agent.Agent, error) {
+			captured = dependencies
+			return newToolCallGovernanceAgent(app.AgentName), nil
+		}),
+		WithToolPolicyProvider(ToolPolicyProviderFunc(func(
+			context.Context,
+			string,
+			string,
+			string,
+		) (platform.ToolPolicy, error) {
+			return policy, nil
+		})),
+	)
+	require.NoError(t, err)
+	runtime, err := builder.Build(ctx, tenant, app, binding)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, runtime.Runner.Close())
+	})
+
+	require.NotEmpty(t, captured.Plugins)
+	runnerValue := reflect.Indirect(reflect.ValueOf(runtime.Runner))
+	pluginManagerField := runnerValue.FieldByName("pluginManager")
+	require.True(t, pluginManagerField.IsValid())
+	require.False(t, pluginManagerField.IsNil())
+	manager, err := plugin.NewManager(captured.Plugins...)
+	require.NoError(t, err)
+	require.NotNil(t, manager.ToolCallbacks())
+
+	approvedCtx := approval.ContextWithAuditContext(ctx, approval.AuditContext{
+		TenantID:  tenant.TenantID,
+		AppID:     app.AppID,
+		RequestID: "request-1",
+		TraceID:   "trace-1",
+	})
+	result, err := manager.ToolCallbacks().RunBeforeTool(
+		approvedCtx,
+		&tool.BeforeToolArgs{
+			ToolName:   "shell",
+			ToolCallID: "call-shell",
+			Arguments:  []byte(`{"command":"restricted"}`),
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Context)
+
+	decision, err := runtime.ToolPermissionPolicy.CheckToolPermission(
+		result.Context,
+		&tool.PermissionRequest{
+			ToolName:   "shell",
+			ToolCallID: "call-shell",
+			Arguments:  []byte(`{"command":"restricted"}`),
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tool.PermissionActionAllow, decision.Action)
+
+	decision, err = runtime.ToolPermissionPolicy.CheckToolPermission(
+		result.Context,
+		&tool.PermissionRequest{
+			ToolName:   "shell",
+			ToolCallID: "call-shell",
+			Arguments:  []byte(`{"command":"mutated-after-approval"}`),
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tool.PermissionActionAsk, decision.Action)
+
+	decision, err = runtime.ToolPermissionPolicy.CheckToolPermission(
+		ctx,
+		&tool.PermissionRequest{
+			ToolName:   "shell",
+			ToolCallID: "call-shell-unapproved",
+			Arguments:  []byte(`{"command":"restricted"}`),
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tool.PermissionActionAsk, decision.Action)
+
+	records := auditSink.Records()
+	require.Len(t, records, 4)
+	assert.Equal(t, "approval_requested", records[0].Decision)
+	assert.Equal(t, "approval_approved", records[1].Decision)
+	assert.Equal(t, string(tool.PermissionActionAsk), records[2].Decision)
+	assert.Equal(t, string(tool.PermissionActionAsk), records[3].Decision)
+	assert.Contains(t, records[2].RedactedDetailRef, "tool_call_id:call-shell")
+	assert.Contains(t, records[3].RedactedDetailRef, "tool_call_id:call-shell-unapproved")
+	for _, record := range records[:2] {
+		assert.Equal(t, tenant.TenantID, record.TenantID)
+		assert.Equal(t, app.AppID, record.AppID)
+		assert.Equal(t, "shell", record.ToolName)
+		assert.Contains(t, record.RedactedDetailRef, "tool_call_id:call-shell")
+		assert.Contains(t, record.RedactedDetailRef, "args_ref_sha256:")
+	}
 }
 
 func TestRuntimeBuilderRejectsMissingToolPolicyProviderBeforeStorage(t *testing.T) {
@@ -417,4 +537,85 @@ type governanceProbeTool struct {
 
 func (t *governanceProbeTool) Declaration() *tool.Declaration {
 	return &tool.Declaration{Name: t.name}
+}
+
+func (t *governanceProbeTool) Call(
+	context.Context,
+	json.RawMessage,
+) (any, error) {
+	return "executed:" + t.name, nil
+}
+
+type toolCallGovernanceAgent struct {
+	*governanceProbeAgent
+}
+
+func newToolCallGovernanceAgent(name string) *toolCallGovernanceAgent {
+	return &toolCallGovernanceAgent{
+		governanceProbeAgent: newGovernanceProbeAgent(name),
+	}
+}
+
+func (a *toolCallGovernanceAgent) Run(
+	_ context.Context,
+	invocation *agent.Invocation,
+) (<-chan *event.Event, error) {
+	out := make(chan *event.Event, 1)
+	if invocation.Session != nil && len(invocation.Session.Events) > 0 {
+		lastEvent := invocation.Session.Events[len(invocation.Session.Events)-1]
+		if lastEvent.Response != nil && len(lastEvent.Response.Choices) > 0 {
+			last := lastEvent.Response.Choices[0].Message
+			if last.Role == model.RoleTool && last.ToolID == "call-shell" {
+				out <- event.NewResponseEvent(
+					invocation.InvocationID,
+					a.name,
+					&model.Response{
+						ID:     "governance-final-response",
+						Object: model.ObjectTypeChatCompletion,
+						Done:   true,
+						Choices: []model.Choice{
+							{
+								Index: 0,
+								Message: model.Message{
+									Role:    model.RoleAssistant,
+									Content: last.Content,
+								},
+							},
+						},
+					},
+				)
+				close(out)
+				return out, nil
+			}
+		}
+	}
+	out <- event.NewResponseEvent(
+		invocation.InvocationID,
+		a.name,
+		&model.Response{
+			ID:     "governance-tool-call-response",
+			Object: model.ObjectTypeChatCompletion,
+			Done:   true,
+			Choices: []model.Choice{
+				{
+					Index: 0,
+					Message: model.Message{
+						Role: model.RoleAssistant,
+						ToolCalls: []model.ToolCall{
+							{
+								ID:   "call-shell",
+								Type: "function",
+								Function: model.FunctionDefinitionParam{
+									Name:      "shell",
+									Arguments: []byte(`{"command":"restricted"}`),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	)
+	close(out)
+	return out, nil
 }
