@@ -351,6 +351,30 @@ func TestModel_GenerateContent_NonStreaming(t *testing.T) {
 	}
 }
 
+func TestModel_GenerateContent_NonStreamingRedactsRequestError(t *testing.T) {
+	m, err := New(
+		"mistralai/Mistral-7B-Instruct-v0.2",
+		WithAPIKey("test-api-key"),
+		WithBaseURL("http://127.0.0.1:1/path?api_key=sk-testsecret&token=raw-token&secret=raw-secret&password=raw-password&cookie=raw-cookie"),
+	)
+	require.NoError(t, err)
+
+	responseChan, err := m.GenerateContent(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Content: "Hello"}},
+	})
+	require.NoError(t, err)
+
+	resp := <-responseChan
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "failed to make request")
+	assert.NotContains(t, resp.Error.Message, "raw-token")
+	assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+	assert.NotContains(t, resp.Error.Message, "raw-secret")
+	assert.NotContains(t, resp.Error.Message, "raw-password")
+	assert.NotContains(t, resp.Error.Message, "raw-cookie")
+	assert.Contains(t, resp.Error.Message, "****")
+}
+
 func TestModel_GenerateContent_Streaming(t *testing.T) {
 	tests := []struct {
 		name           string
