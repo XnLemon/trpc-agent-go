@@ -2032,7 +2032,7 @@ func (f *Flow) getFilteredTools(
 			externalToolNames,
 			invocation.RunOptions,
 		)
-	hasUserToolTracking = userToolNames != nil
+	filteredHasUserToolTracking := userToolNames != nil
 
 	// If no filter is specified, return all tools for this invocation.
 	if invocation.RunOptions.ToolFilter == nil {
@@ -2041,7 +2041,7 @@ func (f *Flow) getFilteredTools(
 		toolsnapshot.Set(
 			invocation,
 			allTools,
-			len(trackedUserToolNames(allTools, hasUserToolTracking, userToolNames)) > 0,
+			len(trackedUserToolNames(allTools, filteredHasUserToolTracking, userToolNames)) > 0,
 			filteredTraceableToolNames(allTools, traceableUserToolNames),
 		)
 		return allTools
@@ -2054,7 +2054,7 @@ func (f *Flow) getFilteredTools(
 		ctx,
 		allTools,
 		userToolNames,
-		hasUserToolTracking,
+		filteredHasUserToolTracking,
 		invocation.RunOptions,
 	)
 
@@ -2062,7 +2062,7 @@ func (f *Flow) getFilteredTools(
 	toolsnapshot.Set(
 		invocation,
 		filtered,
-		len(trackedUserToolNames(filtered, hasUserToolTracking, userToolNames)) > 0,
+		len(trackedUserToolNames(filtered, filteredHasUserToolTracking, userToolNames)) > 0,
 		filteredTraceableToolNames(filtered, traceableUserToolNames),
 	)
 
