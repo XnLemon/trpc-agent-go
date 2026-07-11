@@ -16,11 +16,14 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
+	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -125,6 +128,141 @@ func TestPolicyAllowsHighRiskWithAuditAndRedactsArguments(t *testing.T) {
 		!strings.Contains(record.RedactedDetailRef, "args_bytes:") ||
 		!strings.Contains(record.RedactedDetailRef, "decision:allow") {
 		t.Fatalf("expected safe detail summary, got %q", record.RedactedDetailRef)
+	}
+}
+
+func TestPolicyAuditIncludesInvocationContext(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
+			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+			HighRiskTools:       []string{"http_post"},
+		},
+		WithAuditSink(audit),
+	)
+	inv := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.RunOptions{RequestID: "request-1"}),
+	)
+	inv.AgentName = "assistant"
+	traceID := oteltrace.TraceID{
+		0x01, 0x02, 0x03, 0x04,
+		0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c,
+		0x0d, 0x0e, 0x0f, 0x10,
+	}
+	spanID := oteltrace.SpanID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	ctx := oteltrace.ContextWithSpanContext(
+		ContextWithAuditContext(
+			agent.NewInvocationContext(context.Background(), inv),
+			AuditContext{
+				Channel:        "wecom",
+				BindingID:      "binding-1",
+				SessionID:      "session-1",
+				InternalUserID: "usr_internal",
+				UserIDHash:     platform.UserIDHash("tenant", "wecom", "external-user"),
+				RequestID:      "request-carrier",
+				AgentName:      "assistant-carrier",
+			},
+		),
+		oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+			TraceID: traceID,
+			SpanID:  spanID,
+		}),
+	)
+
+	_, err := p.CheckToolPermission(
+		ctx,
+		request("http_post", tool.ToolMetadata{}, []byte(`{"Authorization":"Bearer raw-token"}`)),
+	)
+	require.NoError(t, err)
+
+	records := audit.Records()
+	require.Len(t, records, 1)
+	record := records[0]
+	require.Equal(t, "request-carrier", record.RequestID)
+	require.Equal(t, "wecom", record.Channel)
+	require.Equal(t, "binding-1", record.BindingID)
+	require.Equal(t, "session-1", record.SessionID)
+	require.Equal(t, "usr_internal", record.InternalUserID)
+	require.Equal(t, "assistant-carrier", record.AgentName)
+	require.Equal(t, traceID.String(), record.TraceID)
+	require.Equal(t, platform.UserIDHash("tenant", "wecom", "external-user"), record.UserIDHash)
+	require.NotContains(t, record.RedactedDetailRef, "raw-token")
+}
+
+func TestPolicyAuditDoesNotInferUserIdentityFromInvocationSession(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
+			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+			HighRiskTools:       []string{"http_post"},
+		},
+		WithAuditSink(audit),
+	)
+	inv := agent.NewInvocation(
+		agent.WithInvocationSession(session.NewSession("app", "external-user-raw", "session-raw")),
+		agent.WithInvocationRunOptions(agent.RunOptions{RequestID: "request-1"}),
+	)
+
+	_, err := p.CheckToolPermission(
+		agent.NewInvocationContext(context.Background(), inv),
+		request("http_post", tool.ToolMetadata{}, []byte(`{"Authorization":"Bearer raw-token"}`)),
+	)
+	require.NoError(t, err)
+
+	records := audit.Records()
+	require.Len(t, records, 1)
+	record := records[0]
+	require.Equal(t, "request-1", record.RequestID)
+	require.Empty(t, record.SessionID)
+	require.Empty(t, record.InternalUserID)
+	require.Empty(t, record.UserIDHash)
+	require.NotContains(t, record.RedactedDetailRef, "raw-token")
+}
+
+func TestPolicyAuditRejectsUnsafeContextFields(t *testing.T) {
+	tests := map[string]AuditContext{
+		"session": {
+			SessionID: "Authorization: Bearer raw-token",
+		},
+		"internal user": {
+			InternalUserID: "sk-raw-secret",
+		},
+		"user hash": {
+			UserIDHash: "Authorization: Bearer raw-token",
+		},
+		"agent name": {
+			AgentName: "Authorization: Bearer raw-token",
+		},
+	}
+	for name, auditCtx := range tests {
+		t.Run(name, func(t *testing.T) {
+			audit := platform.NewInMemoryAuditSink()
+			p := newPolicy(
+				t,
+				platform.ToolPolicy{
+					TenantID:            "tenant",
+					AppID:               "app",
+					DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
+					HighRiskTools:       []string{"http_post"},
+				},
+				WithAuditSink(audit),
+			)
+
+			_, err := p.CheckToolPermission(
+				ContextWithAuditContext(context.Background(), auditCtx),
+				request("http_post", tool.ToolMetadata{}, []byte(`{"Authorization":"Bearer raw-token"}`)),
+			)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "tool policy audit record")
+			require.Empty(t, audit.Records())
+		})
 	}
 }
 
