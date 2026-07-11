@@ -24,17 +24,22 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/internal/state/appender"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	skillstate "trpc.group/trpc-go/trpc-agent-go/skill"
+	"trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/metrics"
 	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -9089,6 +9094,7 @@ func TestExecuteToolCall_ToolPermissionResultSkipsToolResultMessagesCallback(
 		denyReason     = "write access is disabled"
 		permissionJSON = `{"status":"denied","tool":"delete_file","reason":"write access is disabled"}`
 	)
+	reader := setupToolPermissionDeniedMetric(t)
 
 	var (
 		calledTool           bool
@@ -9143,6 +9149,7 @@ func TestExecuteToolCall_ToolPermissionResultSkipsToolResultMessagesCallback(
 	require.Equal(t, toolCallID, choices[0].Message.ToolID)
 	require.Equal(t, toolName, choices[0].Message.ToolName)
 	require.JSONEq(t, permissionJSON, choices[0].Message.Content)
+	requireToolPermissionDeniedMetric(t, reader, tool.PermissionResultStatusDenied)
 }
 
 func TestExecuteToolCall_ApprovalDeniedSkipsToolResultMessagesCallback(
@@ -9154,6 +9161,7 @@ func TestExecuteToolCall_ApprovalDeniedSkipsToolResultMessagesCallback(
 		denyReason     = "Automatic approval review denied (risk: high): write access is disabled"
 		permissionJSON = `{"status":"approval_denied","tool":"delete_file","reason":"Automatic approval review denied (risk: high): write access is disabled"}`
 	)
+	reader := setupToolPermissionDeniedMetric(t)
 
 	var (
 		calledTool           bool
@@ -9209,6 +9217,7 @@ func TestExecuteToolCall_ApprovalDeniedSkipsToolResultMessagesCallback(
 	require.Equal(t, toolCallID, choices[0].Message.ToolID)
 	require.Equal(t, toolName, choices[0].Message.ToolName)
 	require.JSONEq(t, permissionJSON, choices[0].Message.Content)
+	requireToolPermissionDeniedMetric(t, reader, tool.PermissionResultStatusApprovalDenied)
 }
 
 func TestExecuteToolWithCallbacks_MandatoryPermissionDenyCannotBeOverridden(
@@ -9373,6 +9382,7 @@ func TestExecuteToolWithCallbacks_ToolPermissionCheckerAskSkipsRunPolicy(
 		askReason      = "shell commands require review"
 		permissionJSON = `{"status":"approval_required","tool":"shell","reason":"shell commands require review"}`
 	)
+	reader := setupToolPermissionDeniedMetric(t)
 
 	var (
 		calledTool      bool
@@ -9415,6 +9425,83 @@ func TestExecuteToolWithCallbacks_ToolPermissionCheckerAskSkipsRunPolicy(
 	require.False(t, calledTool)
 	require.False(t, calledRunPolicy)
 	require.JSONEq(t, permissionJSON, string(mustJSON(res)))
+	requireNoToolPermissionDeniedMetric(t, reader)
+}
+
+func setupToolPermissionDeniedMetric(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.ExecuteToolMeter
+	originalCounter := itelemetry.ExecuteToolMetricToolPermissionDeniedTotal
+	t.Cleanup(func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.ExecuteToolMeter = originalMeter
+		itelemetry.ExecuteToolMetricToolPermissionDeniedTotal = originalCounter
+	})
+
+	itelemetry.MeterProvider = provider
+	itelemetry.ExecuteToolMeter = provider.Meter(metrics.MeterNameExecuteTool)
+	var err error
+	itelemetry.ExecuteToolMetricToolPermissionDeniedTotal, err =
+		itelemetry.ExecuteToolMeter.Int64Counter(metrics.MetricToolPermissionDeniedTotal)
+	require.NoError(t, err)
+	return reader
+}
+
+func requireToolPermissionDeniedMetric(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+	status string,
+) {
+	t.Helper()
+
+	points := collectToolPermissionDeniedMetricPoints(t, reader)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireProcessorMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationExecuteTool)
+	requireProcessorMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIToolName, "delete_file")
+	requireProcessorMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoToolPermissionStatus, status)
+}
+
+func requireNoToolPermissionDeniedMetric(t *testing.T, reader *sdkmetric.ManualReader) {
+	t.Helper()
+	require.Empty(t, collectToolPermissionDeniedMetricPoints(t, reader))
+}
+
+func collectToolPermissionDeniedMetricPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricToolPermissionDeniedTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	return nil
+}
+
+func requireProcessorMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			require.Equal(t, value, kv.Value.AsString())
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
 }
 
 func TestExecuteToolWithCallbacks_ToolPermissionReceivesMetadata(

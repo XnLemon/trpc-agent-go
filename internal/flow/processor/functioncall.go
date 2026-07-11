@@ -1770,6 +1770,7 @@ func (p *FunctionCallResponseProcessor) executeToolCall(
 			return ctx, nil, modifiedArgs, true, skipSummarization, nil
 		}
 	}
+	reportToolPermissionDeniedMetric(ctx, invocation, toolCall, result)
 	if suppressDefaultToolMessage {
 		defaultMsg, err := buildDefaultToolMessage(toolCall.ID, result)
 		if err != nil {
@@ -1882,6 +1883,67 @@ func isPermissionResult(result any) bool {
 		return v != nil && isPermissionResultStatus(v.Status)
 	default:
 		return false
+	}
+}
+
+func reportToolPermissionDeniedMetric(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	toolCall model.ToolCall,
+	result any,
+) {
+	status, ok := permissionDeniedMetricStatus(result)
+	if !ok {
+		return
+	}
+	var (
+		sess      = &session.Session{}
+		modelName string
+		agentName string
+	)
+	if invocation != nil {
+		if invocation.Session != nil {
+			sess = invocation.Session
+		}
+		if invocation.Model != nil {
+			modelName = invocation.Model.Info().Name
+		}
+		if invocation.AgentName != "" {
+			agentName = invocation.AgentName
+		}
+	}
+	itelemetry.ReportToolPermissionDeniedMetrics(ctx, itelemetry.ToolPermissionDeniedAttributes{
+		RequestModelName: modelName,
+		ToolName:         toolCall.Function.Name,
+		AppName:          sess.AppName,
+		UserID:           sess.UserID,
+		SessionID:        sess.ID,
+		AgentName:        agentName,
+		Status:           status,
+	})
+}
+
+func permissionDeniedMetricStatus(result any) (string, bool) {
+	switch v := result.(type) {
+	case tool.PermissionResult:
+		return permissionDeniedMetricStatusValue(v.Status)
+	case *tool.PermissionResult:
+		if v == nil {
+			return "", false
+		}
+		return permissionDeniedMetricStatusValue(v.Status)
+	default:
+		return "", false
+	}
+}
+
+func permissionDeniedMetricStatusValue(status string) (string, bool) {
+	switch status {
+	case tool.PermissionResultStatusDenied,
+		tool.PermissionResultStatusApprovalDenied:
+		return status, true
+	default:
+		return "", false
 	}
 }
 

@@ -26,6 +26,8 @@ var (
 
 	// ExecuteToolMetricTRPCAgentGoClientRequestCnt records the number of tool execution requests made.
 	ExecuteToolMetricTRPCAgentGoClientRequestCnt metric.Int64Counter
+	// ExecuteToolMetricToolPermissionDeniedTotal records tool calls denied before execution.
+	ExecuteToolMetricToolPermissionDeniedTotal metric.Int64Counter
 	// ExecuteToolMetricGenAIClientOperationDuration records the distribution of tool execution durations in seconds.
 	ExecuteToolMetricGenAIClientOperationDuration *histogram.DynamicFloat64Histogram
 )
@@ -40,6 +42,17 @@ type ExecuteToolAttributes struct {
 	SessionID        string
 	Error            error
 	ErrorType        string
+}
+
+// ToolPermissionDeniedAttributes is the attributes for tool permission denial metrics.
+type ToolPermissionDeniedAttributes struct {
+	RequestModelName string
+	ToolName         string
+	AppName          string
+	AgentName        string
+	UserID           string
+	SessionID        string
+	Status           string
 }
 
 func (a ExecuteToolAttributes) toAttributes() []attribute.KeyValue {
@@ -68,6 +81,30 @@ func (a ExecuteToolAttributes) toAttributes() []attribute.KeyValue {
 	return attrs
 }
 
+func (a ToolPermissionDeniedAttributes) toAttributes() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attribute.String(semconvtrace.KeyGenAIOperationName, OperationExecuteTool),
+		attribute.String(semconvtrace.KeyGenAISystem, a.RequestModelName),
+		attribute.String(semconvtrace.KeyGenAIToolName, a.ToolName),
+	}
+	if a.Status != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoToolPermissionStatus, a.Status))
+	}
+	if a.AppName != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoAppName, a.AppName))
+	}
+	if a.UserID != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoUserID, a.UserID))
+	}
+	if a.SessionID != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyGenAIConversationID, a.SessionID))
+	}
+	if a.AgentName != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyGenAIAgentName, a.AgentName))
+	}
+	return attrs
+}
+
 // ReportExecuteToolMetrics reports the tool execution metrics.
 func ReportExecuteToolMetrics(ctx context.Context, attrs ExecuteToolAttributes, duration time.Duration) {
 	as := attrs.toAttributes()
@@ -77,4 +114,12 @@ func ReportExecuteToolMetrics(ctx context.Context, attrs ExecuteToolAttributes, 
 	if ExecuteToolMetricGenAIClientOperationDuration != nil {
 		ExecuteToolMetricGenAIClientOperationDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(as...))
 	}
+}
+
+// ReportToolPermissionDeniedMetrics reports tool calls denied before execution.
+func ReportToolPermissionDeniedMetrics(ctx context.Context, attrs ToolPermissionDeniedAttributes) {
+	if ExecuteToolMetricToolPermissionDeniedTotal == nil {
+		return
+	}
+	ExecuteToolMetricToolPermissionDeniedTotal.Add(ctx, 1, metric.WithAttributes(attrs.toAttributes()...))
 }

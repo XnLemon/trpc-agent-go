@@ -61,6 +61,8 @@ const (
 	MetricTRPCAgentGoClientRequestCnt = "trpc_agent_go.client.request_cnt"
 	// MetricToolApprovalRequiredTotal records tool calls that require explicit approval.
 	MetricToolApprovalRequiredTotal = "tool_approval_required_total"
+	// MetricToolPermissionDeniedTotal records tool calls denied by permission checks.
+	MetricToolPermissionDeniedTotal = "tool_permission_denied_total"
 	// MetricAuditWriteFailedTotal records failed audit sink writes.
 	MetricAuditWriteFailedTotal = "audit_write_failed_total"
 
