@@ -17,6 +17,7 @@ import (
 	"fmt"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -69,7 +70,7 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 				Success: false,
 				Message: fmt.Sprintf(
 					"invalid request format: %v",
-					err,
+					redactResponseMessage(err.Error()),
 				),
 			}, nil
 		}
@@ -85,12 +86,20 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err := agent.MarkAwaitingUserReply(invocation); err != nil {
 		return Response{
 			Success: false,
-			Message: err.Error(),
+			Message: redactResponseMessage(err.Error()),
 		}, nil
 	}
 	return Response{
 		Success:   true,
 		Message:   "The next user message will resume at this agent.",
-		AgentName: invocation.AgentName,
+		AgentName: redactResponseMessage(invocation.AgentName),
 	}, nil
+}
+
+func redactResponseMessage(message string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return message
+	}
+	return redactor.Redact(message)
 }
