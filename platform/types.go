@@ -290,17 +290,18 @@ type ToolPolicy struct {
 
 // ChannelLimits stores configurable channel capability and limit values.
 type ChannelLimits struct {
-	MaxTextLength      int
-	CallbackACKTimeout time.Duration
-	FileMaxBytes       int64
-	AllowedMIMETypes   []string
-	RateLimitQPS       int
-	Burst              int
-	SupportsAsyncReply bool
-	SupportsEdit       bool
-	SupportsCardUpdate bool
-	RetryMaxAttempts   int
-	RetryBackoff       string
+	MaxTextLength        int
+	CallbackACKTimeout   time.Duration
+	FileMaxBytes         int64
+	AllowedMIMETypes     []string
+	RateLimitQPS         int
+	Burst                int
+	MaxConcurrentPerUser int
+	SupportsAsyncReply   bool
+	SupportsEdit         bool
+	SupportsCardUpdate   bool
+	RetryMaxAttempts     int
+	RetryBackoff         string
 }
 
 // ChannelBinding maps one external IM account to one tenant app.

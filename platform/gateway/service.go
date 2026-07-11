@@ -36,6 +36,7 @@ type Service struct {
 	idempotencyStore platform.IdempotencyStore
 	outboundStore    OutboundStore
 	leaseStore       SessionLeaseStore
+	userGate         UserConcurrencyGate
 	auditSink        platform.AuditSink
 	messageEventSink platform.MessageEventSink
 	usageSink        platform.UsageSink
@@ -80,6 +81,22 @@ func (f BudgetEstimatorFunc) EstimateBudget(
 		return platform.UsageEstimate{}, nil
 	}
 	return f(ctx, request)
+}
+
+// UserConcurrencyRequest identifies one user-scoped gateway execution slot.
+type UserConcurrencyRequest struct {
+	Key   string
+	Limit int
+}
+
+// UserConcurrencyGate limits concurrent gateway executions for a user scope.
+type UserConcurrencyGate interface {
+	Acquire(ctx context.Context, request UserConcurrencyRequest) (UserConcurrencyLease, bool, error)
+}
+
+// UserConcurrencyLease releases one acquired user concurrency slot.
+type UserConcurrencyLease interface {
+	Release(ctx context.Context) error
 }
 
 // RateLimitRequest contains safe request metadata for gateway rate checks.
@@ -138,7 +155,18 @@ func WithNow(now func() time.Time) Option {
 // WithSessionLeaseStore sets the lease store used to serialize same-session runs.
 func WithSessionLeaseStore(store SessionLeaseStore) Option {
 	return func(s *Service) {
-		s.leaseStore = store
+		if store != nil {
+			s.leaseStore = store
+		}
+	}
+}
+
+// WithUserConcurrencyGate sets the gate used for per-user concurrency checks.
+func WithUserConcurrencyGate(gate UserConcurrencyGate) Option {
+	return func(s *Service) {
+		if gate != nil {
+			s.userGate = gate
+		}
 	}
 }
 
@@ -170,6 +198,7 @@ func NewService(
 		idempotencyStore: idempotencyStore,
 		outboundStore:    outboundStore,
 		leaseStore:       NewInMemorySessionLeaseStore(),
+		userGate:         NewInMemoryUserConcurrencyGate(),
 		rateLimiter:      NewInMemoryRateLimiter(),
 		now:              time.Now,
 	}
@@ -265,6 +294,7 @@ func (s *Service) HandleInbound(
 		requestID,
 		internalUserID,
 		key,
+		runtime.Binding.ChannelLimits.MaxConcurrentPerUser,
 	)
 	if err != nil {
 		return Result{}, err
@@ -273,6 +303,7 @@ func (s *Service) HandleInbound(
 		return result, nil
 	}
 	defer s.releaseSessionLease(ctx, record.SessionLease)
+	defer s.releaseUserConcurrency(ctx, record.UserLease)
 
 	return s.runAndReply(
 		routeCtx,
@@ -295,6 +326,7 @@ func (s *Service) HandleInbound(
 type inboundRunRecord struct {
 	Record       platform.IdempotencyRecord
 	SessionLease SessionLease
+	UserLease    UserConcurrencyLease
 }
 
 type inboundRunInput struct {
@@ -529,6 +561,7 @@ func (s *Service) startInboundRun(
 	requestID string,
 	internalUserID string,
 	key string,
+	userConcurrencyLimit int,
 ) (inboundRunRecord, bool, Result, error) {
 	idempotencyCtx, idempotencySpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.idempotency")
 	defer idempotencySpan.End()
@@ -542,6 +575,17 @@ func (s *Service) startInboundRun(
 		result, err := s.duplicateResult(resultCtx, existing)
 		return inboundRunRecord{}, true, result, err
 	}
+	userLease, handled, result, err := s.acquireUserConcurrency(
+		routeCtx,
+		msg,
+		sessionID,
+		requestID,
+		internalUserID,
+		userConcurrencyLimit,
+	)
+	if err != nil || handled {
+		return inboundRunRecord{}, handled, result, err
+	}
 	return s.acquireSessionLeaseAndStart(
 		routeCtx,
 		resultCtx,
@@ -552,6 +596,7 @@ func (s *Service) startInboundRun(
 		requestID,
 		internalUserID,
 		key,
+		userLease,
 	)
 }
 
@@ -565,6 +610,7 @@ func (s *Service) acquireSessionLeaseAndStart(
 	requestID string,
 	internalUserID string,
 	key string,
+	userLease UserConcurrencyLease,
 ) (inboundRunRecord, bool, Result, error) {
 	lease, handled, result, err := s.acquireSessionLease(
 		routeCtx,
@@ -574,6 +620,7 @@ func (s *Service) acquireSessionLeaseAndStart(
 		internalUserID,
 	)
 	if err != nil || handled {
+		s.releaseUserConcurrency(resultCtx, userLease)
 		return inboundRunRecord{}, handled, result, err
 	}
 	record, started, err := s.idempotencyStore.Start(idempotencyCtx, platform.IdempotencyRecord{
@@ -587,15 +634,50 @@ func (s *Service) acquireSessionLeaseAndStart(
 	})
 	if err != nil {
 		s.releaseSessionLease(resultCtx, lease)
+		s.releaseUserConcurrency(resultCtx, userLease)
 		recordSpanError(idempotencySpan, err)
 		return inboundRunRecord{}, false, Result{}, err
 	}
 	if !started {
 		s.releaseSessionLease(resultCtx, lease)
+		s.releaseUserConcurrency(resultCtx, userLease)
 		result, err := s.duplicateResult(resultCtx, record)
 		return inboundRunRecord{}, true, result, err
 	}
-	return inboundRunRecord{Record: record, SessionLease: lease}, false, Result{}, nil
+	return inboundRunRecord{Record: record, SessionLease: lease, UserLease: userLease}, false, Result{}, nil
+}
+
+func (s *Service) acquireUserConcurrency(
+	routeCtx context.Context,
+	msg platform.InboundMessage,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+	userConcurrencyLimit int,
+) (UserConcurrencyLease, bool, Result, error) {
+	if userConcurrencyLimit <= 0 {
+		return nil, false, Result{}, nil
+	}
+	gateCtx, gateSpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.user_concurrency")
+	defer gateSpan.End()
+	setInboundTraceAttributes(gateSpan, msg, sessionID, requestID, internalUserID)
+	lease, acquired, err := s.userGate.Acquire(gateCtx, UserConcurrencyRequest{
+		Key:   userConcurrencyKey(msg),
+		Limit: userConcurrencyLimit,
+	})
+	if err != nil {
+		recordSpanError(gateSpan, err)
+		return nil, false, Result{}, err
+	}
+	if acquired {
+		return lease, false, Result{}, nil
+	}
+	return nil, true, Result{
+		RequestID:  requestID,
+		SessionID:  sessionID,
+		Status:     platform.IdempotencyStatusProcessing,
+		Processing: true,
+	}, nil
 }
 
 func (s *Service) acquireSessionLease(
@@ -629,6 +711,18 @@ func (s *Service) acquireSessionLease(
 }
 
 func (s *Service) releaseSessionLease(ctx context.Context, lease SessionLease) {
+	if lease == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = lease.Release(cleanupCtx)
+}
+
+func (s *Service) releaseUserConcurrency(ctx context.Context, lease UserConcurrencyLease) {
+	if lease == nil {
+		return
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_ = lease.Release(cleanupCtx)
@@ -876,6 +970,9 @@ func (s *Service) validateService() error {
 	}
 	if s.outboundStore == nil {
 		return fmt.Errorf("gateway outbound store is required")
+	}
+	if s.userGate == nil {
+		return fmt.Errorf("gateway user concurrency gate is required")
 	}
 	if s.rateLimiter == nil {
 		return fmt.Errorf("gateway rate limiter is required")
@@ -1392,5 +1489,67 @@ func rateLimitKey(binding platform.ChannelBinding) string {
 		binding.BindingID,
 		binding.Channel,
 		binding.AccountID,
+	}, "\x00")
+}
+
+type inMemoryUserConcurrencyLease struct {
+	gate *InMemoryUserConcurrencyGate
+	key  string
+	once sync.Once
+}
+
+// InMemoryUserConcurrencyGate is a process-local user concurrency gate.
+type InMemoryUserConcurrencyGate struct {
+	mu     sync.Mutex
+	active map[string]int
+}
+
+// NewInMemoryUserConcurrencyGate creates a process-local user concurrency gate.
+func NewInMemoryUserConcurrencyGate() *InMemoryUserConcurrencyGate {
+	return &InMemoryUserConcurrencyGate{active: make(map[string]int)}
+}
+
+// Acquire implements UserConcurrencyGate.
+func (g *InMemoryUserConcurrencyGate) Acquire(
+	ctx context.Context,
+	request UserConcurrencyRequest,
+) (UserConcurrencyLease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if request.Limit <= 0 {
+		return nil, true, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active[request.Key] >= request.Limit {
+		return nil, false, nil
+	}
+	g.active[request.Key]++
+	return &inMemoryUserConcurrencyLease{gate: g, key: request.Key}, true, nil
+}
+
+func (l *inMemoryUserConcurrencyLease) Release(ctx context.Context) error {
+	l.once.Do(func() {
+		l.gate.mu.Lock()
+		defer l.gate.mu.Unlock()
+		count := l.gate.active[l.key]
+		if count <= 1 {
+			delete(l.gate.active, l.key)
+			return
+		}
+		l.gate.active[l.key] = count - 1
+	})
+	return ctx.Err()
+}
+
+func userConcurrencyKey(msg platform.InboundMessage) string {
+	return strings.Join([]string{
+		msg.TenantID,
+		msg.AppID,
+		msg.BindingID,
+		msg.Channel,
+		msg.ChannelAccountID,
+		platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID),
 	}, "\x00")
 }

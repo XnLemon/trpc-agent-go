@@ -675,6 +675,107 @@ func TestServiceHandleInboundAllowsDifferentSessions(t *testing.T) {
 	assert.NotEqual(t, r.calls[0].sessionID, r.calls[1].sessionID)
 }
 
+func TestServiceHandleInboundRejectsUserConcurrencyBeforeIdempotency(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry := NewInMemoryRegistry()
+	r := &hangingFirstRunner{
+		started:  make(chan struct{}),
+		response: "done",
+	}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxConcurrentPerUser = 1
+	require.NoError(t, registry.Register(runtime))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore())
+	first := inbound("tenant-a", "msg-1", "user-1", "first")
+	first.ConversationType = platform.ConversationTypeGroup
+	first.ExternalGroupID = "group-1"
+	second := inbound("tenant-a", "msg-2", "user-1", "second")
+	second.ConversationType = platform.ConversationTypeGroup
+	second.ExternalGroupID = "group-2"
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleInbound(ctx, first)
+		errCh <- err
+	}()
+	<-r.started
+
+	busy, err := svc.HandleInbound(context.Background(), second)
+
+	require.NoError(t, err)
+	assert.False(t, busy.Duplicate)
+	assert.True(t, busy.Processing)
+	assert.Equal(t, platform.IdempotencyStatusProcessing, busy.Status)
+	assert.Len(t, r.calls, 1)
+	_, ok, getErr := idempotency.Get(
+		context.Background(),
+		platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-2"),
+	)
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
+}
+
+func TestServiceHandleInboundUserConcurrencyIsolatesUsers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registry := NewInMemoryRegistry()
+	r := &hangingFirstRunner{
+		started:  make(chan struct{}),
+		response: "done",
+	}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxConcurrentPerUser = 1
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+	first := inbound("tenant-a", "msg-1", "user-1", "first")
+	first.ConversationType = platform.ConversationTypeGroup
+	first.ExternalGroupID = "group-1"
+	second := inbound("tenant-a", "msg-2", "user-2", "second")
+	second.ConversationType = platform.ConversationTypeGroup
+	second.ExternalGroupID = "group-2"
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := svc.HandleInbound(ctx, first)
+		errCh <- err
+	}()
+	<-r.started
+
+	result, err := svc.HandleInbound(context.Background(), second)
+
+	require.NoError(t, err)
+	assert.False(t, result.Processing)
+	assert.Equal(t, "done", result.Outbound.Content)
+	assert.Len(t, r.calls, 2)
+	cancel()
+	require.ErrorIs(t, <-errCh, context.Canceled)
+}
+
+func TestServiceHandleInboundUserConcurrencyReleasesAfterCompletion(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "done"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxConcurrentPerUser = 1
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(registry, platform.NewInMemoryIdempotencyStore(), NewInMemoryOutboundStore())
+	first := inbound("tenant-a", "msg-1", "user-1", "first")
+	first.ConversationType = platform.ConversationTypeGroup
+	first.ExternalGroupID = "group-1"
+	second := inbound("tenant-a", "msg-2", "user-1", "second")
+	second.ConversationType = platform.ConversationTypeGroup
+	second.ExternalGroupID = "group-2"
+
+	_, err := svc.HandleInbound(ctx, first)
+	require.NoError(t, err)
+	_, err = svc.HandleInbound(ctx, second)
+
+	require.NoError(t, err)
+	assert.Len(t, r.calls, 2)
+}
+
 func TestServiceHandleInboundReleaseIgnoresCanceledRequestContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	registry := NewInMemoryRegistry()
