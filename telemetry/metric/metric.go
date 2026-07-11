@@ -272,6 +272,14 @@ func initGatewayMetrics(mp metric.MeterProvider) error {
 	if err != nil {
 		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricIMRateLimitedTotal, err)
 	}
+	itelemetry.GatewayMetricIdempotencyHitTotal, err = itelemetry.GatewayMeter.Int64Counter(
+		metrics.MetricGatewayIdempotencyHitTotal,
+		metric.WithDescription("Total number of inbound IM messages served by gateway idempotency"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricGatewayIdempotencyHitTotal, err)
+	}
 	return nil
 }
 

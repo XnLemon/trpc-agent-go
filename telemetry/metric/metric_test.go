@@ -302,6 +302,7 @@ func TestInitMeterProvider(t *testing.T) {
 	originalGatewayMeter := itelemetry.GatewayMeter
 	originalGatewayBudgetDenied := itelemetry.GatewayMetricBudgetDeniedTotal
 	originalGatewayRateLimited := itelemetry.GatewayMetricRateLimitedTotal
+	originalGatewayIdempotencyHit := itelemetry.GatewayMetricIdempotencyHitTotal
 	defer func() {
 		itelemetry.MeterProvider = originalMP
 		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
@@ -312,6 +313,7 @@ func TestInitMeterProvider(t *testing.T) {
 		itelemetry.GatewayMeter = originalGatewayMeter
 		itelemetry.GatewayMetricBudgetDeniedTotal = originalGatewayBudgetDenied
 		itelemetry.GatewayMetricRateLimitedTotal = originalGatewayRateLimited
+		itelemetry.GatewayMetricIdempotencyHitTotal = originalGatewayIdempotencyHit
 	}()
 
 	// Create a test meter provider
@@ -390,6 +392,9 @@ func TestInitMeterProvider(t *testing.T) {
 	}
 	if itelemetry.GatewayMetricRateLimitedTotal == nil {
 		t.Error("GatewayMetricRateLimitedTotal was not created")
+	}
+	if itelemetry.GatewayMetricIdempotencyHitTotal == nil {
+		t.Error("GatewayMetricIdempotencyHitTotal was not created")
 	}
 	if itelemetry.WorkflowMeter == nil {
 		t.Error("WorkflowMeter was not created")
@@ -512,10 +517,12 @@ func TestInitGatewayMetrics_ErrorHandling(t *testing.T) {
 	originalGatewayMeter := itelemetry.GatewayMeter
 	originalGatewayBudgetDenied := itelemetry.GatewayMetricBudgetDeniedTotal
 	originalGatewayRateLimited := itelemetry.GatewayMetricRateLimitedTotal
+	originalGatewayIdempotencyHit := itelemetry.GatewayMetricIdempotencyHitTotal
 	defer func() {
 		itelemetry.GatewayMeter = originalGatewayMeter
 		itelemetry.GatewayMetricBudgetDeniedTotal = originalGatewayBudgetDenied
 		itelemetry.GatewayMetricRateLimitedTotal = originalGatewayRateLimited
+		itelemetry.GatewayMetricIdempotencyHitTotal = originalGatewayIdempotencyHit
 	}()
 
 	if err := initGatewayMetrics(nil); err == nil || !strings.Contains(err.Error(), "gateway meter provider is nil") {
@@ -543,6 +550,18 @@ func TestInitGatewayMetrics_ErrorHandling(t *testing.T) {
 		t.Fatalf("expected gateway rate limited counter creation error")
 	}
 	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.gateway metric im_rate_limited_total") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mp = &mockMeterProvider{meter: &mockMeter{
+		shouldFail: true,
+		failOn:     metrics.MetricGatewayIdempotencyHitTotal,
+	}}
+	err = initGatewayMetrics(mp)
+	if err == nil {
+		t.Fatalf("expected gateway idempotency hit counter creation error")
+	}
+	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.gateway metric gateway_idempotency_hit_total") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

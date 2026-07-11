@@ -69,6 +69,8 @@ const (
 	MetricGatewayBudgetDeniedTotal = "gateway_budget_denied_total"
 	// MetricIMRateLimitedTotal records inbound IM messages rejected by gateway rate limits.
 	MetricIMRateLimitedTotal = "im_rate_limited_total"
+	// MetricGatewayIdempotencyHitTotal records inbound IM messages served by gateway idempotency.
+	MetricGatewayIdempotencyHitTotal = "gateway_idempotency_hit_total"
 
 	////////////////////////// server ////////////////////////
 

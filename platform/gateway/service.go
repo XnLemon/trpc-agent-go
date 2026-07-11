@@ -616,6 +616,7 @@ func (s *Service) startInboundRun(
 		return inboundRunRecord{}, false, Result{}, err
 	}
 	if ok {
+		reportGatewayIdempotencyHit(resultCtx, msg, existing)
 		result, err := s.duplicateResult(resultCtx, existing)
 		return inboundRunRecord{}, true, result, err
 	}
@@ -685,10 +686,27 @@ func (s *Service) acquireSessionLeaseAndStart(
 	if !started {
 		s.releaseSessionLease(resultCtx, lease)
 		s.releaseUserConcurrency(resultCtx, userLease)
+		reportGatewayIdempotencyHit(resultCtx, msg, record)
 		result, err := s.duplicateResult(resultCtx, record)
 		return inboundRunRecord{}, true, result, err
 	}
 	return inboundRunRecord{Record: record, SessionLease: lease, UserLease: userLease}, false, Result{}, nil
+}
+
+func reportGatewayIdempotencyHit(
+	ctx context.Context,
+	msg platform.InboundMessage,
+	record platform.IdempotencyRecord,
+) {
+	itelemetry.ReportGatewayIdempotencyHitMetrics(
+		ctx,
+		itelemetry.GatewayIdempotencyHitAttributes{
+			TenantID: record.TenantID,
+			AppName:  msg.AppID,
+			Channel:  record.Channel,
+			Status:   string(record.Status),
+		},
+	)
 }
 
 func (s *Service) acquireUserConcurrency(
