@@ -1888,7 +1888,8 @@ func isPermissionResult(result any) bool {
 func isPermissionResultStatus(status string) bool {
 	switch status {
 	case tool.PermissionResultStatusDenied,
-		tool.PermissionResultStatusApprovalRequired:
+		tool.PermissionResultStatusApprovalRequired,
+		tool.PermissionResultStatusApprovalDenied:
 		return true
 	default:
 		return false

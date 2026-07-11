@@ -9145,6 +9145,72 @@ func TestExecuteToolCall_ToolPermissionResultSkipsToolResultMessagesCallback(
 	require.JSONEq(t, permissionJSON, choices[0].Message.Content)
 }
 
+func TestExecuteToolCall_ApprovalDeniedSkipsToolResultMessagesCallback(
+	t *testing.T,
+) {
+	const (
+		toolName       = "delete_file"
+		toolCallID     = "call-approval-denied"
+		denyReason     = "Automatic approval review denied (risk: high): write access is disabled"
+		permissionJSON = `{"status":"approval_denied","tool":"delete_file","reason":"Automatic approval review denied (risk: high): write access is disabled"}`
+	)
+
+	var (
+		calledTool           bool
+		calledResultMessages bool
+	)
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(func(
+		_ context.Context,
+		_ *tool.BeforeToolArgs,
+	) (*tool.BeforeToolResult, error) {
+		return &tool.BeforeToolResult{
+			CustomResult: tool.ApprovalDeniedResultFor(toolName, denyReason),
+		}, nil
+	})
+	callbacks.RegisterToolResultMessages(func(
+		_ context.Context,
+		_ *tool.ToolResultMessagesInput,
+	) (any, error) {
+		calledResultMessages = true
+		return model.Message{
+			Role:    model.RoleUser,
+			Content: "overridden",
+		}, nil
+	})
+	p := NewFunctionCallResponseProcessor(false, callbacks)
+	tl := &mockCallableTool{
+		declaration: &tool.Declaration{Name: toolName},
+		callFn: func(_ context.Context, _ []byte) (any, error) {
+			calledTool = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	_, choices, _, _, _, err := p.executeToolCall(
+		context.Background(),
+		&agent.Invocation{RunOptions: agent.NewRunOptions()},
+		model.ToolCall{
+			ID: toolCallID,
+			Function: model.FunctionDefinitionParam{
+				Name:      toolName,
+				Arguments: []byte(`{}`),
+			},
+		},
+		map[string]tool.Tool{toolName: tl},
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, calledTool)
+	require.False(t, calledResultMessages)
+	require.Len(t, choices, 1)
+	require.Equal(t, model.RoleTool, choices[0].Message.Role)
+	require.Equal(t, toolCallID, choices[0].Message.ToolID)
+	require.Equal(t, toolName, choices[0].Message.ToolName)
+	require.JSONEq(t, permissionJSON, choices[0].Message.Content)
+}
+
 func TestExecuteToolWithCallbacks_MandatoryPermissionDenyCannotBeOverridden(
 	t *testing.T,
 ) {
