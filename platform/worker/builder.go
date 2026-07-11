@@ -83,6 +83,14 @@ func WithToolPolicyProvider(provider ToolPolicyProvider) RuntimeBuilderOption {
 func NewRuntimeBuilder(
 	router storagerouter.Router,
 	factory AgentFactory,
+) (*RuntimeBuilder, error) {
+	return NewRuntimeBuilderWithOptions(router, factory)
+}
+
+// NewRuntimeBuilderWithOptions creates a runtime builder with options.
+func NewRuntimeBuilderWithOptions(
+	router storagerouter.Router,
+	factory AgentFactory,
 	opts ...RuntimeBuilderOption,
 ) (*RuntimeBuilder, error) {
 	if isNilDependency(router) {
