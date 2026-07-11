@@ -406,6 +406,32 @@ func TestServiceHandleInboundUsesFallbackAuditForInvalidRuntime(t *testing.T) {
 	assert.Empty(t, runtimeAudit.Records())
 	require.Len(t, fallbackAudit.Records(), 1)
 	assert.Equal(t, "reject", fallbackAudit.Records()[0].Decision)
+	assert.NotEmpty(t, fallbackAudit.Records()[0].SessionID)
+	assert.NotEmpty(t, fallbackAudit.Records()[0].InternalUserID)
+}
+
+func TestServiceHandleInboundRuntimeNotFoundAuditsSessionWithoutSyntheticUser(t *testing.T) {
+	ctx := context.Background()
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		NewInMemoryRegistry(),
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-runtime-missing", "", "")
+	msg.MessageType = platform.MessageTypeEvent
+	msg.RawEventType = "member_joined"
+	msg.ConversationType = ""
+	msg.ContentParts = nil
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrRuntimeNotFound)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.NotEmpty(t, audit.Records()[0].SessionID)
+	assert.Empty(t, audit.Records()[0].InternalUserID)
 }
 
 func TestServiceHandleInboundFallsBackFromTypedNilRuntimeAudit(t *testing.T) {
@@ -462,6 +488,8 @@ func TestServiceHandleInboundUsesRuntimeAuditForBindingRejection(t *testing.T) {
 	require.ErrorIs(t, err, ErrBindingAccessDenied)
 	require.Len(t, runtimeAudit.Records(), 1)
 	assert.Equal(t, "reject", runtimeAudit.Records()[0].Decision)
+	assert.NotEmpty(t, runtimeAudit.Records()[0].SessionID)
+	assert.NotEmpty(t, runtimeAudit.Records()[0].InternalUserID)
 	assert.Empty(t, fallbackAudit.Records())
 }
 
@@ -879,6 +907,8 @@ func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
 	assert.NotEmpty(t, audit.Records()[0].AuditID)
 	assert.Equal(t, "reject", audit.Records()[0].Decision)
 	assert.NotEqual(t, "user-1", audit.Records()[0].UserID)
+	assert.NotEmpty(t, audit.Records()[0].SessionID)
+	assert.NotEmpty(t, audit.Records()[0].InternalUserID)
 }
 
 func TestServiceHandleInboundRejectsTextOverChannelLimitBeforeIdempotency(t *testing.T) {
@@ -907,6 +937,8 @@ func TestServiceHandleInboundRejectsTextOverChannelLimitBeforeIdempotency(t *tes
 	require.Len(t, audit.Records(), 1)
 	assert.Equal(t, "reject", audit.Records()[0].Decision)
 	assert.Equal(t, ErrTextTooLong.Error(), audit.Records()[0].DecisionReason)
+	assert.NotEmpty(t, audit.Records()[0].SessionID)
+	assert.NotEmpty(t, audit.Records()[0].InternalUserID)
 	assert.NotContains(t, audit.Records()[0].DecisionReason, "你好世界呀")
 }
 
@@ -1240,6 +1272,8 @@ func TestServiceHandleInboundRejectsRateLimitedBeforeBudgetAndIdempotency(t *tes
 	assert.Equal(t, "completed", audit.Records()[0].Decision)
 	assert.Equal(t, "reject", audit.Records()[1].Decision)
 	assert.Equal(t, ErrRateLimited.Error(), audit.Records()[1].DecisionReason)
+	assert.NotEmpty(t, audit.Records()[1].SessionID)
+	assert.NotEmpty(t, audit.Records()[1].InternalUserID)
 }
 
 func TestServiceHandleInboundRateLimitRefillsOverTime(t *testing.T) {
@@ -1507,6 +1541,12 @@ func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T
 	assert.Equal(t, "total_tokens_exceeded", record.DecisionReason)
 	assert.Equal(t, "req-budget", record.RequestID)
 	assert.Equal(t, "req-budget", record.TraceID)
+	assert.Equal(t, msg.Channel, record.Channel)
+	assert.Equal(t, msg.BindingID, record.BindingID)
+	assert.Equal(t, msg.PlatformMessageID, record.MessageID)
+	assert.NotEmpty(t, record.SessionID)
+	assert.NotEmpty(t, record.InternalUserID)
+	assert.Equal(t, platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID), record.UserIDHash)
 	assert.Contains(t, record.TokenUsageJSON, "prompt_tokens:8")
 	assert.Contains(t, record.TokenUsageJSON, "completion_tokens:5")
 	assert.Contains(t, record.TokenUsageJSON, "total_tokens:13")

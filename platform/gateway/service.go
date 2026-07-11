@@ -241,28 +241,30 @@ func (s *Service) HandleInbound(
 		return Result{}, err
 	}
 	requestID := requestIDFor(msg)
-	setInboundTraceAttributes(callbackSpan, msg, "", requestID, "")
+	sessionID, err := platform.SessionIDForInbound(msg)
+	if err != nil {
+		recordSpanError(callbackSpan, err)
+		return Result{}, err
+	}
+	internalUserID := auditInternalUserID(msg)
+	auditContext := rejectAuditContext{
+		SessionID:      sessionID,
+		InternalUserID: internalUserID,
+	}
+	setInboundTraceAttributes(callbackSpan, msg, sessionID, requestID, internalUserID)
 	routeCtx, routeSpan := telemetrytrace.Tracer.Start(ctx, "gateway.route")
 	defer routeSpan.End()
-	setInboundTraceAttributes(routeSpan, msg, "", requestID, "")
-	runtime, err := s.lookupRuntime(routeCtx, ctx, routeSpan, msg, start)
+	setInboundTraceAttributes(routeSpan, msg, sessionID, requestID, internalUserID)
+	runtime, err := s.lookupRuntime(routeCtx, ctx, routeSpan, msg, start, auditContext)
 	if err != nil {
 		return Result{}, err
 	}
 	auditSink := s.auditSinkForRuntime(runtime)
-	text, err := s.validateInboundContent(ctx, routeSpan, runtime, msg, start, auditSink)
+	text, err := s.validateInboundContent(ctx, routeSpan, runtime, msg, start, auditSink, auditContext)
 	if err != nil {
 		return Result{}, err
 	}
-	sessionID, err := platform.SessionIDForInbound(msg)
-	if err != nil {
-		recordSpanError(routeSpan, err)
-		return Result{}, err
-	}
-	internalUserID := platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID)
-	setInboundTraceAttributes(callbackSpan, msg, sessionID, requestID, internalUserID)
-	setInboundTraceAttributes(routeSpan, msg, sessionID, requestID, internalUserID)
-	if err := s.checkRateLimit(ctx, routeSpan, runtime, auditSink, msg, start); err != nil {
+	if err := s.checkRateLimit(ctx, routeSpan, runtime, auditSink, msg, start, auditContext); err != nil {
 		return Result{}, err
 	}
 	if err := s.checkBudget(
@@ -277,6 +279,7 @@ func (s *Service) HandleInbound(
 		requestID,
 		internalUserID,
 		start,
+		auditContext,
 	); err != nil {
 		return Result{}, err
 	}
@@ -350,6 +353,7 @@ func (s *Service) lookupRuntime(
 	routeSpan oteltrace.Span,
 	msg platform.InboundMessage,
 	start time.Time,
+	auditContext rejectAuditContext,
 ) (Runtime, error) {
 	runtime, ok, err := s.registry.Lookup(routeCtx, msg)
 	if err != nil {
@@ -358,22 +362,23 @@ func (s *Service) lookupRuntime(
 	}
 	if !ok {
 		err := ErrRuntimeNotFound
-		s.writeRejectAudit(auditCtx, msg, start, err)
+		s.writeRejectAuditWithContext(auditCtx, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return Runtime{}, err
 	}
 	if err := validateRuntimeForMessage(runtime, msg); err != nil {
-		s.writeRejectAudit(auditCtx, msg, start, err)
+		s.writeRejectAuditWithContext(auditCtx, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return Runtime{}, err
 	}
 	if err := authorizeBinding(runtime.Binding, msg); err != nil {
-		s.writeRejectAuditTo(
+		s.writeRejectAuditWithContextTo(
 			auditCtx,
 			s.auditSinkForRuntime(runtime),
 			msg,
 			start,
 			err,
+			auditContext,
 		)
 		recordSpanError(routeSpan, err)
 		return Runtime{}, err
@@ -388,6 +393,7 @@ func (s *Service) checkRateLimit(
 	auditSink platform.AuditSink,
 	msg platform.InboundMessage,
 	start time.Time,
+	auditContext rejectAuditContext,
 ) error {
 	limits := runtime.Binding.ChannelLimits
 	if limits.RateLimitQPS <= 0 {
@@ -399,14 +405,14 @@ func (s *Service) checkRateLimit(
 		Now:    start,
 	})
 	if err != nil {
-		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return err
 	}
 	if allowed {
 		return nil
 	}
-	s.writeRejectAuditTo(ctx, auditSink, msg, start, ErrRateLimited)
+	s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, ErrRateLimited, auditContext)
 	recordSpanError(routeSpan, ErrRateLimited)
 	return ErrRateLimited
 }
@@ -423,6 +429,7 @@ func (s *Service) checkBudget(
 	requestID string,
 	internalUserID string,
 	start time.Time,
+	auditContext rejectAuditContext,
 ) error {
 	if s.budgetEstimator == nil {
 		return nil
@@ -432,7 +439,7 @@ func (s *Service) checkBudget(
 	setInboundTraceAttributes(budgetSpan, msg, sessionID, requestID, internalUserID)
 	quota, err := platform.ParseTenantQuota(runtime.Tenant)
 	if err != nil {
-		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(auditCtx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		recordSpanError(budgetSpan, err)
 		return err
@@ -449,14 +456,14 @@ func (s *Service) checkBudget(
 		},
 	)
 	if err != nil {
-		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(auditCtx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		recordSpanError(budgetSpan, err)
 		return err
 	}
 	decision, err := quota.Check(estimate)
 	if err != nil {
-		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(auditCtx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		recordSpanError(budgetSpan, err)
 		return err
@@ -477,6 +484,8 @@ func (s *Service) checkBudget(
 		decision,
 		estimate,
 		quota,
+		msg,
+		auditContext,
 		start,
 	)
 	err = fmt.Errorf("%w: %s", ErrBudgetExceeded, decision.Reason)
@@ -493,6 +502,8 @@ func (s *Service) writeBudgetDeniedAudit(
 	decision platform.BudgetDecision,
 	estimate platform.UsageEstimate,
 	quota platform.TenantQuota,
+	msg platform.InboundMessage,
+	auditContext rejectAuditContext,
 	start time.Time,
 ) {
 	record, err := platform.NewBudgetDecisionAuditRecord(platform.BudgetDecisionAuditInput{
@@ -511,6 +522,17 @@ func (s *Service) writeBudgetDeniedAudit(
 			TenantID: runtime.Tenant.TenantID,
 			AppID:    runtime.App.AppID,
 		}, start, err)
+		return
+	}
+	record.Channel = msg.Channel
+	record.BindingID = msg.BindingID
+	record.UserID = platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID)
+	record.InternalUserID = auditContext.InternalUserID
+	record.UserIDHash = platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID)
+	record.SessionID = auditContext.SessionID
+	record.MessageID = msg.PlatformMessageID
+	if err := record.Validate(); err != nil {
+		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		return
 	}
 	s.writeAuditTo(ctx, auditSink, record)
@@ -533,20 +555,21 @@ func (s *Service) validateInboundContent(
 	msg platform.InboundMessage,
 	start time.Time,
 	auditSink platform.AuditSink,
+	auditContext rejectAuditContext,
 ) (string, error) {
 	if err := validateFileLimits(msg, runtime.Binding.ChannelLimits); err != nil {
-		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return "", err
 	}
 	text, err := inboundText(msg)
 	if err != nil {
-		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return "", err
 	}
 	if err := validateTextLimit(text, runtime.Binding.ChannelLimits); err != nil {
-		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		recordSpanError(routeSpan, err)
 		return "", err
 	}
@@ -947,6 +970,27 @@ func (s *Service) writeRejectAudit(
 	s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
 }
 
+func (s *Service) writeRejectAuditWithContext(
+	ctx context.Context,
+	msg platform.InboundMessage,
+	start time.Time,
+	err error,
+	auditContext rejectAuditContext,
+) {
+	s.writeAudit(
+		ctx,
+		auditFromMessage(
+			msg,
+			auditContext.SessionID,
+			auditContext.InternalUserID,
+			"reject",
+			err.Error(),
+			start,
+			err,
+		),
+	)
+}
+
 func (s *Service) writeRejectAuditTo(
 	ctx context.Context,
 	auditSink platform.AuditSink,
@@ -958,6 +1002,34 @@ func (s *Service) writeRejectAuditTo(
 		ctx,
 		auditSink,
 		auditFromMessage(msg, "", "", "reject", err.Error(), start, err),
+	)
+}
+
+type rejectAuditContext struct {
+	SessionID      string
+	InternalUserID string
+}
+
+func (s *Service) writeRejectAuditWithContextTo(
+	ctx context.Context,
+	auditSink platform.AuditSink,
+	msg platform.InboundMessage,
+	start time.Time,
+	err error,
+	auditContext rejectAuditContext,
+) {
+	s.writeAuditTo(
+		ctx,
+		auditSink,
+		auditFromMessage(
+			msg,
+			auditContext.SessionID,
+			auditContext.InternalUserID,
+			"reject",
+			err.Error(),
+			start,
+			err,
+		),
 	)
 }
 
@@ -1226,6 +1298,13 @@ func auditFromMessage(
 		record.ErrorType = fmt.Sprintf("%T", err)
 	}
 	return record
+}
+
+func auditInternalUserID(msg platform.InboundMessage) string {
+	if strings.TrimSpace(msg.ExternalUserID) == "" {
+		return ""
+	}
+	return platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID)
 }
 
 func redactAuditReason(reason string) string {
