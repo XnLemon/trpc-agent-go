@@ -10,10 +10,12 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // Runtime contains the platform configuration and runner for one active binding.
@@ -23,6 +25,10 @@ type Runtime struct {
 	Binding platform.ChannelBinding
 	Runner  runner.Runner
 	Audit   platform.AuditSink
+	// ToolFilter narrows user-visible tools for this runtime.
+	ToolFilter tool.FilterFunc
+	// ToolPermissionPolicy enforces tool-call authorization before execution.
+	ToolPermissionPolicy tool.PermissionPolicy
 }
 
 // Validate checks that the runtime can process inbound messages.
@@ -38,6 +44,10 @@ func (r Runtime) Validate() error {
 	}
 	if r.Runner == nil {
 		return ErrRuntimeNotFound
+	}
+	if strings.TrimSpace(r.App.ToolPolicyID) != "" &&
+		isNilInterfaceValue(r.ToolPermissionPolicy) {
+		return ErrToolPermissionPolicyRequired
 	}
 	if r.App.TenantID != r.Tenant.TenantID ||
 		r.Binding.TenantID != r.Tenant.TenantID ||

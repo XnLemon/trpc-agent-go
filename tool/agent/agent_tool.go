@@ -1802,7 +1802,23 @@ func (at *Tool) fallbackRunnerRunOptions(ctx context.Context) []agent.RunOption 
 	if !ok || parentInv == nil {
 		return nil
 	}
-	opts := make([]agent.RunOption, 0, 3)
+	opts := make([]agent.RunOption, 0, 5)
+	if parentInv.RunOptions.MandatoryToolFilter != nil {
+		opts = append(
+			opts,
+			agent.WithMandatoryToolFilter(
+				parentInv.RunOptions.MandatoryToolFilter,
+			),
+		)
+	}
+	if parentInv.RunOptions.MandatoryToolPermissionPolicy != nil {
+		opts = append(
+			opts,
+			agent.WithMandatoryToolPermissionPolicy(
+				parentInv.RunOptions.MandatoryToolPermissionPolicy,
+			),
+		)
+	}
 	if agent.IsGraphCompletionEventDisabled(parentInv) {
 		opts = append(opts, agent.WithDisableGraphCompletionEvent(true))
 	}

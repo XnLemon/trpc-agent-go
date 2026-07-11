@@ -550,6 +550,102 @@ func TestGetFilteredTools_AppendsRunOptionTools(t *testing.T) {
 	require.Empty(t, traceableNames)
 }
 
+func TestGetFilteredTools_MandatoryFilterBlocksAdditionalTools(
+	t *testing.T,
+) {
+	f := New(nil, nil, Options{})
+	frameworkTool := &mockTool{name: "framework_tool"}
+	additionalTool := &mockTool{name: "additional_tool"}
+	mockAgent := &mockAgentWithInvocationToolSurface{
+		name:          "test-agent",
+		allTools:      []tool.Tool{frameworkTool},
+		userToolNames: map[string]bool{},
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(mockAgent),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithAdditionalTools([]tool.Tool{additionalTool}),
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("framework_tool"),
+			),
+		)),
+	)
+
+	filtered := f.getFilteredTools(context.Background(), inv)
+
+	require.Equal(t, []tool.Tool{frameworkTool}, filtered)
+	hasUserTools, ok := InvocationHasFilteredUserTools(inv)
+	require.True(t, ok)
+	require.False(t, hasUserTools)
+}
+
+func TestGetFilteredTools_MandatoryFilterBlocksExternalTools(
+	t *testing.T,
+) {
+	f := New(nil, nil, Options{})
+	frameworkTool := &mockTool{name: "framework_tool"}
+	externalTool := &mockTool{name: "external_tool"}
+	mockAgent := &mockAgentWithInvocationToolSurface{
+		name:          "test-agent",
+		allTools:      []tool.Tool{frameworkTool},
+		userToolNames: map[string]bool{},
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(mockAgent),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithExternalTools([]tool.Tool{externalTool}),
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("framework_tool"),
+			),
+		)),
+	)
+
+	filtered := f.getFilteredTools(context.Background(), inv)
+
+	require.Equal(t, []tool.Tool{frameworkTool}, filtered)
+	require.Empty(t, inv.RunOptions.ExternalToolNames)
+}
+
+func TestGetFilteredTools_MandatoryFilterBlocksActivatedTools(
+	t *testing.T,
+) {
+	frameworkTool := &mockTool{name: "framework_tool"}
+	activatedTool := &mockTool{name: "activated_tool"}
+	f := New(nil, nil, Options{
+		ToolActivationApplier: func(
+			_ context.Context,
+			_ *agent.Invocation,
+			tools []tool.Tool,
+			userNames map[string]bool,
+			externalNames map[string]bool,
+		) ([]tool.Tool, map[string]bool, map[string]bool) {
+			tools = append(tools, activatedTool)
+			userNames[activatedTool.Declaration().Name] = true
+			return tools, userNames, externalNames
+		},
+	})
+	mockAgent := &mockAgentWithInvocationToolSurface{
+		name:          "test-agent",
+		allTools:      []tool.Tool{frameworkTool},
+		userToolNames: map[string]bool{},
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(mockAgent),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("framework_tool"),
+			),
+		)),
+	)
+
+	filtered := f.getFilteredTools(context.Background(), inv)
+
+	require.Equal(t, []tool.Tool{frameworkTool}, filtered)
+	hasUserTools, ok := InvocationHasFilteredUserTools(inv)
+	require.True(t, ok)
+	require.False(t, hasUserTools)
+}
+
 func TestGetFilteredTools_FiltersRunOptionToolsWithFilterProvider(
 	t *testing.T,
 ) {

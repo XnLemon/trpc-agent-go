@@ -1367,6 +1367,10 @@ func (f *Flow) preprocess(
 	eventChan chan<- *event.Event,
 ) *contextCompactionRebuildPlan {
 	var rebuildPlan *contextCompactionRebuildPlan
+	var mandatoryToolFilter tool.FilterFunc
+	if invocation != nil {
+		mandatoryToolFilter = invocation.RunOptions.MandatoryToolFilter
+	}
 	ctx, span, started := startLatencySpan(
 		ctx,
 		invocation,
@@ -1425,6 +1429,7 @@ func (f *Flow) preprocess(
 		}
 		finishLatencySpan(stageSpan, stageStarted, nil)
 	}
+	applyMandatoryRequestToolFilter(ctx, mandatoryToolFilter, llmRequest)
 	// Sanitize invalid tool calls in history to avoid poisoning future requests.
 	llmRequest.Messages = toolcall.SanitizeMessagesWithTools(ctx, llmRequest.Messages, llmRequest.Tools)
 	return rebuildPlan
@@ -1632,6 +1637,10 @@ func (f *Flow) rebuildRequestForContextCompaction(
 	if rebuilt.Tools == nil {
 		rebuilt.Tools = make(map[string]tool.Tool)
 	}
+	var mandatoryToolFilter tool.FilterFunc
+	if invocation != nil {
+		mandatoryToolFilter = invocation.RunOptions.MandatoryToolFilter
+	}
 	rebuildPlan.contentProcessor.ProcessRequest(ctx, invocation, rebuilt, nil)
 	for _, tailProcessor := range rebuildPlan.tailProcessors {
 		tailProcessor.RebuildRequestForContextCompaction(
@@ -1640,6 +1649,7 @@ func (f *Flow) rebuildRequestForContextCompaction(
 			rebuilt,
 		)
 	}
+	applyMandatoryRequestToolFilter(ctx, mandatoryToolFilter, rebuilt)
 	rebuilt.Messages = toolcall.SanitizeMessagesWithTools(
 		ctx,
 		rebuilt.Messages,
@@ -1988,7 +1998,16 @@ func (f *Flow) getFilteredTools(
 			hasUserToolTracking,
 			invocation.RunOptions,
 		)
-	if f.toolActivationApplier != nil {
+	var activationApplied bool
+	allTools, userToolNames, externalToolNames, activationApplied =
+		toolsurface.ApplyInvocationToolActivation(
+			ctx,
+			invocation,
+			allTools,
+			userToolNames,
+			externalToolNames,
+		)
+	if !activationApplied && f.toolActivationApplier != nil {
 		allTools = append([]tool.Tool(nil), allTools...)
 		if userToolNames != nil {
 			userToolNames = copyToolNames(userToolNames)
@@ -2006,6 +2025,15 @@ func (f *Flow) getFilteredTools(
 			)
 		hasUserToolTracking = userToolNames != nil
 	}
+	allTools, userToolNames, externalToolNames =
+		toolsurface.ApplyMandatoryToolFilter(
+			ctx,
+			allTools,
+			userToolNames,
+			externalToolNames,
+			invocation.RunOptions,
+		)
+	hasUserToolTracking = userToolNames != nil
 
 	// If no filter is specified, return all tools for this invocation.
 	if invocation.RunOptions.ToolFilter == nil {
@@ -2181,6 +2209,10 @@ func (f *Flow) callLLM(
 	llmRequest *model.Request,
 	callModel model.Model,
 ) (context.Context, model.Seq[*model.Response], error) {
+	var mandatoryToolFilter tool.FilterFunc
+	if invocation != nil {
+		mandatoryToolFilter = invocation.RunOptions.MandatoryToolFilter
+	}
 	ctx, span, started := startLatencySpan(
 		ctx,
 		invocation,
@@ -2216,6 +2248,7 @@ func (f *Flow) callLLM(
 	if err != nil {
 		return ctx, nil, err
 	}
+	applyMandatoryRequestToolFilter(ctx, mandatoryToolFilter, llmRequest)
 	if customResp != nil {
 		return ctx, func(yield func(*model.Response) bool) {
 			yield(customResp)
@@ -2227,6 +2260,22 @@ func (f *Flow) callLLM(
 		return ctx, nil, err
 	}
 	return ctx, seq, nil
+}
+
+func applyMandatoryRequestToolFilter(
+	ctx context.Context,
+	mandatoryFilter tool.FilterFunc,
+	req *model.Request,
+) {
+	if mandatoryFilter == nil || req == nil || len(req.Tools) == 0 {
+		return
+	}
+	for name, candidate := range req.Tools {
+		if toolName(candidate) == "" ||
+			!mandatoryFilter(ctx, itool.ResolveDeclaration(candidate)) {
+			delete(req.Tools, name)
+		}
+	}
 }
 
 func (f *Flow) runBeforeModelCallbacks(
