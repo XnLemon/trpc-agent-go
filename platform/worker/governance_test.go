@@ -57,7 +57,7 @@ func TestRuntimeBuilderAppliesToolGovernanceEndToEnd(t *testing.T) {
 		return policy, nil
 	})
 	var captured AgentDependencies
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			_ context.Context,
@@ -106,7 +106,7 @@ func TestRuntimeBuilderRejectsMissingToolPolicyProviderBeforeStorage(t *testing.
 	tenant, app, binding := governanceRuntimeConfig()
 	app.ToolPolicyID = "policy-a"
 	router := &countingRouter{Router: storagerouter.NewInMemoryRouter()}
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			context.Context,
@@ -126,7 +126,7 @@ func TestRuntimeBuilderRejectsMismatchedToolPolicyBeforeStorage(t *testing.T) {
 	tenant, app, binding := governanceRuntimeConfig()
 	app.ToolPolicyID = "policy-a"
 	router := &countingRouter{Router: storagerouter.NewInMemoryRouter()}
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			context.Context,
@@ -172,7 +172,7 @@ func TestRuntimeBuilderIsolatesResolvedAndCompiledToolPolicySlices(
 		HighRiskTools:          []string{"shell"},
 		DangerousToolAction:    platform.DangerousToolActionDeny,
 	}
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			_ context.Context,
