@@ -9,7 +9,8 @@
 
 // Package toolsurface resolves the effective tool surface for an invocation:
 // the base surface exposed by the agent plus the run-scoped tools, with the
-// run-scoped tool filter applied. It is the single source of truth shared by
+// mandatory and ordinary run-scoped tool filters applied. It is the single
+// source of truth shared by
 // the LLM flow (which uses it to build the model request) and by helpers such
 // as the dynamic AgentTool (which derives a child capability surface from a
 // parent invocation). Keeping the logic here avoids both behavioral drift and
@@ -124,6 +125,37 @@ func AppendRunOptionTools(
 	return allTools, userToolNames, hasUserToolTracking, externalNames
 }
 
+// ApplyInvocationToolActivation applies the agent's invocation-scoped
+// activation layer, if supported. The inputs are copied before invoking the
+// provider so activation cannot mutate the configured/base surface.
+func ApplyInvocationToolActivation(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	allTools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool, bool) {
+	if invocation == nil || invocation.Agent == nil {
+		return allTools, userToolNames, externalToolNames, false
+	}
+	provider, ok := invocation.Agent.(agent.InvocationToolActivationProvider)
+	if !ok {
+		return allTools, userToolNames, externalToolNames, false
+	}
+	allTools = append([]tool.Tool(nil), allTools...)
+	userToolNames = copyToolNames(userToolNames)
+	externalToolNames = copyToolNames(externalToolNames)
+	allTools, userToolNames, externalToolNames =
+		provider.ApplyInvocationToolActivation(
+			ctx,
+			invocation,
+			allTools,
+			userToolNames,
+			externalToolNames,
+		)
+	return allTools, userToolNames, externalToolNames, true
+}
+
 // ApplyToolFilter applies the run-scoped ToolFilter to allTools, always keeping
 // framework tools and keeping user tools only when the filter passes. The
 // result is sorted by name for stable prompt-cache behavior. It assumes
@@ -164,6 +196,40 @@ func ApplyToolFilter(
 		return toolName(filtered[i]) < toolName(filtered[j])
 	})
 	return filtered
+}
+
+// ApplyMandatoryToolFilter applies the non-negotiable run filter to the
+// complete tool surface and removes hidden names from the user/external
+// classification maps. Unlike ApplyToolFilter, framework tools are not exempt.
+func ApplyMandatoryToolFilter(
+	ctx context.Context,
+	allTools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+	opts agent.RunOptions,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	if opts.MandatoryToolFilter == nil {
+		return allTools, userToolNames, externalToolNames
+	}
+	filtered := make([]tool.Tool, 0, len(allTools))
+	visibleNames := make(map[string]bool, len(allTools))
+	for _, candidate := range allTools {
+		name := toolName(candidate)
+		if name == "" {
+			continue
+		}
+		if !opts.MandatoryToolFilter(
+			ctx,
+			itool.ResolveDeclaration(candidate),
+		) {
+			continue
+		}
+		filtered = append(filtered, candidate)
+		visibleNames[name] = true
+	}
+	return filtered,
+		visibleToolNames(userToolNames, visibleNames),
+		visibleToolNames(externalToolNames, visibleNames)
 }
 
 // Effective returns the effective tool surface for the invocation: the base
@@ -213,6 +279,23 @@ func EffectiveWithExternal(
 			hasUserToolTracking,
 			invocation.RunOptions,
 		)
+	allTools, userToolNames, externalNames, _ =
+		ApplyInvocationToolActivation(
+			ctx,
+			invocation,
+			allTools,
+			userToolNames,
+			externalNames,
+		)
+	hasUserToolTracking = userToolNames != nil
+	allTools, userToolNames, externalNames = ApplyMandatoryToolFilter(
+		ctx,
+		allTools,
+		userToolNames,
+		externalNames,
+		invocation.RunOptions,
+	)
+	hasUserToolTracking = userToolNames != nil
 	if invocation.RunOptions.ToolFilter == nil {
 		return allTools, userToolNames, externalNames
 	}
@@ -260,11 +343,30 @@ func collectToolNames(tools []tool.Tool) map[string]bool {
 }
 
 func copyToolNames(src map[string]bool) map[string]bool {
+	if src == nil {
+		return nil
+	}
 	dst := make(map[string]bool, len(src))
 	for name, ok := range src {
 		dst[name] = ok
 	}
 	return dst
+}
+
+func visibleToolNames(
+	names map[string]bool,
+	visibleNames map[string]bool,
+) map[string]bool {
+	if names == nil {
+		return nil
+	}
+	visible := make(map[string]bool, len(names))
+	for name, enabled := range names {
+		if enabled && visibleNames[name] {
+			visible[name] = true
+		}
+	}
+	return visible
 }
 
 func toolName(tl tool.Tool) string {

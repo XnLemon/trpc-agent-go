@@ -424,14 +424,31 @@ func (s *Service) runGatewayRunner(
 	if input.FencingToken > 0 {
 		runnerSpan.SetAttributes(attribute.Int64("storage.fencing_token", input.FencingToken))
 	}
+	runOptions := []agent.RunOption{
+		agent.WithRequestID(input.RequestID),
+		agent.WithLatencyDiagnostics(true),
+		agent.WithLatencyDiagnosticsEvents(false),
+	}
+	if runtime.ToolFilter != nil {
+		runOptions = append(
+			runOptions,
+			agent.WithMandatoryToolFilter(runtime.ToolFilter),
+		)
+	}
+	if !isNilInterfaceValue(runtime.ToolPermissionPolicy) {
+		runOptions = append(
+			runOptions,
+			agent.WithMandatoryToolPermissionPolicy(
+				runtime.ToolPermissionPolicy,
+			),
+		)
+	}
 	ch, err := runtime.Runner.Run(
 		runnerCtx,
 		input.InternalUserID,
 		input.SessionID,
 		model.NewUserMessage(input.Text),
-		agent.WithRequestID(input.RequestID),
-		agent.WithLatencyDiagnostics(true),
-		agent.WithLatencyDiagnosticsEvents(false),
+		runOptions...,
 	)
 	if err != nil {
 		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
@@ -758,24 +775,24 @@ func (s *Service) writeAuditTo(
 	auditSink platform.AuditSink,
 	record platform.AuditRecord,
 ) {
-	if isNilAuditSink(auditSink) {
+	if isNilInterfaceValue(auditSink) {
 		return
 	}
 	_ = auditSink.WriteAudit(ctx, record)
 }
 
 func (s *Service) auditSinkForRuntime(runtime Runtime) platform.AuditSink {
-	if !isNilAuditSink(runtime.Audit) {
+	if !isNilInterfaceValue(runtime.Audit) {
 		return runtime.Audit
 	}
 	return s.auditSink
 }
 
-func isNilAuditSink(auditSink platform.AuditSink) bool {
-	if auditSink == nil {
+func isNilInterfaceValue(value any) bool {
+	if value == nil {
 		return true
 	}
-	reflected := reflect.ValueOf(auditSink)
+	reflected := reflect.ValueOf(value)
 	switch reflected.Kind() {
 	case reflect.Chan,
 		reflect.Func,

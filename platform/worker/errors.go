@@ -27,4 +27,8 @@ var (
 	ErrAgentRequired = errors.New("worker agent is required")
 	// ErrAgentNameMismatch indicates that the built agent does not match app config.
 	ErrAgentNameMismatch = errors.New("worker agent name does not match app config")
+	// ErrToolPolicyProviderRequired indicates that an app policy cannot be resolved.
+	ErrToolPolicyProviderRequired = errors.New("worker tool policy provider is required")
+	// ErrToolPolicyIdentityMismatch indicates that a resolved policy belongs elsewhere.
+	ErrToolPolicyIdentityMismatch = errors.New("worker tool policy identity mismatch")
 )

@@ -1229,6 +1229,74 @@ func TestWithToolPermissionPolicy(t *testing.T) {
 	require.Equal(t, tool.PermissionActionDeny, decision.Action)
 }
 
+func TestRunOptionsCheckToolPermissionAppliesMandatoryPolicyFirst(
+	t *testing.T,
+) {
+	var calls []string
+	opts := NewRunOptions(
+		WithMandatoryToolPermissionPolicyFunc(
+			func(
+				context.Context,
+				*tool.PermissionRequest,
+			) (tool.PermissionDecision, error) {
+				calls = append(calls, "mandatory")
+				return tool.DenyPermission("tenant policy"), nil
+			},
+		),
+		WithToolPermissionPolicyFunc(
+			func(
+				context.Context,
+				*tool.PermissionRequest,
+			) (tool.PermissionDecision, error) {
+				calls = append(calls, "ordinary")
+				return tool.AllowPermission(), nil
+			},
+		),
+	)
+
+	decision, err := opts.CheckToolPermission(
+		context.Background(),
+		&tool.PermissionRequest{ToolName: "shell"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, tool.PermissionActionDeny, decision.Action)
+	require.Equal(t, []string{"mandatory"}, calls)
+}
+
+func TestRunOptionsCheckToolPermissionAllowsOrdinaryPolicyToTighten(
+	t *testing.T,
+) {
+	var calls []string
+	opts := NewRunOptions(
+		WithMandatoryToolPermissionPolicyFunc(
+			func(
+				context.Context,
+				*tool.PermissionRequest,
+			) (tool.PermissionDecision, error) {
+				calls = append(calls, "mandatory")
+				return tool.AllowPermission(), nil
+			},
+		),
+		WithToolPermissionPolicyFunc(
+			func(
+				context.Context,
+				*tool.PermissionRequest,
+			) (tool.PermissionDecision, error) {
+				calls = append(calls, "ordinary")
+				return tool.DenyPermission("child policy"), nil
+			},
+		),
+	)
+
+	decision, err := opts.CheckToolPermission(
+		context.Background(),
+		&tool.PermissionRequest{ToolName: "shell"},
+	)
+	require.NoError(t, err)
+	require.Equal(t, tool.PermissionActionDeny, decision.Action)
+	require.Equal(t, []string{"mandatory", "ordinary"}, calls)
+}
+
 func TestWithInstruction(t *testing.T) {
 	opts := &RunOptions{}
 	WithInstruction(testRunInstruction)(opts)

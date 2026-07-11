@@ -1599,6 +1599,7 @@ func (r *llmRunner) executeModel(
 		Tools:            tools,
 		GenerationConfig: r.generationConfig,
 	}
+	applyMandatoryRequestToolFilter(ctx, callInvocation, request)
 	// Sanitize invalid tool calls in history to avoid poisoning future requests.
 	request.Messages = toolcall.SanitizeMessagesWithTools(ctx, request.Messages, request.Tools)
 	applyInvocationRequestOverrides(request, callInvocation, nodeID)
@@ -2283,11 +2284,52 @@ func runModelStream(
 		}
 		return ctx, singleResponseStream(customResponse), nil
 	}
+	applyMandatoryRequestToolFilter(ctx, invocation, request)
+	if request != nil {
+		request.Messages = toolcall.SanitizeMessagesWithTools(
+			ctx,
+			request.Messages,
+			request.Tools,
+		)
+	}
 	if beforeGenerate != nil {
 		beforeGenerate(ctx)
 	}
 	stream, err := generateModelStream(ctx, llmModel, request, span)
 	return ctx, stream, err
+}
+
+func applyMandatoryRequestToolFilter(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	request *model.Request,
+) {
+	if invocation == nil ||
+		invocation.RunOptions.MandatoryToolFilter == nil ||
+		request == nil ||
+		len(request.Tools) == 0 {
+		return
+	}
+	for name, candidate := range request.Tools {
+		if graphToolName(candidate) == "" ||
+			!invocation.RunOptions.MandatoryToolFilter(
+				ctx,
+				itool.ResolveDeclaration(candidate),
+			) {
+			delete(request.Tools, name)
+		}
+	}
+}
+
+func graphToolName(tl tool.Tool) string {
+	if tl == nil {
+		return ""
+	}
+	decl := tl.Declaration()
+	if decl == nil {
+		return ""
+	}
+	return decl.Name
 }
 
 // runModel preserves the pre-refactor test-facing helper signature by
@@ -4364,6 +4406,24 @@ func runToolWithEventContexts(
 	}
 	decl := t.Declaration()
 	startInvocation := invocationFromContextOrFallback(ctx, nil)
+	var mandatoryToolPermissionPolicy tool.PermissionPolicy
+	if startInvocation != nil {
+		mandatoryToolPermissionPolicy =
+			startInvocation.RunOptions.MandatoryToolPermissionPolicy
+	}
+	visibilityResult, err := checkMandatoryToolVisibility(
+		ctx,
+		startInvocation,
+		toolCall,
+		t,
+		decl,
+	)
+	if err != nil {
+		return ctx, startInvocation, ctx, startInvocation, nil, toolCall.Function.Arguments, err
+	}
+	if visibilityResult != nil {
+		return ctx, startInvocation, ctx, startInvocation, visibilityResult, toolCall.Function.Arguments, nil
+	}
 
 	ctx, toolCall, customResult, err := runBeforeToolPluginCallbacks(
 		ctx,
@@ -4395,6 +4455,7 @@ func runToolWithEventContexts(
 	}
 	permissionResult, err := checkToolPermission(
 		ctx,
+		mandatoryToolPermissionPolicy,
 		startInvocation,
 		toolCall,
 		t,
@@ -4561,8 +4622,45 @@ func callToolWithRetry(
 	return runResult.Result, runResult.Error
 }
 
+func checkMandatoryToolVisibility(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	toolCall model.ToolCall,
+	t tool.Tool,
+	decl *tool.Declaration,
+) (*tool.PermissionResult, error) {
+	if invocation == nil || invocation.RunOptions.MandatoryToolFilter == nil {
+		return nil, nil
+	}
+	if invocation.RunOptions.MandatoryToolFilter(
+		ctx,
+		itool.ResolveDeclaration(t),
+	) {
+		return nil, nil
+	}
+	req := &tool.PermissionRequest{
+		Tool:        t,
+		ToolName:    toolCall.Function.Name,
+		ToolCallID:  toolCall.ID,
+		Declaration: decl,
+		Arguments:   toolCall.Function.Arguments,
+		Metadata:    tool.MetadataOf(itool.ResolveSemantic(t)),
+	}
+	return normalizeToolPermissionResult(
+		req,
+		tool.DenyPermission(
+			fmt.Sprintf(
+				"tool %q is hidden by mandatory tool filter",
+				req.ToolName,
+			),
+		),
+		nil,
+	)
+}
+
 func checkToolPermission(
 	ctx context.Context,
+	mandatoryPolicy tool.PermissionPolicy,
 	invocation *agent.Invocation,
 	toolCall model.ToolCall,
 	t tool.Tool,
@@ -4583,10 +4681,21 @@ func checkToolPermission(
 			return result, err
 		}
 	}
-	if invocation == nil || invocation.RunOptions.ToolPermissionPolicy == nil {
+	mandatoryOpts := agent.RunOptions{
+		MandatoryToolPermissionPolicy: mandatoryPolicy,
+	}
+	decision, err := mandatoryOpts.CheckToolPermission(ctx, req)
+	result, err := normalizeToolPermissionResult(req, decision, err)
+	if result != nil || err != nil {
+		return result, err
+	}
+	if invocation == nil {
 		return nil, nil
 	}
-	decision, err := invocation.RunOptions.ToolPermissionPolicy.CheckToolPermission(ctx, req)
+	ordinaryOpts := agent.RunOptions{
+		ToolPermissionPolicy: invocation.RunOptions.ToolPermissionPolicy,
+	}
+	decision, err = ordinaryOpts.CheckToolPermission(ctx, req)
 	return normalizeToolPermissionResult(req, decision, err)
 }
 

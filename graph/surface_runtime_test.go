@@ -131,6 +131,91 @@ func TestLLMNode_SurfacePatch_AppendsTools(t *testing.T) {
 	require.Contains(t, m.lastReq.Tools, "frontend_tool")
 }
 
+func TestLLMNode_MandatoryToolFilterHidesRequestTools(t *testing.T) {
+	m := &captureModel{}
+	sg := NewStateGraph(MessagesStateSchema())
+	sg.AddLLMNode(
+		"llm",
+		m,
+		"static instruction",
+		map[string]tool.Tool{
+			"allowed_tool": &echoTool{name: "allowed_tool"},
+			"hidden_tool":  &echoTool{name: "hidden_tool"},
+		},
+	)
+	inv := agent.NewInvocation(
+		agent.WithInvocationTraceNodeID("graph"),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("allowed_tool"),
+			),
+		)),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), inv)
+	node := sg.graph.nodes["llm"]
+	exec := &ExecutionContext{InvocationID: inv.InvocationID, Invocation: inv}
+
+	_, err := node.Function(ctx, State{
+		StateKeyExecContext:   exec,
+		StateKeyCurrentNodeID: "llm",
+		StateKeyUserInput:     "actual user",
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, m.lastReq)
+	require.Contains(t, m.lastReq.Tools, "allowed_tool")
+	require.NotContains(t, m.lastReq.Tools, "hidden_tool")
+}
+
+func TestRunModelStream_ReappliesMandatoryToolFilterAfterBeforeModelCallbacks(
+	t *testing.T,
+) {
+	m := &captureModel{}
+	allowed := &echoTool{name: "allowed_tool"}
+	hidden := &echoTool{name: "hidden_tool"}
+	callbacks := model.NewCallbacks().RegisterBeforeModel(
+		func(
+			_ context.Context,
+			req *model.Request,
+		) (*model.Response, error) {
+			req.Tools["hidden_tool"] = hidden
+			return nil, nil
+		},
+	)
+	inv := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("allowed_tool"),
+			),
+		)),
+	)
+	req := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("actual user")},
+		Tools: map[string]tool.Tool{
+			"allowed_tool": allowed,
+		},
+	}
+
+	_, stream, err := runModelStream(
+		agent.NewInvocationContext(context.Background(), inv),
+		inv,
+		callbacks,
+		m,
+		req,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stream.Ch)
+	for range stream.Ch {
+	}
+
+	require.NotNil(t, m.lastReq)
+	require.Contains(t, m.lastReq.Tools, "allowed_tool")
+	require.NotContains(t, m.lastReq.Tools, "hidden_tool")
+	require.Contains(t, req.Tools, "allowed_tool")
+	require.NotContains(t, req.Tools, "hidden_tool")
+}
+
 func TestToolsNode_SurfacePatch_OverridesExplicitTools(t *testing.T) {
 	sg := NewStateGraph(MessagesStateSchema())
 	sg.AddToolsNode("tools", map[string]tool.Tool{

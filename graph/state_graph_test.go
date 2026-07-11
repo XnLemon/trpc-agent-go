@@ -1788,7 +1788,7 @@ func TestRunToolWithEventContexts_OrdinaryToolIgnoresAgentToolInterruptState(t *
 	require.Equal(t, toolCall.Function.Arguments, modifiedArgs)
 }
 
-func TestRunToolWithEventContexts_ToolPermissionPolicyDenySkipsExecution(
+func TestRunToolWithEventContexts_MandatoryToolPermissionPolicyDenySkipsExecution(
 	t *testing.T,
 ) {
 	const (
@@ -1800,9 +1800,10 @@ func TestRunToolWithEventContexts_ToolPermissionPolicyDenySkipsExecution(
 	)
 
 	var (
-		beforeCalled bool
-		afterCalled  bool
-		policyCalled bool
+		beforeCalled    bool
+		afterCalled     bool
+		mandatoryCalled bool
+		ordinaryCalled  bool
 	)
 	callbacks := tool.NewCallbacks()
 	callbacks.RegisterBeforeTool(func(
@@ -1822,15 +1823,23 @@ func TestRunToolWithEventContexts_ToolPermissionPolicyDenySkipsExecution(
 		return &tool.AfterToolResult{}, nil
 	})
 	invocation := &agent.Invocation{
-		RunOptions: agent.NewRunOptions(agent.WithToolPermissionPolicyFunc(
-			func(_ context.Context, req *tool.PermissionRequest) (tool.PermissionDecision, error) {
-				policyCalled = true
-				require.Equal(t, toolName, req.ToolName)
-				require.Equal(t, toolCallID, req.ToolCallID)
-				require.JSONEq(t, rewrittenArgs, string(req.Arguments))
-				return tool.DenyPermission(denyReason), nil
-			},
-		)),
+		RunOptions: agent.NewRunOptions(
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(_ context.Context, req *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					mandatoryCalled = true
+					require.Equal(t, toolName, req.ToolName)
+					require.Equal(t, toolCallID, req.ToolCallID)
+					require.JSONEq(t, rewrittenArgs, string(req.Arguments))
+					return tool.DenyPermission(denyReason), nil
+				},
+			),
+			agent.WithToolPermissionPolicyFunc(
+				func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					ordinaryCalled = true
+					return tool.AllowPermission(), nil
+				},
+			),
+		),
 	}
 	ctx := agent.NewInvocationContext(context.Background(), invocation)
 	tl := &captureTool{name: toolName, result: map[string]any{"ok": true}}
@@ -1853,7 +1862,8 @@ func TestRunToolWithEventContexts_ToolPermissionPolicyDenySkipsExecution(
 	)
 	require.NoError(t, err)
 	require.True(t, beforeCalled)
-	require.True(t, policyCalled)
+	require.True(t, mandatoryCalled)
+	require.False(t, ordinaryCalled)
 	require.False(t, afterCalled)
 	require.False(t, tl.called)
 	require.JSONEq(t, rewrittenArgs, string(modifiedArgs))
@@ -1862,6 +1872,165 @@ func TestRunToolWithEventContexts_ToolPermissionPolicyDenySkipsExecution(
 	require.Equal(t, tool.PermissionResultStatusDenied, permissionResult.Status)
 	require.Equal(t, toolName, permissionResult.Tool)
 	require.Equal(t, denyReason, permissionResult.Reason)
+}
+
+func TestRunToolWithEventContexts_MandatoryToolPermissionPolicySurvivesCallbackInvocationReplacement(
+	t *testing.T,
+) {
+	const (
+		toolName      = "delete_file"
+		toolCallID    = "call-deny"
+		denyReason    = "tenant policy"
+		originalArgs  = `{"path":"unsafe"}`
+		rewrittenArgs = `{"path":"safe"}`
+	)
+
+	var (
+		mandatoryCalled bool
+		ordinaryCalled  bool
+		afterCalled     bool
+	)
+	callbackInvocation := agent.NewInvocation(
+		agent.WithInvocationID("callback-invocation"),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithToolPermissionPolicyFunc(
+				func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					ordinaryCalled = true
+					return tool.AllowPermission(), nil
+				},
+			),
+		)),
+	)
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(func(
+		_ context.Context,
+		_ *tool.BeforeToolArgs,
+	) (*tool.BeforeToolResult, error) {
+		return &tool.BeforeToolResult{
+			Context: agent.NewInvocationContext(
+				context.Background(),
+				callbackInvocation,
+			),
+			ModifiedArguments: []byte(rewrittenArgs),
+		}, nil
+	})
+	callbacks.RegisterAfterTool(func(
+		_ context.Context,
+		_ *tool.AfterToolArgs,
+	) (*tool.AfterToolResult, error) {
+		afterCalled = true
+		return &tool.AfterToolResult{}, nil
+	})
+	originalInvocation := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(
+					_ context.Context,
+					req *tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					mandatoryCalled = true
+					require.Equal(t, toolName, req.ToolName)
+					require.Equal(t, toolCallID, req.ToolCallID)
+					require.JSONEq(t, rewrittenArgs, string(req.Arguments))
+					return tool.DenyPermission(denyReason), nil
+				},
+			),
+		)),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), originalInvocation)
+	tl := &captureTool{name: toolName, result: map[string]any{"ok": true}}
+	toolCall := model.ToolCall{
+		ID: toolCallID,
+		Function: model.FunctionDefinitionParam{
+			Name:      toolName,
+			Arguments: []byte(originalArgs),
+		},
+	}
+
+	_, startInvocation, _, _, result, modifiedArgs, err :=
+		runToolWithEventContexts(
+			ctx,
+			toolCall,
+			callbacks,
+			tl,
+			State{},
+			nil,
+			0,
+		)
+	require.NoError(t, err)
+	require.Same(t, callbackInvocation, startInvocation)
+	require.True(t, mandatoryCalled)
+	require.False(t, ordinaryCalled)
+	require.False(t, afterCalled)
+	require.False(t, tl.called)
+	require.JSONEq(t, rewrittenArgs, string(modifiedArgs))
+	permissionResult, ok := result.(*tool.PermissionResult)
+	require.True(t, ok)
+	require.Equal(t, tool.PermissionResultStatusDenied, permissionResult.Status)
+	require.Equal(t, toolName, permissionResult.Tool)
+	require.Equal(t, denyReason, permissionResult.Reason)
+}
+
+func TestRunToolWithEventContexts_MandatoryToolFilterDenySkipsCallbacksAndExecution(
+	t *testing.T,
+) {
+	const toolName = "hidden_tool"
+	var (
+		beforeCalled     bool
+		permissionCalled bool
+	)
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(func(
+		_ context.Context,
+		_ *tool.BeforeToolArgs,
+	) (*tool.BeforeToolResult, error) {
+		beforeCalled = true
+		return &tool.BeforeToolResult{}, nil
+	})
+	invocation := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				func(_ context.Context, candidate tool.Tool) bool {
+					return candidate.Declaration().Name != toolName
+				},
+			),
+			agent.WithToolPermissionPolicyFunc(
+				func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					permissionCalled = true
+					return tool.AllowPermission(), nil
+				},
+			),
+		)),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), invocation)
+	tl := &captureTool{name: toolName, result: map[string]any{"ok": true}}
+	toolCall := model.ToolCall{
+		ID: "call-hidden",
+		Function: model.FunctionDefinitionParam{
+			Name:      toolName,
+			Arguments: []byte(`{"value":"blocked"}`),
+		},
+	}
+
+	_, _, _, _, result, modifiedArgs, err := runToolWithEventContexts(
+		ctx,
+		toolCall,
+		callbacks,
+		tl,
+		State{},
+		nil,
+		0,
+	)
+	require.NoError(t, err)
+	require.False(t, beforeCalled)
+	require.False(t, permissionCalled)
+	require.False(t, tl.called)
+	require.Equal(t, toolCall.Function.Arguments, modifiedArgs)
+	permissionResult, ok := result.(*tool.PermissionResult)
+	require.True(t, ok)
+	require.Equal(t, tool.PermissionResultStatusDenied, permissionResult.Status)
+	require.Equal(t, toolName, permissionResult.Tool)
+	require.Contains(t, permissionResult.Reason, "mandatory tool filter")
 }
 
 func TestNewToolsNodeFunc_ToolCallbacksPrecedence(t *testing.T) {

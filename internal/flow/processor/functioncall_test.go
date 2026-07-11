@@ -124,6 +124,7 @@ type permissionMockTool struct {
 	*mockCallableTool
 	metadata         tool.ToolMetadata
 	decision         tool.PermissionDecision
+	permissionCalled bool
 	stateDelta       map[string][]byte
 	stateDeltaCalled bool
 	skipSummarize    bool
@@ -149,6 +150,7 @@ func (m *permissionMockTool) CheckPermission(
 	_ context.Context,
 	_ *tool.PermissionRequest,
 ) (tool.PermissionDecision, error) {
+	m.permissionCalled = true
 	return m.decision, nil
 }
 
@@ -9006,6 +9008,78 @@ func TestExecuteToolWithCallbacks_ToolPermissionPolicyDenySkipsExecution(
 	require.JSONEq(t, permissionJSON, string(mustJSON(res)))
 }
 
+func TestExecuteToolWithCallbacks_MandatoryToolFilterDenySkipsCallbacksCheckerAndExecution(
+	t *testing.T,
+) {
+	const (
+		toolName       = "hidden_tool"
+		permissionJSON = `{"status":"denied","tool":"hidden_tool","reason":"tool \"hidden_tool\" is hidden by mandatory tool filter"}`
+	)
+	var (
+		calledTool     bool
+		calledCallback bool
+		ordinaryPolicy bool
+	)
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(func(
+		_ context.Context,
+		_ *tool.BeforeToolArgs,
+	) (*tool.BeforeToolResult, error) {
+		calledCallback = true
+		return &tool.BeforeToolResult{}, nil
+	})
+	tl := &permissionMockTool{
+		mockCallableTool: &mockCallableTool{
+			declaration: &tool.Declaration{Name: toolName},
+			callFn: func(context.Context, []byte) (any, error) {
+				calledTool = true
+				return map[string]any{"ok": true}, nil
+			},
+		},
+		decision: tool.AllowPermission(),
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("allowed_tool"),
+			),
+			agent.WithToolPermissionPolicyFunc(
+				func(
+					context.Context,
+					*tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					ordinaryPolicy = true
+					return tool.AllowPermission(), nil
+				},
+			),
+		)),
+	)
+
+	_, result, modifiedArgs, _, _, err :=
+		NewFunctionCallResponseProcessor(false, callbacks).
+			executeToolWithCallbacks(
+				context.Background(),
+				inv,
+				model.ToolCall{
+					ID: "call-hidden",
+					Function: model.FunctionDefinitionParam{
+						Name:      toolName,
+						Arguments: []byte(`{"value":"blocked"}`),
+					},
+				},
+				tl,
+				nil,
+			)
+
+	require.NoError(t, err)
+	require.False(t, calledCallback)
+	require.False(t, tl.permissionCalled)
+	require.False(t, ordinaryPolicy)
+	require.False(t, calledTool)
+	require.JSONEq(t, `{"value":"blocked"}`, string(modifiedArgs))
+	require.JSONEq(t, permissionJSON, string(mustJSON(result)))
+}
+
 func TestExecuteToolCall_ToolPermissionResultSkipsToolResultMessagesCallback(
 	t *testing.T,
 ) {
@@ -9069,6 +9143,67 @@ func TestExecuteToolCall_ToolPermissionResultSkipsToolResultMessagesCallback(
 	require.Equal(t, toolCallID, choices[0].Message.ToolID)
 	require.Equal(t, toolName, choices[0].Message.ToolName)
 	require.JSONEq(t, permissionJSON, choices[0].Message.Content)
+}
+
+func TestExecuteToolWithCallbacks_MandatoryPermissionDenyCannotBeOverridden(
+	t *testing.T,
+) {
+	const (
+		toolName       = "shell"
+		denyReason     = "tenant policy denied shell"
+		permissionJSON = `{"status":"denied","tool":"shell","reason":"tenant policy denied shell"}`
+	)
+	var (
+		calledTool     bool
+		ordinaryCalled bool
+	)
+	tl := &mockCallableTool{
+		declaration: &tool.Declaration{Name: toolName},
+		callFn: func(context.Context, []byte) (any, error) {
+			calledTool = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+	inv := &agent.Invocation{
+		RunOptions: agent.NewRunOptions(
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(
+					context.Context,
+					*tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					return tool.DenyPermission(denyReason), nil
+				},
+			),
+			agent.WithToolPermissionPolicyFunc(
+				func(
+					context.Context,
+					*tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					ordinaryCalled = true
+					return tool.AllowPermission(), nil
+				},
+			),
+		),
+	}
+
+	_, res, _, _, _, err := NewFunctionCallResponseProcessor(false, nil).
+		executeToolWithCallbacks(
+			context.Background(),
+			inv,
+			model.ToolCall{
+				ID: "call-shell",
+				Function: model.FunctionDefinitionParam{
+					Name:      toolName,
+					Arguments: []byte(`{}`),
+				},
+			},
+			tl,
+			nil,
+		)
+	require.NoError(t, err)
+	require.False(t, calledTool)
+	require.False(t, ordinaryCalled)
+	require.JSONEq(t, permissionJSON, string(mustJSON(res)))
 }
 
 func TestExecuteSingleToolCallSequential_ToolPermissionResultSkipsStateDelta(

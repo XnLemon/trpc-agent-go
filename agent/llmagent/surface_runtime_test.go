@@ -670,6 +670,73 @@ func TestLLMAgent_Run_AgentToolFilterStillAppliesWithInvocationToolSurface(
 	require.Contains(t, m.got.Tools, testTransferToolName)
 }
 
+func TestLLMAgent_Run_MandatoryToolFilterAppliesToFrameworkTools(
+	t *testing.T,
+) {
+	m := &captureModel{}
+	agt := New(
+		"test-agent",
+		WithModel(m),
+		WithTools([]tool.Tool{
+			dummyTool{decl: &tool.Declaration{Name: "allowed_user_tool"}},
+		}),
+		WithSubAgents([]agent.Agent{&mockAgent{name: "child"}}),
+		WithAwaitUserReplyTool(true),
+	)
+	inv := agent.NewInvocation(
+		agent.WithInvocationMessage(model.NewUserMessage("hello")),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				func(_ context.Context, tl tool.Tool) bool {
+					switch tl.Declaration().Name {
+					case testTransferToolName, testAwaitReplyToolName:
+						return false
+					default:
+						return true
+					}
+				},
+			),
+		)),
+	)
+
+	ch, err := agt.Run(context.Background(), inv)
+	require.NoError(t, err)
+	for range ch {
+	}
+
+	require.NotNil(t, m.got)
+	require.Contains(t, m.got.Tools, "allowed_user_tool")
+	require.NotContains(t, m.got.Tools, testTransferToolName)
+	require.NotContains(t, m.got.Tools, testAwaitReplyToolName)
+}
+
+func TestLLMAgent_SetupInvocationDoesNotRewritePreinitializedIdentity(
+	t *testing.T,
+) {
+	agt := New("test-agent", WithModel(&captureModel{}))
+	inv := agent.NewInvocation(agent.WithInvocationAgent(agt))
+	const iterations = 10000
+	start := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		<-start
+		for i := 0; i < iterations; i++ {
+			_ = inv.Agent
+			_ = inv.AgentName
+		}
+		close(done)
+	}()
+
+	close(start)
+	for i := 0; i < iterations; i++ {
+		agt.setupInvocation(inv)
+	}
+	<-done
+
+	require.Same(t, agt, inv.Agent)
+	require.Equal(t, "test-agent", inv.AgentName)
+}
+
 func TestLLMAgent_Run_SurfacePatch_OverridesToolDeclarations(t *testing.T) {
 	m := &captureModel{}
 	agt := New(

@@ -1645,8 +1645,12 @@ func (a *LLMAgent) resolveBaseModel(inv *agent.Invocation) baseModelResolution {
 // setupInvocation sets up the invocation.
 func (a *LLMAgent) setupInvocation(invocation *agent.Invocation) {
 	// Set agent identity before resolving node-scoped surfaces.
-	invocation.Agent = a
-	invocation.AgentName = a.name
+	if invocation.Agent != a {
+		invocation.Agent = a
+	}
+	if invocation.AgentName != a.name {
+		invocation.AgentName = a.name
+	}
 
 	// Set the base model once for compatibility with existing callbacks.
 	resolution := a.resolveBaseModel(invocation)

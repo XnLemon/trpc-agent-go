@@ -23,6 +23,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/platform/storagerouter"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // AgentDependencies contains tenant-scoped services available while building
@@ -37,6 +38,12 @@ type AgentDependencies struct {
 	Artifact  artifact.Service
 	Knowledge knowledge.Knowledge
 	Audit     platform.AuditSink
+	// ToolPolicy is the tenant app policy used to build the agent tool surface.
+	ToolPolicy platform.ToolPolicy
+	// ToolFilter narrows tools visible to the model for this runtime.
+	ToolFilter tool.FilterFunc
+	// ToolPermissionPolicy enforces tool-call authorization before execution.
+	ToolPermissionPolicy tool.PermissionPolicy
 }
 
 // AgentFactory builds an agent for one tenant app runtime.
@@ -57,14 +64,26 @@ func (f AgentFactoryFunc) BuildAgent(
 
 // RuntimeBuilder assembles gateway runtimes from tenant storage profiles.
 type RuntimeBuilder struct {
-	router  storagerouter.Router
-	factory AgentFactory
+	router             storagerouter.Router
+	factory            AgentFactory
+	toolPolicyProvider ToolPolicyProvider
+}
+
+// RuntimeBuilderOption configures RuntimeBuilder.
+type RuntimeBuilderOption func(*RuntimeBuilder)
+
+// WithToolPolicyProvider resolves configured app tool policies.
+func WithToolPolicyProvider(provider ToolPolicyProvider) RuntimeBuilderOption {
+	return func(builder *RuntimeBuilder) {
+		builder.toolPolicyProvider = provider
+	}
 }
 
 // NewRuntimeBuilder creates a runtime builder.
 func NewRuntimeBuilder(
 	router storagerouter.Router,
 	factory AgentFactory,
+	opts ...RuntimeBuilderOption,
 ) (*RuntimeBuilder, error) {
 	if isNilDependency(router) {
 		return nil, ErrStorageRouterRequired
@@ -72,10 +91,16 @@ func NewRuntimeBuilder(
 	if isNilDependency(factory) {
 		return nil, ErrAgentFactoryRequired
 	}
-	return &RuntimeBuilder{
+	builder := &RuntimeBuilder{
 		router:  router,
 		factory: factory,
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(builder)
+		}
+	}
+	return builder, nil
 }
 
 // Build resolves tenant-scoped storage services, builds the configured agent,
@@ -90,6 +115,10 @@ func (b *RuntimeBuilder) Build(
 		return gateway.Runtime{}, err
 	}
 	if err := validateRuntimeConfig(tenant, app, binding); err != nil {
+		return gateway.Runtime{}, err
+	}
+	resolvedPolicy, err := b.resolveToolPolicyConfig(ctx, tenant, app)
+	if err != nil {
 		return gateway.Runtime{}, err
 	}
 
@@ -117,17 +146,28 @@ func (b *RuntimeBuilder) Build(
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve audit sink: %w", err)
 	}
+	permissionPolicy, err := compileToolPolicy(resolvedPolicy, auditSink)
+	if err != nil {
+		return gateway.Runtime{}, err
+	}
+	var toolFilter tool.FilterFunc
+	if permissionPolicy != nil {
+		toolFilter = permissionPolicy.ToolFilter()
+	}
 
 	dependencies := AgentDependencies{
-		Tenant:    tenant,
-		App:       app,
-		Binding:   binding,
-		Storage:   storage,
-		Session:   sessionService,
-		Memory:    memoryService,
-		Artifact:  artifactService,
-		Knowledge: knowledgeService,
-		Audit:     auditSink,
+		Tenant:               tenant,
+		App:                  app,
+		Binding:              binding,
+		Storage:              storage,
+		Session:              sessionService,
+		Memory:               memoryService,
+		Artifact:             artifactService,
+		Knowledge:            knowledgeService,
+		Audit:                auditSink,
+		ToolPolicy:           resolvedPolicy,
+		ToolFilter:           toolFilter,
+		ToolPermissionPolicy: permissionPolicy,
 	}
 	ag, err := b.factory.BuildAgent(ctx, dependencies)
 	if err != nil {
@@ -151,7 +191,9 @@ func (b *RuntimeBuilder) Build(
 			runner.WithMemoryService(memoryService),
 			runner.WithArtifactService(artifactService),
 		),
-		Audit: auditSink,
+		Audit:                auditSink,
+		ToolFilter:           toolFilter,
+		ToolPermissionPolicy: permissionPolicy,
 	}
 	if err := runtime.Validate(); err != nil {
 		_ = runtime.Runner.Close()

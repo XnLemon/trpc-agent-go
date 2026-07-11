@@ -36,6 +36,24 @@ type InvocationToolSurfaceProvider interface {
 	) ([]tool.Tool, map[string]bool)
 }
 
+// InvocationToolActivationProvider is an optional interface implemented by
+// agents that apply invocation-scoped activation after run-option tools have
+// been appended to the base surface.
+//
+// The provider must return the activated tool surface together with updated
+// user and external tool classifications. Callers provide private slice/map
+// copies, so implementations may mutate the inputs without affecting the
+// invocation's configured surface.
+type InvocationToolActivationProvider interface {
+	ApplyInvocationToolActivation(
+		ctx context.Context,
+		inv *Invocation,
+		tools []tool.Tool,
+		userToolNames map[string]bool,
+		externalToolNames map[string]bool,
+	) ([]tool.Tool, map[string]bool, map[string]bool)
+}
+
 // InvocationSkillRepositoryProvider is an optional interface implemented by
 // agents that can expose the effective, invocation-scoped skill repository.
 //
