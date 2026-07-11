@@ -27,7 +27,11 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
+	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 func TestServiceHandleInboundIsolatesTenants(t *testing.T) {
@@ -844,6 +848,56 @@ func TestServiceHandleInboundPropagatesLeaseFencingToken(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, r.calls, 1)
 	assert.Equal(t, int64(42), r.calls[0].fencingToken)
+}
+
+func TestServiceHandleInboundPropagatesApprovalAuditContext(t *testing.T) {
+	ctx := context.Background()
+	audit := platform.NewInMemoryAuditSink()
+	approvalPlugin, err := approval.New(
+		approval.WithReviewer(approvalReviewerFunc(func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+			return &approvalreview.Decision{
+				Approved:  true,
+				RiskScore: 10,
+				RiskLevel: "low",
+				Reason:    "approved",
+			}, nil
+		})),
+		approval.WithAuditSink(audit),
+		approval.WithApproverUserID("security@example.com"),
+	)
+	require.NoError(t, err)
+	pluginManager := plugin.MustNewManager(approvalPlugin)
+	r := &approvalCallbackRunner{
+		response:  "ok",
+		callbacks: pluginManager.ToolCallbacks(),
+	}
+	registry := NewInMemoryRegistry()
+	require.NoError(t, registry.Register(validRuntime("tenant-a", r)))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	result, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	require.Equal(t, "ok", result.Outbound.Content)
+	records := audit.Records()
+	require.Len(t, records, 2)
+	assert.Equal(t, "approval_requested", records[0].Decision)
+	assert.Equal(t, "approval_approved", records[1].Decision)
+	for _, record := range records {
+		assert.Equal(t, "tenant-a", record.TenantID)
+		assert.Equal(t, "app", record.AppID)
+		assert.Equal(t, result.RequestID, record.RequestID)
+		assert.Equal(t, result.RequestID, record.TraceID)
+		assert.Equal(t, "shell", record.ToolName)
+		assert.Contains(t, record.RedactedDetailRef, "tool_call_id:call-approval")
+		assert.NotContains(t, record.RedactedDetailRef, "rm -rf workspace")
+	}
+	assert.Empty(t, records[0].UserIDHash)
+	assert.NotEmpty(t, records[1].UserIDHash)
 }
 
 func TestServiceHandleInboundCancellationDuringEventCollectionReleasesSessionLease(t *testing.T) {
@@ -2281,6 +2335,21 @@ type cancelingRunner struct {
 	calls  []runnerCall
 }
 
+type approvalReviewerFunc func(context.Context, *approvalreview.Request) (*approvalreview.Decision, error)
+
+func (f approvalReviewerFunc) Review(
+	ctx context.Context,
+	req *approvalreview.Request,
+) (*approvalreview.Decision, error) {
+	return f(ctx, req)
+}
+
+type approvalCallbackRunner struct {
+	response  string
+	callbacks *tool.Callbacks
+	calls     []runnerCall
+}
+
 type staticRegistry struct {
 	runtime Runtime
 }
@@ -2359,6 +2428,48 @@ func (r *cancelingRunner) Run(
 }
 
 func (r *cancelingRunner) Close() error {
+	return nil
+}
+
+func (r *approvalCallbackRunner) Run(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	runOpts ...agent.RunOption,
+) (<-chan *event.Event, error) {
+	runOptions := runOptionsFromOptions(runOpts...)
+	r.calls = append(r.calls, runnerCall{
+		userID:     userID,
+		sessionID:  sessionID,
+		message:    message,
+		requestID:  runOptions.RequestID,
+		runOptions: runOptions,
+	})
+	if r.callbacks != nil {
+		result, err := r.callbacks.RunBeforeTool(ctx, &tool.BeforeToolArgs{
+			ToolCallID: "call-approval",
+			ToolName:   "shell",
+			Declaration: &tool.Declaration{
+				Name:        "shell",
+				Description: "Runs shell commands.",
+			},
+			Arguments: []byte(`{"command":"rm -rf workspace"}`),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && result.CustomResult != nil {
+			return nil, errors.New("approval callback blocked tool")
+		}
+	}
+	out := make(chan *event.Event, 1)
+	out <- responseEvent(r.response, true)
+	close(out)
+	return out, nil
+}
+
+func (r *approvalCallbackRunner) Close() error {
 	return nil
 }
 
