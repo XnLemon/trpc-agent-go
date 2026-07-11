@@ -75,6 +75,47 @@ func TestQueryAuditSupportsAuditIDAndLimit(t *testing.T) {
 	}
 }
 
+func TestQueryAuditFiltersRuntimeAndRedactionDimensions(t *testing.T) {
+	baseTime := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	target := auditRecordForQuery("tenant", "audit-1", "app", "wecom", "binding", "session", "request", "message", "workspace_write", "deny", "trace", baseTime)
+	target.AgentName = "assistant"
+	target.ModelName = "gpt-test"
+	target.ErrorType = "permission_denied"
+	target.RedactionVersion = "platform-toolpolicy-v1"
+	otherAgent := target
+	otherAgent.AuditID = "audit-2"
+	otherAgent.AgentName = "other"
+	otherModel := target
+	otherModel.AuditID = "audit-3"
+	otherModel.ModelName = "gpt-other"
+	otherError := target
+	otherError.AuditID = "audit-4"
+	otherError.ErrorType = "runner_error"
+	otherRedaction := target
+	otherRedaction.AuditID = "audit-5"
+	otherRedaction.RedactionVersion = "platform-budget-v1"
+
+	matches, err := QueryAudit([]AuditRecord{
+		otherAgent,
+		otherModel,
+		otherError,
+		otherRedaction,
+		target,
+	}, AuditQueryFilter{
+		TenantID:         "tenant",
+		AgentName:        "assistant",
+		ModelName:        "gpt-test",
+		ErrorType:        "permission_denied",
+		RedactionVersion: "platform-toolpolicy-v1",
+	})
+	if err != nil {
+		t.Fatalf("query runtime dimensions: %v", err)
+	}
+	if len(matches) != 1 || matches[0].AuditID != "audit-1" {
+		t.Fatalf("expected only audit-1, got %+v", matches)
+	}
+}
+
 func TestAuditSinkQueryUsesSnapshotAndReturnsCopies(t *testing.T) {
 	sink := NewInMemoryAuditSink()
 	record := auditRecordForQuery("tenant", "audit-1", "app", "telegram", "binding", "session", "request", "message", "tool", "allow", "trace", time.Now())
@@ -107,12 +148,31 @@ func TestQueryAuditRequiresTenant(t *testing.T) {
 }
 
 func TestQueryAuditRejectsUnsafeFilterValues(t *testing.T) {
-	_, err := QueryAudit(nil, AuditQueryFilter{
-		TenantID: "tenant",
-		ToolName: "workspace_exec Authorization: Bearer raw-token",
-	})
-	if err == nil || !strings.Contains(err.Error(), "tool_name") {
-		t.Fatalf("expected unsafe tool filter error, got %v", err)
+	tests := map[string]AuditQueryFilter{
+		"tool_name": {
+			ToolName: "workspace_exec Authorization: Bearer raw-token",
+		},
+		"agent_name": {
+			AgentName: "assistant Authorization: Bearer raw-token",
+		},
+		"model_name": {
+			ModelName: "gpt-test password=plain",
+		},
+		"error_type": {
+			ErrorType: "runner_error sk-1234567890abcdef",
+		},
+		"redaction_version": {
+			RedactionVersion: "platform-v1 Authorization: Bearer raw-token",
+		},
+	}
+	for name, filter := range tests {
+		t.Run(name, func(t *testing.T) {
+			filter.TenantID = "tenant"
+			_, err := QueryAudit(nil, filter)
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("expected unsafe %s filter error, got %v", name, err)
+			}
+		})
 	}
 }
 
