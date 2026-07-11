@@ -16,25 +16,26 @@ import (
 
 // AuditQueryFilter scopes audit retrieval to one tenant and optional safe dimensions.
 type AuditQueryFilter struct {
-	TenantID         string
-	AppID            string
-	AuditID          string
-	Channel          string
-	BindingID        string
-	UserIDHash       string
-	SessionID        string
-	RequestID        string
-	MessageID        string
-	AgentName        string
-	ModelName        string
-	ToolName         string
-	Decision         string
-	ErrorType        string
-	TraceID          string
-	RedactionVersion string
-	CreatedFrom      time.Time
-	CreatedTo        time.Time
-	Limit            int
+	TenantID          string
+	AppID             string
+	AuditID           string
+	Channel           string
+	BindingID         string
+	UserIDHash        string
+	SessionID         string
+	RequestID         string
+	MessageID         string
+	AgentName         string
+	ModelName         string
+	ToolName          string
+	Decision          string
+	ErrorType         string
+	TraceID           string
+	RedactedDetailRef string
+	RedactionVersion  string
+	CreatedFrom       time.Time
+	CreatedTo         time.Time
+	Limit             int
 }
 
 // QueryAudit returns audit records matching one tenant-scoped filter.
@@ -86,6 +87,7 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 		safeTextField{"decision", f.Decision},
 		safeTextField{"error_type", f.ErrorType},
 		safeTextField{"trace_id", f.TraceID},
+		safeTextField{"redacted_detail_ref", f.RedactedDetailRef},
 		safeTextField{"redaction_version", f.RedactionVersion},
 	); err != nil {
 		return AuditQueryFilter{}, err
@@ -110,6 +112,7 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 	f.Decision = strings.TrimSpace(f.Decision)
 	f.ErrorType = strings.TrimSpace(f.ErrorType)
 	f.TraceID = strings.TrimSpace(f.TraceID)
+	f.RedactedDetailRef = strings.TrimSpace(f.RedactedDetailRef)
 	f.RedactionVersion = strings.TrimSpace(f.RedactionVersion)
 	return f, nil
 }
@@ -140,6 +143,7 @@ func (f AuditQueryFilter) matchesOptionalFields(record AuditRecord) bool {
 		{f.ToolName, record.ToolName},
 		{f.Decision, record.Decision},
 		{f.ErrorType, record.ErrorType},
+		{f.RedactedDetailRef, record.RedactedDetailRef},
 		{f.RedactionVersion, record.RedactionVersion},
 		{f.TraceID, record.TraceID},
 	} {
