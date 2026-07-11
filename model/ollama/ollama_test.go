@@ -900,12 +900,20 @@ func Test_HandleErrorResponse(t *testing.T) {
 func Test_sendErrorResponse_PreservesResponseID(t *testing.T) {
 	m := New("llama3.2:latest")
 	ch := make(chan *model.Response, 1)
-	m.sendErrorResponse(context.Background(), ch, "ollama-response-error", model.ErrorTypeStreamError, errors.New("boom"))
+	m.sendErrorResponse(context.Background(), ch, "ollama-response-error", model.ErrorTypeStreamError, errors.New(
+		"boom: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
+	))
 	select {
 	case got := <-ch:
 		require.NotNil(t, got)
 		assert.Equal(t, "ollama-response-error", got.ID)
 		assert.NotNil(t, got.Error)
+		assert.NotContains(t, got.Error.Message, "raw-token")
+		assert.NotContains(t, got.Error.Message, "sk-testsecret")
+		assert.NotContains(t, got.Error.Message, "raw-secret")
+		assert.NotContains(t, got.Error.Message, "raw-password")
+		assert.NotContains(t, got.Error.Message, "raw-cookie")
+		assert.Contains(t, got.Error.Message, "****")
 		assert.Equal(t, model.ErrorTypeStreamError, got.Error.Type)
 		assert.True(t, got.Done)
 	case <-time.After(2 * time.Second):

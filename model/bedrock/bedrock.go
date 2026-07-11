@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -1002,7 +1003,7 @@ func classifyError(ctx context.Context, err error, fallback string) string {
 func (m *Model) sendErrorResponse(ctx context.Context, responseChan chan<- *model.Response, errType string, err error) {
 	errorResponse := &model.Response{
 		Error: &model.ResponseError{
-			Message: err.Error(),
+			Message: redactErrorMessage(err),
 			Type:    errType,
 		},
 		Timestamp: time.Now(),
@@ -1020,4 +1021,15 @@ func (m *Model) sendErrorResponse(ctx context.Context, responseChan chan<- *mode
 	case responseChan <- errorResponse:
 	case <-ctx.Done():
 	}
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(err.Error())
 }

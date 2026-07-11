@@ -1403,11 +1403,19 @@ func TestWithClient(t *testing.T) {
 func TestSendErrorResponse(t *testing.T) {
 	m := &Model{modelID: "test-model"}
 	ch := make(chan *model.Response, 1)
-	m.sendErrorResponse(context.Background(), ch, model.ErrorTypeStreamError, errors.New("test error"))
+	m.sendErrorResponse(context.Background(), ch, model.ErrorTypeStreamError, errors.New(
+		"test error: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
+	))
 
 	resp := <-ch
 	require.NotNil(t, resp.Error)
-	assert.Equal(t, "test error", resp.Error.Message)
+	assert.Contains(t, resp.Error.Message, "test error")
+	assert.NotContains(t, resp.Error.Message, "raw-token")
+	assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+	assert.NotContains(t, resp.Error.Message, "raw-secret")
+	assert.NotContains(t, resp.Error.Message, "raw-password")
+	assert.NotContains(t, resp.Error.Message, "raw-cookie")
+	assert.Contains(t, resp.Error.Message, "****")
 	assert.Equal(t, model.ErrorTypeStreamError, resp.Error.Type)
 	assert.True(t, resp.Done)
 }

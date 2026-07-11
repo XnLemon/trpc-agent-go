@@ -31,6 +31,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	imodel "trpc.group/trpc-go/trpc-agent-go/model/internal/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/internal/modeltailoring"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -461,7 +462,7 @@ func (m *Model) sendErrorResponse(
 	errorResponse := &model.Response{
 		ID: responseID,
 		Error: &model.ResponseError{
-			Message: err.Error(),
+			Message: redactErrorMessage(err),
 			Type:    errType,
 		},
 		Timestamp: time.Now(),
@@ -471,6 +472,17 @@ func (m *Model) sendErrorResponse(
 	case responseChan <- errorResponse:
 	case <-ctx.Done():
 	}
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(err.Error())
 }
 
 func newResponseID() string {
