@@ -64,6 +64,10 @@ const (
 	KeyTRPCAgentGoAuditDecision = "trpc.go.agent.audit.decision"
 	// KeyTRPCAgentGoToolPermissionStatus is the structured tool permission result status.
 	KeyTRPCAgentGoToolPermissionStatus = "trpc.go.agent.tool.permission.status"
+	// KeyTRPCAgentGoChannel is the inbound channel identifier.
+	KeyTRPCAgentGoChannel = "trpc.go.agent.channel"
+	// KeyTRPCAgentGoBudgetDeniedReason is the normalized budget denial reason.
+	KeyTRPCAgentGoBudgetDeniedReason = "trpc.go.agent.budget.denied.reason"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"
