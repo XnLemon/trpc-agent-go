@@ -709,6 +709,39 @@ func TestPolicyRegisterDoesNotTreatUnknownMetadataAsHighRisk(t *testing.T) {
 	}
 }
 
+func TestPolicyRegisterTreatsMetadataRiskAsHighRisk(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	p := newPolicy(t, platform.ToolPolicy{
+		TenantID:            "tenant",
+		AppID:               "app",
+		DangerousToolAction: platform.DangerousToolActionAsk,
+	}, WithAuditSink(audit))
+	manager := plugin.MustNewManager(p)
+	callbacks := manager.ToolCallbacks()
+
+	result, err := callbacks.RunBeforeTool(context.Background(), &tool.BeforeToolArgs{
+		ToolName:  "metadata_shell",
+		Arguments: []byte(`{"command":"pwd"}`),
+		Metadata:  tool.ToolMetadata{ReadOnly: false, OpenWorld: true},
+	})
+	if err != nil {
+		t.Fatalf("RunBeforeTool: %v", err)
+	}
+	if result == nil || result.CustomResult == nil {
+		t.Fatalf("expected metadata high-risk approval-required result")
+	}
+	permissionResult, ok := result.CustomResult.(tool.PermissionResult)
+	if !ok {
+		t.Fatalf("expected tool.PermissionResult, got %T", result.CustomResult)
+	}
+	if permissionResult.Status != tool.PermissionResultStatusApprovalRequired {
+		t.Fatalf("expected approval_required, got %+v", permissionResult)
+	}
+	if len(audit.Records()) != 1 || audit.Records()[0].Decision != string(tool.PermissionActionAsk) {
+		t.Fatalf("expected ask audit record, got %+v", audit.Records())
+	}
+}
+
 func TestReviewerMapsPolicyDecisionToApprovalDecision(t *testing.T) {
 	reviewer, err := NewReviewer(defaultPolicy(platform.ToolPolicy{
 		ToolWhitelist: []string{"search"},
@@ -745,6 +778,28 @@ func TestReviewerApprovesAskDecisionForApprovalPluginFlow(t *testing.T) {
 	}
 	if !decision.Approved {
 		t.Fatalf("expected ask decision to be approved inside approval flow, got %+v", decision)
+	}
+}
+
+func TestReviewerApprovesMetadataAskDecisionForApprovalPluginFlow(t *testing.T) {
+	reviewer, err := NewReviewer(defaultPolicy(platform.ToolPolicy{
+		DangerousToolAction: platform.DangerousToolActionAsk,
+	}))
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	decision, err := reviewer.Review(context.Background(), &review.Request{
+		Action: review.Action{
+			ToolName: "metadata_shell",
+			Metadata: tool.ToolMetadata{ReadOnly: false, OpenWorld: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if !decision.Approved {
+		t.Fatalf("expected metadata ask decision to be approved inside approval flow, got %+v", decision)
 	}
 }
 

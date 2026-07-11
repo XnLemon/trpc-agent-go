@@ -222,6 +222,117 @@ func TestRuntimeBuilderRunsApprovalPluginBeforeMandatoryPolicy(t *testing.T) {
 	}
 }
 
+func TestRuntimeBuilderRunsApprovalPluginForMetadataRisk(t *testing.T) {
+	ctx := context.Background()
+	router, auditSink := governanceTestRouter(t)
+	tenant, app, binding := governanceRuntimeConfig()
+	app.ToolPolicyID = "policy-a"
+	policy := platform.ToolPolicy{
+		TenantID:            tenant.TenantID,
+		AppID:               app.AppID,
+		PolicyID:            app.ToolPolicyID,
+		ToolWhitelist:       []string{"read_file", "metadata_shell"},
+		DangerousToolAction: platform.DangerousToolActionAsk,
+	}
+	var captured AgentDependencies
+	builder, err := NewRuntimeBuilder(
+		router,
+		AgentFactoryFunc(func(
+			_ context.Context,
+			dependencies AgentDependencies,
+		) (agent.Agent, error) {
+			captured = dependencies
+			return newGovernanceProbeAgent(app.AgentName), nil
+		}),
+		WithToolPolicyProvider(ToolPolicyProviderFunc(func(
+			context.Context,
+			string,
+			string,
+			string,
+		) (platform.ToolPolicy, error) {
+			return policy, nil
+		})),
+	)
+	require.NoError(t, err)
+	runtime, err := builder.Build(ctx, tenant, app, binding)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, runtime.Runner.Close())
+	})
+
+	manager, err := plugin.NewManager(captured.Plugins...)
+	require.NoError(t, err)
+	require.NotNil(t, manager.ToolCallbacks())
+	metadata := tool.ToolMetadata{ReadOnly: false, OpenWorld: true}
+	deniedResult, err := manager.ToolCallbacks().RunBeforeTool(
+		ctx,
+		&tool.BeforeToolArgs{
+			ToolName:   "outside_metadata",
+			ToolCallID: "call-outside",
+			Arguments:  []byte(`{"command":"restricted"}`),
+			Metadata:   metadata,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, deniedResult)
+	assert.Equal(
+		t,
+		`tool "outside_metadata" is denied by approval policy`,
+		deniedResult.CustomResult,
+	)
+
+	result, err := manager.ToolCallbacks().RunBeforeTool(
+		approval.ContextWithAuditContext(ctx, approval.AuditContext{
+			TenantID:  tenant.TenantID,
+			AppID:     app.AppID,
+			RequestID: "request-metadata",
+			TraceID:   "trace-metadata",
+		}),
+		&tool.BeforeToolArgs{
+			ToolName:   "metadata_shell",
+			ToolCallID: "call-metadata",
+			Arguments:  []byte(`{"command":"restricted"}`),
+			Metadata:   metadata,
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Context)
+
+	decision, err := runtime.ToolPermissionPolicy.CheckToolPermission(
+		result.Context,
+		&tool.PermissionRequest{
+			ToolName:   "metadata_shell",
+			ToolCallID: "call-metadata",
+			Arguments:  []byte(`{"command":"restricted"}`),
+			Metadata:   metadata,
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tool.PermissionActionAllow, decision.Action)
+
+	decision, err = runtime.ToolPermissionPolicy.CheckToolPermission(
+		result.Context,
+		&tool.PermissionRequest{
+			ToolName:   "metadata_shell",
+			ToolCallID: "call-metadata",
+			Arguments:  []byte(`{"command":"restricted"}`),
+			Metadata:   tool.ToolMetadata{ReadOnly: true, OpenWorld: true},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tool.PermissionActionAsk, decision.Action)
+
+	records := auditSink.Records()
+	require.Len(t, records, 3)
+	assert.Equal(t, "approval_requested", records[0].Decision)
+	assert.Equal(t, "approval_approved", records[1].Decision)
+	assert.Equal(t, string(tool.PermissionActionAsk), records[2].Decision)
+	assert.Equal(t, "metadata_shell", records[0].ToolName)
+	assert.Equal(t, "metadata_shell", records[1].ToolName)
+	assert.Equal(t, "metadata_shell", records[2].ToolName)
+}
+
 func TestRuntimeBuilderRejectsMissingToolPolicyProviderBeforeStorage(t *testing.T) {
 	tenant, app, binding := governanceRuntimeConfig()
 	app.ToolPolicyID = "policy-a"

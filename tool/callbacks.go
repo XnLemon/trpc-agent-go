@@ -64,6 +64,8 @@ type BeforeToolArgs struct {
 	Declaration *Declaration
 	// Arguments is the tool arguments in JSON bytes (can be modified).
 	Arguments []byte
+	// Metadata describes execution properties published by the tool.
+	Metadata ToolMetadata
 	// ResumeValue is the value of the resume.
 	ResumeValue any
 	// ResumeMap is the map of resume values.

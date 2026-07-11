@@ -29,6 +29,7 @@ type Plugin struct {
 	reviewer          review.Reviewer
 	defaultToolPolicy ToolPolicy
 	toolPolicies      map[string]ToolPolicy
+	metadataPolicy    ToolPolicy
 	tokenCounter      model.TokenCounter
 	auditSink         platform.AuditSink
 	approverUserID    string
@@ -40,6 +41,9 @@ func New(options ...Option) (*Plugin, error) {
 	opts := newOptions(options...)
 	if err := validateToolPolicy(opts.defaultToolPolicy); err != nil {
 		return nil, fmt.Errorf("newing approval plugin: default tool policy: %w", err)
+	}
+	if err := validateToolPolicy(opts.metadataPolicy); err != nil {
+		return nil, fmt.Errorf("newing approval plugin: metadata policy: %w", err)
 	}
 	for toolName, policy := range opts.toolPolicies {
 		if toolName == "" {
@@ -60,6 +64,7 @@ func New(options ...Option) (*Plugin, error) {
 		reviewer:          opts.reviewer,
 		defaultToolPolicy: opts.defaultToolPolicy,
 		toolPolicies:      opts.toolPolicies,
+		metadataPolicy:    opts.metadataPolicy,
 		tokenCounter:      model.NewSimpleTokenCounter(),
 		auditSink:         opts.auditSink,
 		approverUserID:    strings.TrimSpace(opts.approverUserID),
@@ -85,7 +90,7 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 		if args == nil {
 			return nil, nil
 		}
-		policy := p.resolveToolPolicy(args.ToolName)
+		policy := p.resolvePolicy(args)
 		switch policy {
 		case ToolPolicyDenied:
 			return &tool.BeforeToolResult{
@@ -214,8 +219,21 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 	}
 }
 
-func (p *Plugin) resolveToolPolicy(toolName string) ToolPolicy {
-	if policy, ok := p.toolPolicies[toolName]; ok {
+func (p *Plugin) resolvePolicy(args *tool.BeforeToolArgs) ToolPolicy {
+	if args == nil {
+		return p.defaultToolPolicy
+	}
+	policy, explicit := p.toolPolicies[args.ToolName]
+	if explicit && policy != ToolPolicySkipApproval {
+		return policy
+	}
+	if p.defaultToolPolicy == ToolPolicyDenied && !explicit {
+		return p.defaultToolPolicy
+	}
+	if metadataHighRisk(args.Metadata) {
+		return p.metadataPolicy
+	}
+	if explicit {
 		return policy
 	}
 	return p.defaultToolPolicy
@@ -225,10 +243,20 @@ func requiresReviewer(opts *options) bool {
 	if opts.defaultToolPolicy == ToolPolicyRequireApproval {
 		return true
 	}
+	if opts.metadataPolicy == ToolPolicyRequireApproval {
+		return true
+	}
 	for _, policy := range opts.toolPolicies {
 		if policy == ToolPolicyRequireApproval {
 			return true
 		}
 	}
 	return false
+}
+
+func metadataHighRisk(metadata tool.ToolMetadata) bool {
+	if metadata == (tool.ToolMetadata{}) {
+		return false
+	}
+	return metadata.Destructive || !metadata.ReadOnly || metadata.OpenWorld
 }

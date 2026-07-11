@@ -15,6 +15,7 @@ import (
 	"text/template"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 const defaultSystemPromptTemplateText = `You are the guardian reviewer for tool approval decisions.
@@ -58,6 +59,7 @@ type actionPayload struct {
 	ToolName        string `json:"tool_name"`
 	ToolDescription string `json:"tool_description,omitempty"`
 	Arguments       any    `json:"arguments"`
+	Metadata        any    `json:"metadata,omitempty"`
 }
 
 type systemPromptTemplateData struct {
@@ -125,12 +127,20 @@ func marshalActionPayload(action Action) ([]byte, error) {
 		ToolName:        action.ToolName,
 		ToolDescription: action.ToolDescription,
 		Arguments:       actionArgumentsForJSON(action.Arguments),
+		Metadata:        actionMetadataForJSON(action.Metadata),
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal action payload: %w", err)
 	}
 	return data, nil
+}
+
+func actionMetadataForJSON(metadata tool.ToolMetadata) any {
+	if metadata == (tool.ToolMetadata{}) {
+		return nil
+	}
+	return metadata
 }
 
 func actionArgumentsForJSON(arguments json.RawMessage) any {
