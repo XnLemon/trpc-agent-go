@@ -1076,6 +1076,15 @@ func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
 	}
 	runtime := validRuntime("tenant-a", r)
 	runtime.App.ModelProfileID = "profile-gpt"
+	runtime.ModelProfile = platform.ModelProfile{
+		TenantID:  "tenant-a",
+		ProfileID: "profile-gpt",
+		Model:     "gpt-test",
+		CostPolicyJSON: `{
+			"input_token_price_per_token":0.000001,
+			"output_token_price_per_token":0.000002
+		}`,
+	}
 	require.NoError(t, registry.Register(runtime))
 	usageSink := platform.NewInMemoryUsageSink()
 	svc := NewService(
@@ -1099,15 +1108,16 @@ func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
 	assert.Equal(t, platform.UserIDHash("tenant-a", "wecom", "external-user-raw"), record.UserIDHash)
 	assert.Equal(t, result.SessionID, record.SessionID)
 	assert.Equal(t, "req-usage", record.RequestID)
-	assert.Equal(t, "profile-gpt", record.ModelName)
+	assert.Equal(t, "gpt-test", record.ModelName)
 	assert.Equal(t, 11, record.PromptTokens)
 	assert.Equal(t, 7, record.CompletionTokens)
 	assert.Equal(t, 3, record.CachedTokens)
 	assert.Equal(t, "req-usage", record.TraceID)
 	assert.False(t, record.CreatedAt.IsZero())
-	assert.Zero(t, record.ModelCost)
+	assert.InDelta(t, 0.000025/18, record.ModelUnitPrice, 0.000000000001)
+	assert.InDelta(t, 0.000025, record.ModelCost, 0.000000000001)
 	assert.Zero(t, record.ToolCost)
-	assert.Zero(t, record.TotalCost)
+	assert.InDelta(t, 0.000025, record.TotalCost, 0.000000000001)
 }
 
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {

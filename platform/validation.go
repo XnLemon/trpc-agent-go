@@ -185,6 +185,9 @@ func (p ModelProfile) Validate() error {
 	if err := validateSecretReference("api_key_ref", p.APIKeyRef); err != nil {
 		return err
 	}
+	if _, err := ParseModelCostPolicy(p); err != nil {
+		return err
+	}
 	return nil
 }
 
