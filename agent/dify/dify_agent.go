@@ -22,6 +22,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -97,10 +98,18 @@ func (r *DifyAgent) sendErrorEvent(ctx context.Context, eventChan chan<- *event.
 		r.name,
 		event.WithResponse(&model.Response{
 			Error: &model.ResponseError{
-				Message: errorMessage,
+				Message: redactAgentErrorMessage(errorMessage),
 			},
 		}),
 	))
+}
+
+func redactAgentErrorMessage(errorMessage string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return errorMessage
+	}
+	return redactor.Redact(errorMessage)
 }
 
 // Run implements the Agent interface
