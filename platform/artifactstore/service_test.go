@@ -157,6 +157,44 @@ func TestServiceRetriesTransientObjectUploadFailure(t *testing.T) {
 	assert.Equal(t, 2, objects.PutAttempts())
 }
 
+func TestServiceRedactsExternalStorageErrors(t *testing.T) {
+	ctx := context.Background()
+	secretErr := errors.New("metadata query failed postgres://user:password@db/app Authorization: Bearer raw-token api_key=sk-1234567890abcdef")
+	metadata := &failingQueryMetadataStore{
+		InMemoryMetadataStore: NewInMemoryMetadataStore(),
+		failQuery:             secretErr,
+	}
+	objects := NewInMemoryObjectStore()
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   objects,
+	})
+	require.NoError(t, err)
+
+	_, err = service.SaveArtifact(ctx, artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}, "attachment.txt", &artifact.Artifact{
+		Data:     []byte("hello"),
+		MimeType: "text/plain",
+		Name:     "attachment.txt",
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, secretErr)
+	for _, secret := range []string{
+		"postgres://user:password@db/app",
+		"raw-token",
+		"sk-1234567890abcdef",
+	} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+	assert.Contains(t, err.Error(), "query artifact metadata")
+	assert.Empty(t, objects.ObjectIDs())
+}
+
 func TestServiceDeleteRemovesMetadataAndObjects(t *testing.T) {
 	ctx := context.Background()
 	metadata := NewInMemoryMetadataStore()
@@ -616,6 +654,23 @@ func TestServiceDeleteDoesNotCancelPendingUpload(t *testing.T) {
 type failingDeleteMetadataStore struct {
 	*InMemoryMetadataStore
 	failDelete error
+}
+
+type failingQueryMetadataStore struct {
+	*InMemoryMetadataStore
+	failQuery error
+}
+
+func (s *failingQueryMetadataStore) Query(
+	ctx context.Context,
+	query MetadataQuery,
+) ([]MetadataRecord, error) {
+	if s.failQuery != nil {
+		err := s.failQuery
+		s.failQuery = nil
+		return nil, err
+	}
+	return s.InMemoryMetadataStore.Query(ctx, query)
 }
 
 type failingMetadataDeleteStore struct {

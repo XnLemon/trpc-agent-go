@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 )
 
 const (
@@ -39,6 +40,19 @@ type Service struct {
 	objectStore   ObjectStore
 	maxAttempts   int
 	mu            sync.Mutex
+}
+
+type redactedStoreError struct {
+	msg string
+	err error
+}
+
+func (e redactedStoreError) Error() string {
+	return e.msg
+}
+
+func (e redactedStoreError) Unwrap() error {
+	return e.err
 }
 
 // New creates a tenant-scoped artifact service.
@@ -113,7 +127,7 @@ func (s *Service) SaveArtifact(
 		query.IncludeDeleting = true
 		records, err := s.metadataStore.Query(ctx, query)
 		if err != nil {
-			return 0, fmt.Errorf("query artifact metadata: %w", err)
+			return 0, redactStoreError("query artifact metadata", err)
 		}
 		version := nextVersion(records)
 		objectID, err := makeObjectID(artifactID, version, sha)
@@ -148,7 +162,7 @@ func (s *Service) SaveArtifact(
 			if errors.Is(err, ErrVersionConflict) {
 				continue
 			}
-			return 0, fmt.Errorf("reserve artifact metadata: %w", err)
+			return 0, redactStoreError("reserve artifact metadata", err)
 		}
 		if err := s.putObjectWithRetry(ctx, object); err != nil {
 			return 0, errors.Join(err, s.cleanupReservedArtifact(ctx, record))
@@ -158,7 +172,7 @@ func (s *Service) SaveArtifact(
 		activateQuery.IncludePending = true
 		if err := s.metadataStore.Activate(ctx, activateQuery, objectID); err != nil {
 			return 0, errors.Join(
-				fmt.Errorf("activate artifact metadata: %w", err),
+				redactStoreError("activate artifact metadata", err),
 				s.cleanupReservedArtifact(ctx, record),
 			)
 		}
@@ -183,7 +197,7 @@ func (s *Service) LoadArtifact(
 	}
 	data, err := s.objectStore.Get(ctx, record.ObjectID)
 	if err != nil {
-		return nil, fmt.Errorf("get artifact object: %w", err)
+		return nil, redactStoreError("get artifact object", err)
 	}
 	return &artifact.Artifact{
 		Data:     data,
@@ -212,7 +226,7 @@ func (s *Service) Metadata(
 	query.Version = version
 	records, err := s.metadataStore.Query(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("query artifact metadata: %w", err)
+		return nil, redactStoreError("query artifact metadata", err)
 	}
 	if len(records) == 0 {
 		return nil, nil
@@ -240,7 +254,7 @@ func (s *Service) ListArtifactKeys(
 		SessionID: sessionInfo.SessionID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query artifact metadata: %w", err)
+		return nil, redactStoreError("query artifact metadata", err)
 	}
 	userRecords, err := s.metadataStore.Query(ctx, MetadataQuery{
 		TenantID:  s.tenantID,
@@ -249,7 +263,7 @@ func (s *Service) ListArtifactKeys(
 		SessionID: userArtifactSessionID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query user artifact metadata: %w", err)
+		return nil, redactStoreError("query user artifact metadata", err)
 	}
 	records = append(records, userRecords...)
 	names := make(map[string]struct{}, len(records))
@@ -285,7 +299,7 @@ func (s *Service) DeleteArtifact(
 	query := s.metadataQuery(sessionInfo, filename)
 	records, err := s.metadataStore.MarkDeleting(ctx, query)
 	if err != nil {
-		return fmt.Errorf("mark artifact metadata deleting: %w", err)
+		return redactStoreError("mark artifact metadata deleting", err)
 	}
 	if len(records) == 0 {
 		return nil
@@ -313,7 +327,7 @@ func (s *Service) cleanupReservedArtifact(
 	}
 	records, err := s.metadataStore.MarkDeleting(cleanupCtx, query)
 	if err != nil {
-		return fmt.Errorf("mark reserved artifact deleting: %w", err)
+		return redactStoreError("mark reserved artifact deleting", err)
 	}
 	if len(records) == 0 {
 		return ErrMetadataReservationNotFound
@@ -329,9 +343,8 @@ func (s *Service) cleanupMetadataRecords(
 	var cleanupErrs []error
 	for _, record := range records {
 		if err := s.objectStore.Delete(ctx, record.ObjectID); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf(
-				"delete artifact object %q: %w",
-				record.ObjectID,
+			cleanupErrs = append(cleanupErrs, redactStoreError(
+				fmt.Sprintf("delete artifact object %q", record.ObjectID),
 				err,
 			))
 			continue
@@ -343,9 +356,8 @@ func (s *Service) cleanupMetadataRecords(
 		deleteQuery.IncludePending = true
 		deleteQuery.IncludeDeleting = true
 		if _, err := s.metadataStore.Delete(ctx, deleteQuery); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf(
-				"delete artifact metadata version %d: %w",
-				version,
+			cleanupErrs = append(cleanupErrs, redactStoreError(
+				fmt.Sprintf("delete artifact metadata version %d", version),
 				err,
 			))
 		}
@@ -370,7 +382,7 @@ func (s *Service) ListVersions(
 	}
 	records, err := s.metadataStore.Query(ctx, s.metadataQuery(sessionInfo, filename))
 	if err != nil {
-		return nil, fmt.Errorf("query artifact metadata: %w", err)
+		return nil, redactStoreError("query artifact metadata", err)
 	}
 	versionSet := make(map[int]struct{}, len(records))
 	for _, record := range records {
@@ -396,7 +408,22 @@ func (s *Service) putObjectWithRetry(ctx context.Context, object ObjectRecord) e
 		}
 		return nil
 	}
-	return fmt.Errorf("put artifact object after %d attempts: %w", s.maxAttempts, lastErr)
+	return redactStoreError(fmt.Sprintf("put artifact object after %d attempts", s.maxAttempts), lastErr)
+}
+
+func redactStoreError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(operation)
+	if msg == "" {
+		msg = "artifactstore storage operation"
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return redactedStoreError{msg: msg + ": redacted storage error", err: err}
+	}
+	return redactedStoreError{msg: msg + ": " + redactor.Redact(err.Error()), err: err}
 }
 
 func (s *Service) metadataQuery(sessionInfo artifact.SessionInfo, filename string) MetadataQuery {
