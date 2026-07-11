@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,7 +223,12 @@ func TestN8nAgent_SendErrorEvent(t *testing.T) {
 	}
 
 	eventChan := make(chan *event.Event, 1)
-	a.sendErrorEvent(context.Background(), eventChan, invocation, "test error message")
+	a.sendErrorEvent(
+		context.Background(),
+		eventChan,
+		invocation,
+		"request failed Authorization: ApiKey raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+	)
 	close(eventChan)
 
 	evt := <-eventChan
@@ -235,8 +241,16 @@ func TestN8nAgent_SendErrorEvent(t *testing.T) {
 	if evt.Response.Error == nil {
 		t.Fatal("expected error in response")
 	}
-	if evt.Response.Error.Message != "test error message" {
-		t.Errorf("expected error message 'test error message', got: %s", evt.Response.Error.Message)
+	message := evt.Response.Error.Message
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		if strings.Contains(message, secret) {
+			t.Errorf("expected error message to redact %q, got: %s", secret, message)
+		}
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		if !strings.Contains(message, redacted) {
+			t.Errorf("expected error message to contain %q, got: %s", redacted, message)
+		}
 	}
 	if evt.Author != "test-agent" {
 		t.Errorf("expected author 'test-agent', got: %s", evt.Author)
