@@ -289,7 +289,9 @@ func TestRunUsesAppNameOverrideAndBasePath(t *testing.T) {
 func TestRunReturnsHTTPStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"error": "invalid request"}))
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+			"error": "invalid request Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+		}))
 	}))
 	defer server.Close()
 	runner, err := New("sports-agent", WithTarget(server.URL))
@@ -304,6 +306,39 @@ func TestRunReturnsHTTPStatusError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "400 Bad Request")
 	assert.Contains(t, err.Error(), "invalid request")
+	assertRedactedRunnerErrorMessage(t, err.Error())
+}
+
+func TestRunReturnsHTTPStatusErrorRedactsPlainBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, err := w.Write([]byte("upstream failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"))
+		assert.NoError(t, err)
+	}))
+	defer server.Close()
+	runner, err := New("sports-agent", WithTarget(server.URL))
+	require.NoError(t, err)
+	events, err := runner.Run(
+		context.Background(),
+		"user-1",
+		"session-1",
+		model.NewUserMessage("hello"),
+	)
+	require.Nil(t, events)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "502 Bad Gateway")
+	assert.Contains(t, err.Error(), "upstream failed")
+	assertRedactedRunnerErrorMessage(t, err.Error())
+}
+
+func assertRedactedRunnerErrorMessage(t *testing.T, message string) {
+	t.Helper()
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, message, secret)
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		require.Contains(t, message, redacted)
+	}
 }
 
 func TestRunReturnsPostClientError(t *testing.T) {
@@ -610,14 +645,19 @@ func TestDescribeReturnsHTTPStatusError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodGet, r.Method)
 		w.WriteHeader(http.StatusInternalServerError)
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"error": "export structure failed"}))
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+			"error": "export structure failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+		}))
 	}))
 	defer server.Close()
 	runner, err := New("sports-agent", WithTarget(server.URL))
 	require.NoError(t, err)
 	got, err := runner.Describe(context.Background())
 	require.Nil(t, got)
-	require.EqualError(t, err, "trpcagent runner: describe returned 500 Internal Server Error: export structure failed")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500 Internal Server Error")
+	assert.Contains(t, err.Error(), "export structure failed")
+	assertRedactedRunnerErrorMessage(t, err.Error())
 }
 
 func TestDescribeReturnsClientError(t *testing.T) {
