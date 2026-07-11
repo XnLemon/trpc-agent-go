@@ -61,6 +61,8 @@ const (
 	MetricTRPCAgentGoClientRequestCnt = "trpc_agent_go.client.request_cnt"
 	// MetricToolApprovalRequiredTotal records tool calls that require explicit approval.
 	MetricToolApprovalRequiredTotal = "tool_approval_required_total"
+	// MetricAuditWriteFailedTotal records failed audit sink writes.
+	MetricAuditWriteFailedTotal = "audit_write_failed_total"
 
 	////////////////////////// server ////////////////////////
 
@@ -83,4 +85,6 @@ const (
 	MeterNameInvokeAgent = "trpc_agent_go.internal.invoke_agent"
 	// MeterNameToolApproval is the meter name for tool approval operations.
 	MeterNameToolApproval = "trpc_agent_go.internal.tool_approval"
+	// MeterNameAudit is the meter name for audit operations.
+	MeterNameAudit = "trpc_agent_go.internal.audit"
 )

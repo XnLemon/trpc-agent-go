@@ -19,17 +19,23 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
+	"trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/metrics"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -1592,6 +1598,39 @@ func TestServiceWriteAuditRecordsRedactionFailureFallback(t *testing.T) {
 	assert.NotContains(t, record.RedactedDetailRef, "Authorization")
 }
 
+func TestServiceWriteAuditRecordsAuditWriteFailureMetric(t *testing.T) {
+	reader, restore := useAuditMetrics(t)
+	defer restore()
+
+	svc := NewService(
+		NewInMemoryRegistry(),
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	record := platform.AuditRecord{
+		AuditID:        "audit-write-failure",
+		TenantID:       "tenant-a",
+		AppID:          "app",
+		RequestID:      "request-1",
+		MessageID:      "msg-1",
+		Decision:       "reject",
+		DecisionReason: "access denied",
+		CreatedAt:      time.Unix(1500, 0),
+	}
+
+	svc.writeAuditTo(context.Background(), failingGatewayAuditSink{}, record)
+
+	points := collectGatewayAuditWriteFailedPoints(t, reader)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationAuditWrite)
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAuditDecision, "reject")
+	requireGatewayAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyErrorType, semconvtrace.ValueDefaultErrorType)
+}
+
 func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -2660,4 +2699,64 @@ func spanEventsText(span sdktrace.ReadOnlySpan) string {
 		}
 	}
 	return strings.Join(values, "\n")
+}
+
+type failingGatewayAuditSink struct{}
+
+func (failingGatewayAuditSink) WriteAudit(context.Context, platform.AuditRecord) error {
+	return errors.New("audit unavailable")
+}
+
+func useAuditMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.AuditMeter
+	originalCounter := itelemetry.AuditMetricWriteFailedTotal
+
+	itelemetry.MeterProvider = provider
+	itelemetry.AuditMeter = provider.Meter(metrics.MeterNameAudit)
+	var err error
+	itelemetry.AuditMetricWriteFailedTotal, err = itelemetry.AuditMeter.Int64Counter(metrics.MetricAuditWriteFailedTotal)
+	require.NoError(t, err)
+
+	return reader, func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.AuditMeter = originalMeter
+		itelemetry.AuditMetricWriteFailedTotal = originalCounter
+	}
+}
+
+func collectGatewayAuditWriteFailedPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricAuditWriteFailedTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metrics.MetricAuditWriteFailedTotal)
+	return nil
+}
+
+func requireGatewayAuditMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			require.Equal(t, value, kv.Value.AsString())
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
 }

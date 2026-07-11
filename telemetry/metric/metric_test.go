@@ -296,10 +296,14 @@ func TestInitMeterProvider(t *testing.T) {
 	originalMP := itelemetry.MeterProvider
 	originalToolApprovalMeter := itelemetry.ToolApprovalMeter
 	originalToolApprovalRequired := itelemetry.ToolApprovalMetricRequiredTotal
+	originalAuditMeter := itelemetry.AuditMeter
+	originalAuditWriteFailed := itelemetry.AuditMetricWriteFailedTotal
 	defer func() {
 		itelemetry.MeterProvider = originalMP
 		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
 		itelemetry.ToolApprovalMetricRequiredTotal = originalToolApprovalRequired
+		itelemetry.AuditMeter = originalAuditMeter
+		itelemetry.AuditMetricWriteFailedTotal = originalAuditWriteFailed
 	}()
 
 	// Create a test meter provider
@@ -360,6 +364,12 @@ func TestInitMeterProvider(t *testing.T) {
 	}
 	if itelemetry.ToolApprovalMetricRequiredTotal == nil {
 		t.Error("ToolApprovalMetricRequiredTotal was not created")
+	}
+	if itelemetry.AuditMeter == nil {
+		t.Error("AuditMeter was not created")
+	}
+	if itelemetry.AuditMetricWriteFailedTotal == nil {
+		t.Error("AuditMetricWriteFailedTotal was not created")
 	}
 	if itelemetry.WorkflowMeter == nil {
 		t.Error("WorkflowMeter was not created")
@@ -422,6 +432,31 @@ func TestInitToolApprovalMetrics_ErrorHandling(t *testing.T) {
 		t.Fatalf("expected tool approval counter creation error")
 	}
 	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.tool_approval metric tool_approval_required_total") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInitAuditMetrics_ErrorHandling(t *testing.T) {
+	originalAuditMeter := itelemetry.AuditMeter
+	originalAuditWriteFailed := itelemetry.AuditMetricWriteFailedTotal
+	defer func() {
+		itelemetry.AuditMeter = originalAuditMeter
+		itelemetry.AuditMetricWriteFailedTotal = originalAuditWriteFailed
+	}()
+
+	if err := initAuditMetrics(nil); err == nil || !strings.Contains(err.Error(), "audit meter provider is nil") {
+		t.Fatalf("expected nil provider error, got %v", err)
+	}
+
+	mp := &mockMeterProvider{meter: &mockMeter{
+		shouldFail: true,
+		failOn:     metrics.MetricAuditWriteFailedTotal,
+	}}
+	err := initAuditMetrics(mp)
+	if err == nil {
+		t.Fatalf("expected audit counter creation error")
+	}
+	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.audit metric audit_write_failed_total") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
@@ -709,6 +710,12 @@ func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) error 
 		return fmt.Errorf("tool policy audit record: %w", err)
 	}
 	if err := p.audit.WriteAudit(ctx, record); err != nil {
+		itelemetry.ReportAuditWriteFailedMetrics(ctx, itelemetry.AuditAttributes{
+			TenantID: record.TenantID,
+			AppName:  record.AppID,
+			Decision: record.Decision,
+			Error:    err,
+		})
 		return fmt.Errorf("write tool policy audit: %w", err)
 	}
 	return nil

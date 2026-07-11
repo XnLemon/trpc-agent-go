@@ -531,6 +531,46 @@ func TestBeforeTool_RequireApprovalWritesRejectedAuditRecords(t *testing.T) {
 	assert.Equal(t, "tool approval rejected", records[1].DecisionReason)
 }
 
+func TestBeforeTool_RequireApprovalRecordsAuditWriteFailureMetric(t *testing.T) {
+	reader, restore := useApprovalAuditMetrics(t)
+	defer restore()
+
+	p, err := New(
+		WithReviewer(&stubReviewer{
+			reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+				return &approvalreview.Decision{Approved: true, RiskLevel: "low", Reason: "ok"}, nil
+			},
+		}),
+		WithAuditSink(failingApprovalAuditSink{}),
+		WithApproverUserID("security@example.com"),
+	)
+	require.NoError(t, err)
+
+	callbacks := registeredToolCallbacks(t, p)
+	ctx := ContextWithAuditContext(context.Background(), AuditContext{
+		TenantID:  "tenant",
+		AppID:     "app",
+		RequestID: "request-1",
+		TraceID:   "trace-1",
+	})
+	result, runErr := callbacks.RunBeforeTool(ctx, &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-1",
+		Arguments:  []byte(`{"command":"pwd"}`),
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+	require.Equal(t, `approval audit failed for tool "shell": audit unavailable`, result.CustomResult)
+
+	points := approvalMetricSumPoints(t, collectApprovalAuditMetrics(t, reader), metrics.MetricAuditWriteFailedTotal)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationAuditWrite)
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant")
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAuditDecision, string(platform.ToolApprovalDecisionRequested))
+}
+
 func TestBeforeTool_ReviewerErrorFailsClosed(t *testing.T) {
 	original := approvallog.ErrorfContext
 	var errorLog string
@@ -828,4 +868,39 @@ func requireApprovalMetricAttr(t *testing.T, set attribute.Set, key string, valu
 		}
 	}
 	t.Fatalf("attribute %s not found", key)
+}
+
+type failingApprovalAuditSink struct{}
+
+func (failingApprovalAuditSink) WriteAudit(context.Context, platform.AuditRecord) error {
+	return errors.New("audit unavailable")
+}
+
+func useApprovalAuditMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.AuditMeter
+	originalCounter := itelemetry.AuditMetricWriteFailedTotal
+
+	itelemetry.MeterProvider = provider
+	itelemetry.AuditMeter = provider.Meter(metrics.MeterNameAudit)
+	var err error
+	itelemetry.AuditMetricWriteFailedTotal, err = itelemetry.AuditMeter.Int64Counter(metrics.MetricAuditWriteFailedTotal)
+	require.NoError(t, err)
+
+	return reader, func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.AuditMeter = originalMeter
+		itelemetry.AuditMetricWriteFailedTotal = originalCounter
+	}
+}
+
+func collectApprovalAuditMetrics(t *testing.T, reader *sdkmetric.ManualReader) metricdata.ResourceMetrics {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	return rm
 }
