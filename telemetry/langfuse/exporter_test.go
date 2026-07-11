@@ -880,6 +880,120 @@ func TestTransformExecuteTool(t *testing.T) {
 	}
 }
 
+func TestTransformRedactsObservationInputOutput(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform func(*tracepb.Span)
+		span      *tracepb.Span
+	}{
+		{
+			name:      "invoke_agent",
+			transform: transformInvokeAgent,
+			span: &tracepb.Span{
+				Name: "agent-span",
+				Attributes: []*commonpb.KeyValue{
+					stringKV(semconvtrace.KeyGenAIInputMessagesOTel, `[{"role":"user","parts":[{"type":"text","content":"api_key=sk-secret-token Authorization: Bearer raw-token"}]}]`),
+					stringKV(semconvtrace.KeyGenAIOutputMessagesOTel, `[{"role":"assistant","parts":[{"type":"text","content":"password=plain"}]}]`),
+				},
+			},
+		},
+		{
+			name:      "chat",
+			transform: transformCallLLM,
+			span: &tracepb.Span{
+				Name: "llm-call",
+				Attributes: []*commonpb.KeyValue{
+					stringKV(semconvtrace.KeyLLMRequest, `{"prompt":"api_key=sk-secret-token Authorization: Bearer raw-token"}`),
+					stringKV(semconvtrace.KeyLLMResponse, `{"text":"password=plain"}`),
+				},
+			},
+		},
+		{
+			name:      "execute_tool",
+			transform: transformExecuteTool,
+			span: &tracepb.Span{
+				Name: "tool-call",
+				Attributes: []*commonpb.KeyValue{
+					stringKV(semconvtrace.KeyGenAIToolCallArguments, `{"api_key":"sk-secret-token","Authorization":"Bearer raw-token"}`),
+					stringKV(semconvtrace.KeyGenAIToolCallResult, `{"password":"plain"}`),
+				},
+			},
+		},
+		{
+			name:      "workflow",
+			transform: transformWorkflow,
+			span: &tracepb.Span{
+				Name: "workflow-span",
+				Attributes: []*commonpb.KeyValue{
+					stringKV(semconvtrace.KeyGenAIWorkflowRequest, `{"api_key":"sk-secret-token","Authorization":"Bearer raw-token"}`),
+					stringKV(semconvtrace.KeyGenAIWorkflowResponse, `{"password":"plain"}`),
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.transform(tt.span)
+
+			attrMap := make(map[string]string)
+			for _, attr := range tt.span.Attributes {
+				attrMap[attr.Key] = attr.Value.GetStringValue()
+			}
+			text := attrMap[observationInput] + "\n" + attrMap[observationOutput]
+			require.NotContains(t, text, "sk-secret-token")
+			require.NotContains(t, text, "raw-token")
+			require.NotContains(t, text, "password=plain")
+			require.NotContains(t, text, "Bearer raw-token")
+			require.Contains(t, text, "api_key")
+			require.Contains(t, text, "****")
+		})
+	}
+}
+
+func TestTransformRedactsBeforeTruncatingLongObservationSecrets(t *testing.T) {
+	withObservationMaxBytes(t, 64)
+
+	apiKey := "sk-" + strings.Repeat("a", 128) + "tail"
+	bearer := "raw-token-" + strings.Repeat("b", 128) + "tail"
+	password := "plain-" + strings.Repeat("c", 128) + "tail"
+	span := &tracepb.Span{
+		Name: "tool-call",
+		Attributes: []*commonpb.KeyValue{
+			stringKV(
+				semconvtrace.KeyGenAIToolCallArguments,
+				`{"api_key":"`+apiKey+`","Authorization":"Bearer `+bearer+`"}`,
+			),
+			stringKV(
+				semconvtrace.KeyGenAIToolCallResult,
+				`{"password":"`+password+`"}`,
+			),
+		},
+	}
+
+	transformExecuteTool(span)
+
+	attrMap := make(map[string]string)
+	for _, attr := range span.Attributes {
+		attrMap[attr.Key] = attr.Value.GetStringValue()
+	}
+	text := attrMap[observationInput] + "\n" + attrMap[observationOutput]
+	for _, leaked := range []string{
+		apiKey,
+		apiKey[:32],
+		apiKey[len(apiKey)-32:],
+		bearer,
+		bearer[:32],
+		bearer[len(bearer)-32:],
+		password,
+		password[:32],
+		password[len(password)-32:],
+	} {
+		require.NotContains(t, text, leaked)
+	}
+	require.Contains(t, text, "****")
+}
+
 func TestTransformWorkflow(t *testing.T) {
 	span := &tracepb.Span{
 		Name: "workflow-span",
