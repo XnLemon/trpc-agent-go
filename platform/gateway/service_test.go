@@ -849,6 +849,113 @@ func TestServiceHandleInboundAllowsTextWhenChannelLimitUnset(t *testing.T) {
 	assert.Len(t, r.calls, 1)
 }
 
+func TestServiceHandleInboundRejectsFileOverChannelLimitBeforeIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.FileMaxBytes = 10
+	require.NoError(t, registry.Register(runtime))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		idempotency,
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/pdf",
+			SizeBytes: 11,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrFileTooLarge)
+	assert.Empty(t, r.calls)
+	_, ok, getErr := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrFileTooLarge.Error(), audit.Records()[0].DecisionReason)
+	assert.NotContains(t, audit.Records()[0].DecisionReason, "artifact://file@1")
+}
+
+func TestServiceHandleInboundRejectsUnsupportedFileAtChannelLimitBoundary(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.FileMaxBytes = 10
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/pdf",
+			SizeBytes: 10,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrUnsupportedMessageType)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
+}
+
+func TestServiceHandleInboundSkipsFileLimitWhenChannelLimitUnset(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.FileMaxBytes = 0
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/pdf",
+			SizeBytes: 1 << 30,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrUnsupportedMessageType)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
+}
+
 func TestServiceHandleInboundRejectsDisallowedUser(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()

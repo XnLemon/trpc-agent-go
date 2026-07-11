@@ -434,6 +434,11 @@ func (s *Service) validateInboundContent(
 	start time.Time,
 	auditSink platform.AuditSink,
 ) (string, error) {
+	if err := validateFileLimits(msg, runtime.Binding.ChannelLimits); err != nil {
+		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return "", err
+	}
 	text, err := inboundText(msg)
 	if err != nil {
 		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
@@ -897,6 +902,33 @@ func validateTextLimit(text string, limits platform.ChannelLimits) error {
 	return nil
 }
 
+func validateFileLimits(msg platform.InboundMessage, limits platform.ChannelLimits) error {
+	if limits.FileMaxBytes <= 0 {
+		return nil
+	}
+	for _, part := range msg.ContentParts {
+		if !contentPartHasFile(part) {
+			continue
+		}
+		if part.SizeBytes > limits.FileMaxBytes {
+			return ErrFileTooLarge
+		}
+	}
+	return nil
+}
+
+func contentPartHasFile(part platform.ContentPart) bool {
+	switch part.Type {
+	case platform.ContentPartTypeImage,
+		platform.ContentPartTypeFile,
+		platform.ContentPartTypeAudio,
+		platform.ContentPartTypeVideo:
+		return true
+	default:
+		return false
+	}
+}
+
 func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, error) {
 	output, err := collectAssistantOutput(ctx, ch)
 	if err != nil {
@@ -1182,6 +1214,7 @@ var traceErrorTypes = []struct {
 	{ErrUnsupportedMessageType, "unsupported_message_type"},
 	{ErrEmptyText, "empty_text"},
 	{ErrTextTooLong, "text_too_long"},
+	{ErrFileTooLarge, "file_too_large"},
 	{ErrBudgetExceeded, "budget_exceeded"},
 	{ErrRunnerResponseEmpty, "runner_response_empty"},
 }
