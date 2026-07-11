@@ -19,6 +19,8 @@ var defaultRedactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
 	regexp.MustCompile(`(?im)(authorization\s*:\s*(?:token|digest)\s+)[^\r\n]+`),
 	regexp.MustCompile(`(?im)(authorization\s*=\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*[:=]\s*)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(cookie\s*[:=]\s*)[^\r\n]+`),
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)\s*=\s*([^&\s]+)`),
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)\s*:\s*([^,\s]+)`),
 	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
@@ -75,6 +77,14 @@ func redactMatch(match string) string {
 	}
 	if strings.Contains(lower, "bearer ") {
 		return match[:strings.Index(lower, "bearer ")+7] + "****"
+	}
+	if strings.HasPrefix(strings.TrimSpace(lower), "cookie") {
+		if idx := strings.IndexAny(match, ":="); idx >= 0 {
+			if match[idx] == ':' {
+				return match[:idx+1] + " ****"
+			}
+			return match[:idx+1] + "****"
+		}
 	}
 	if strings.Contains(match, "://") && strings.Contains(match, "@") {
 		if redacted, ok := redactURLUserinfo(match); ok {
