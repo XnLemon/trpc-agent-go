@@ -42,6 +42,8 @@ const (
 
 	// KeyTRPCAgentGoAppName is the attribute key for application name.
 	KeyTRPCAgentGoAppName = "trpc_go_agent.app.name"
+	// KeyTRPCAgentGoTenantID is the attribute key for tenant ID.
+	KeyTRPCAgentGoTenantID = "trpc_go_agent.tenant.id"
 	// KeyTRPCAgentGoUserID is the attribute key for user ID.
 	KeyTRPCAgentGoUserID = "trpc_go_agent.user.id"
 	// KeyTRPCAgentGoClientTimeToFirstToken is the attribute key for time to first token metric.

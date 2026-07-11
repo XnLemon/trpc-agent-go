@@ -17,8 +17,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	approvallog "trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
@@ -26,6 +30,8 @@ import (
 	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	guardtranscript "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/internal/transcript"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/metrics"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -342,6 +348,64 @@ func TestBeforeTool_MetadataRiskRequiresApproval(t *testing.T) {
 	require.Equal(t, metadata, approvedToolCall.Metadata)
 	require.NotNil(t, captured)
 	require.Equal(t, metadata, captured.Action.Metadata)
+}
+
+func TestBeforeTool_RequireApprovalRecordsRequiredMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.ToolApprovalMeter
+	originalRequired := itelemetry.ToolApprovalMetricRequiredTotal
+	t.Cleanup(func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.ToolApprovalMeter = originalMeter
+		itelemetry.ToolApprovalMetricRequiredTotal = originalRequired
+	})
+
+	itelemetry.MeterProvider = provider
+	itelemetry.ToolApprovalMeter = provider.Meter(metrics.MeterNameToolApproval)
+	var counterErr error
+	itelemetry.ToolApprovalMetricRequiredTotal, counterErr = itelemetry.ToolApprovalMeter.Int64Counter(
+		metrics.MetricToolApprovalRequiredTotal,
+	)
+	require.NoError(t, counterErr)
+
+	p, err := New(WithReviewer(&stubReviewer{
+		reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+			return &approvalreview.Decision{
+				Approved:  true,
+				RiskScore: 18,
+				RiskLevel: "low",
+				Reason:    "Approved command.",
+			}, nil
+		},
+	}))
+	require.NoError(t, err)
+
+	callbacks := registeredToolCallbacks(t, p)
+	ctx := ContextWithAuditContext(context.Background(), AuditContext{
+		TenantID: "tenant-metric",
+		AppID:    "app-metric",
+	})
+	result, runErr := callbacks.RunBeforeTool(ctx, &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-metric",
+		Arguments:  []byte(`{"command":"pwd"}`),
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+	points := approvalMetricSumPoints(t, rm, metrics.MetricToolApprovalRequiredTotal)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationToolApproval)
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-metric")
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app-metric")
+	requireApprovalMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIToolName, "shell")
 }
 
 func TestBeforeTool_RequireApprovalWritesApprovedAuditRecords(t *testing.T) {
@@ -733,4 +797,35 @@ func stringsRepeat(value string, n int) string {
 		result = append(result, value...)
 	}
 	return string(result)
+}
+
+func approvalMetricSumPoints(
+	t *testing.T,
+	rm metricdata.ResourceMetrics,
+	metricName string,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metricName {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metricName)
+	return nil
+}
+
+func requireApprovalMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			require.Equal(t, value, kv.Value.AsString())
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
 }

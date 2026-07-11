@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -120,6 +121,18 @@ func (p *Plugin) writeApprovalAudit(
 		return err
 	}
 	return p.auditSink.WriteAudit(ctx, record)
+}
+
+func reportApprovalRequiredMetric(ctx context.Context, args *tool.BeforeToolArgs) {
+	if args == nil {
+		return
+	}
+	auditCtx := approvalAuditContextFrom(ctx)
+	itelemetry.ReportToolApprovalRequiredMetrics(ctx, itelemetry.ToolApprovalAttributes{
+		TenantID: auditCtx.TenantID,
+		AppName:  auditCtx.AppID,
+		ToolName: strings.TrimSpace(args.ToolName),
+	})
 }
 
 func (p *Plugin) auditApproverUserID() string {
