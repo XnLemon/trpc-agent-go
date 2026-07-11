@@ -1283,10 +1283,19 @@ func TestProcessModelResponse_EventAndErrors(t *testing.T) {
 	require.NotNil(t, <-evch)
 
 	// Model API error path
-	errRsp := &model.Response{Error: &model.ResponseError{Message: "boom"}}
+	errCode := "api_key=sk-testsecret"
+	errParam := "Authorization: Bearer raw-token"
+	errRsp := &model.Response{
+		Error: &model.ResponseError{
+			Message: sensitiveGraphErrorMessage(),
+			Code:    &errCode,
+			Param:   &errParam,
+		},
+	}
+	errCh := make(chan *event.Event, 1)
 	_, _, err = processModelResponse(context.Background(), modelResponseConfig{
 		Response:     errRsp,
-		EventChan:    make(chan *event.Event, 1),
+		EventChan:    errCh,
 		InvocationID: "inv",
 		SessionID:    "sid",
 		LLMModel:     &dummyModel{},
@@ -1294,6 +1303,17 @@ func TestProcessModelResponse_EventAndErrors(t *testing.T) {
 		Span:         span,
 	})
 	require.Error(t, err)
+	requireGraphErrorMessageRedacted(t, err.Error())
+	errEvent := <-errCh
+	require.NotNil(t, errEvent)
+	require.NotNil(t, errEvent.Response)
+	require.NotNil(t, errEvent.Response.Error)
+	require.NotSame(t, errRsp, errEvent.Response)
+	requireGraphErrorMessageRedacted(t, errEvent.Response.Error.Message)
+	require.NotNil(t, errEvent.Response.Error.Code)
+	requireGraphErrorMessageRedacted(t, *errEvent.Response.Error.Code)
+	require.NotNil(t, errEvent.Response.Error.Param)
+	requireGraphErrorMessageRedacted(t, *errEvent.Response.Error.Param)
 
 	// Context done path when sending event
 	ctx, cancel := context.WithCancel(context.Background())

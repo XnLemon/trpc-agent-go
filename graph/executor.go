@@ -1830,9 +1830,9 @@ func emitTerminalGraphErrorEvent(
 		agent.EmitEvent(ctx, invocation, eventChan, NewPregelErrorEvent(
 			WithPregelEventInvocationID(invocationID),
 			WithPregelEventStepNumber(-1),
-			WithPregelEventError(err.Error()),
+			WithPregelEventError(redactErrorMessage(err)),
 			WithPregelEventResponseError(
-				model.ResponseErrorFromError(
+				redactedResponseErrorFromError(
 					err,
 					model.ErrorTypeFlowError,
 				),
@@ -1856,7 +1856,7 @@ func emitTerminalGraphErrorEvent(
 			invocationID,
 			author,
 			model.ErrorTypeFlowError,
-			err.Error(),
+			redactErrorMessage(err),
 		),
 	)
 }
@@ -4155,9 +4155,9 @@ func (e *Executor) emitNodeErrorEvent(
 		WithNodeEventNodeType(nodeType),
 		WithNodeEventEmitter(NodeEventEmitterExecutor),
 		WithNodeEventStepNumber(step),
-		WithNodeEventError(err.Error()),
+		WithNodeEventError(redactErrorMessage(err)),
 		WithNodeEventResponseError(
-			model.ResponseErrorFromError(
+			redactedResponseErrorFromError(
 				err,
 				model.ErrorTypeFlowError,
 			),
