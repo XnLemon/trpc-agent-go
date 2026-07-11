@@ -62,9 +62,28 @@ func TestNew_RequiresReviewerWhenExplicitToolPolicyRequiresApproval(t *testing.T
 	require.Contains(t, err.Error(), "reviewer is nil")
 }
 
+func TestNew_RequiresReviewerWhenMetadataPolicyRequiresApproval(t *testing.T) {
+	_, err := New(
+		WithDefaultToolPolicy(ToolPolicySkipApproval),
+		WithMetadataRiskPolicy(ToolPolicyRequireApproval),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "reviewer is nil")
+}
+
 func TestNew_InvalidToolPolicy(t *testing.T) {
 	_, err := New(WithReviewer(&stubReviewer{}), WithDefaultToolPolicy(ToolPolicy("bad")))
 	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid tool policy")
+}
+
+func TestNew_InvalidMetadataPolicy(t *testing.T) {
+	_, err := New(
+		WithReviewer(&stubReviewer{}),
+		WithMetadataRiskPolicy(ToolPolicy("bad")),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metadata policy")
 	require.Contains(t, err.Error(), "invalid tool policy")
 }
 
@@ -95,9 +114,11 @@ func TestOptionSettersUpdateOptions(t *testing.T) {
 	WithName("tool-approval")(opts)
 	WithReviewer(reviewer)(opts)
 	WithDefaultToolPolicy(ToolPolicyDenied)(opts)
+	WithMetadataRiskPolicy(ToolPolicyRequireApproval)(opts)
 	require.Equal(t, "tool-approval", opts.name)
 	require.Equal(t, reviewer, opts.reviewer)
 	require.Equal(t, ToolPolicyDenied, opts.defaultToolPolicy)
+	require.Equal(t, ToolPolicyRequireApproval, opts.metadataPolicy)
 }
 
 func TestRegister_IgnoresNilReceiverAndNilRegistry(t *testing.T) {
@@ -281,6 +302,46 @@ func TestBeforeTool_ReviewerApprovedLogsInfo(t *testing.T) {
 		"Automatic approval review approved (risk: medium): The action is scoped and user-authorized.",
 		infoLog,
 	)
+}
+
+func TestBeforeTool_MetadataRiskRequiresApproval(t *testing.T) {
+	metadata := tool.ToolMetadata{
+		ReadOnly:  false,
+		OpenWorld: true,
+	}
+	var captured *approvalreview.Request
+	p, err := New(
+		WithDefaultToolPolicy(ToolPolicySkipApproval),
+		WithMetadataRiskPolicy(ToolPolicyRequireApproval),
+		WithReviewer(&stubReviewer{
+			reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+				captured = req
+				return &approvalreview.Decision{
+					Approved:  true,
+					RiskScore: 30,
+					RiskLevel: "medium",
+					Reason:    "Metadata risk is reviewed.",
+				}, nil
+			},
+		}),
+	)
+	require.NoError(t, err)
+	callbacks := registeredToolCallbacks(t, p)
+	result, runErr := callbacks.RunBeforeTool(context.Background(), &tool.BeforeToolArgs{
+		ToolName:   "metadata_shell",
+		ToolCallID: "call-metadata",
+		Arguments:  []byte(`{"command":"pwd"}`),
+		Metadata:   metadata,
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Context)
+
+	approvedToolCall, ok := ApprovedToolCallFromContext(result.Context)
+	require.True(t, ok)
+	require.Equal(t, metadata, approvedToolCall.Metadata)
+	require.NotNil(t, captured)
+	require.Equal(t, metadata, captured.Action.Metadata)
 }
 
 func TestBeforeTool_RequireApprovalWritesApprovedAuditRecords(t *testing.T) {
@@ -563,18 +624,21 @@ func TestBuildTranscript_UserOverflowReturnsOmissionOnly(t *testing.T) {
 }
 
 func TestBuildRequest_WithoutInvocationReturnsActionOnly(t *testing.T) {
+	metadata := tool.ToolMetadata{ReadOnly: false, OpenWorld: true}
 	p, err := New(WithDefaultToolPolicy(ToolPolicyDenied))
 	require.NoError(t, err)
 	req, buildErr := p.buildRequest(context.Background(), &tool.BeforeToolArgs{
 		ToolName:    "shell",
 		Declaration: &tool.Declaration{Description: "Runs shell commands."},
 		Arguments:   []byte(`{"command":"pwd"}`),
+		Metadata:    metadata,
 	})
 	require.NoError(t, buildErr)
 	require.NotNil(t, req)
 	require.Equal(t, "shell", req.Action.ToolName)
 	require.Equal(t, "Runs shell commands.", req.Action.ToolDescription)
 	require.JSONEq(t, `{"command":"pwd"}`, string(req.Action.Arguments))
+	require.Equal(t, metadata, req.Action.Metadata)
 	require.Nil(t, req.Transcript)
 }
 

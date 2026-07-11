@@ -234,7 +234,8 @@ func approvedToolCall(ctx context.Context, req *tool.PermissionRequest) bool {
 		return false
 	}
 	return fingerprint.ArgumentsHash == argumentsHash(req.Arguments) &&
-		fingerprint.ArgumentsBytes == len(req.Arguments)
+		fingerprint.ArgumentsBytes == len(req.Arguments) &&
+		fingerprint.Metadata == req.Metadata
 }
 
 func argumentsHash(args []byte) string {
@@ -255,6 +256,7 @@ func (p *Policy) beforeTool() tool.BeforeToolCallbackStructured {
 			ToolCallID:  args.ToolCallID,
 			Declaration: args.Declaration,
 			Arguments:   args.Arguments,
+			Metadata:    args.Metadata,
 		}
 		decision, reason, audit := p.decideNameOnly(req, req.ToolName)
 		if audit {
@@ -293,6 +295,9 @@ func ApprovalOptions(policy platform.ToolPolicy) ([]approval.Option, error) {
 		defaultPolicy = approval.ToolPolicyDenied
 	}
 	opts := []approval.Option{approval.WithDefaultToolPolicy(defaultPolicy)}
+	if policy.DangerousToolAction == platform.DangerousToolActionAsk {
+		opts = append(opts, approval.WithMetadataRiskPolicy(approval.ToolPolicyRequireApproval))
+	}
 	whitelist := normalizedList(policy.ToolWhitelist)
 	hasWhitelist := len(whitelist) > 0
 	for _, name := range whitelist {
@@ -342,6 +347,7 @@ func (r *Reviewer) Review(ctx context.Context, req *review.Request) (*review.Dec
 		ToolName:    req.Action.ToolName,
 		Declaration: &tool.Declaration{Name: req.Action.ToolName, Description: req.Action.ToolDescription},
 		Arguments:   req.Action.Arguments,
+		Metadata:    req.Action.Metadata,
 	}
 	decision, reason, audit := r.policy.decideReviewer(permissionReq, permissionReq.ToolName)
 	if audit {

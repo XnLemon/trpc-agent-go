@@ -18,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // Reviewer evaluates a review request and returns an approval decision.
@@ -36,6 +37,7 @@ type Action struct {
 	ToolName        string
 	ToolDescription string
 	Arguments       json.RawMessage
+	Metadata        tool.ToolMetadata
 }
 
 // TranscriptEntry is a compact transcript line used as approval evidence.

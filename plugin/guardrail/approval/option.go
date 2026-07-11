@@ -25,6 +25,7 @@ type options struct {
 	reviewer          review.Reviewer
 	defaultToolPolicy ToolPolicy
 	toolPolicies      map[string]ToolPolicy
+	metadataPolicy    ToolPolicy
 	auditSink         platform.AuditSink
 	approverUserID    string
 	now               func() time.Time
@@ -35,6 +36,7 @@ func newOptions(opts ...Option) *options {
 		name:              defaultPluginName,
 		defaultToolPolicy: ToolPolicyRequireApproval,
 		toolPolicies:      make(map[string]ToolPolicy),
+		metadataPolicy:    ToolPolicySkipApproval,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -72,6 +74,14 @@ func WithToolPolicy(name string, policy ToolPolicy) Option {
 			opts.toolPolicies = make(map[string]ToolPolicy)
 		}
 		opts.toolPolicies[name] = policy
+	}
+}
+
+// WithMetadataRiskPolicy sets the policy for calls whose tool metadata is
+// high-risk when no explicit tool policy exists.
+func WithMetadataRiskPolicy(policy ToolPolicy) Option {
+	return func(opts *options) {
+		opts.metadataPolicy = policy
 	}
 }
 

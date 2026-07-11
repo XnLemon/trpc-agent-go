@@ -296,16 +296,24 @@ func buildToolGovernancePlugins(
 }
 
 func toolApprovalOptions(policy platform.ToolPolicy) ([]approval.Option, bool) {
+	defaultPolicy := approval.ToolPolicySkipApproval
+	if len(normalizedToolNames(policy.ToolWhitelist)) > 0 {
+		defaultPolicy = approval.ToolPolicyDenied
+	}
 	opts := []approval.Option{
-		approval.WithDefaultToolPolicy(approval.ToolPolicySkipApproval),
+		approval.WithDefaultToolPolicy(defaultPolicy),
 	}
 	if policy.DangerousToolAction != platform.DangerousToolActionAsk {
 		return opts, false
 	}
+	opts = append(opts, approval.WithMetadataRiskPolicy(approval.ToolPolicyRequireApproval))
 	whitelist := normalizedToolNames(policy.ToolWhitelist)
 	denied := normalizedToolNames(policy.ToolDenylist, policy.PlatformDenylist)
 	hasWhitelist := len(whitelist) > 0
-	approvalRequired := false
+	approvalRequired := true
+	for _, name := range whitelist {
+		opts = append(opts, approval.WithToolPolicy(name, approval.ToolPolicySkipApproval))
+	}
 	for _, name := range normalizedToolNames(policy.HighRiskTools) {
 		if hasWhitelist && !containsToolName(whitelist, name) {
 			continue
@@ -315,6 +323,9 @@ func toolApprovalOptions(policy platform.ToolPolicy) ([]approval.Option, bool) {
 		}
 		opts = append(opts, approval.WithToolPolicy(name, approval.ToolPolicyRequireApproval))
 		approvalRequired = true
+	}
+	for _, name := range denied {
+		opts = append(opts, approval.WithToolPolicy(name, approval.ToolPolicyDenied))
 	}
 	return opts, approvalRequired
 }

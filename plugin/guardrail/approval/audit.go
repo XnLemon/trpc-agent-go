@@ -47,6 +47,7 @@ type ApprovedToolCall struct {
 	ToolName       string
 	ArgumentsHash  string
 	ArgumentsBytes int
+	Metadata       tool.ToolMetadata
 }
 
 // contextWithApprovedToolCall marks a reviewed tool call as approved so later
@@ -87,6 +88,7 @@ func approvedToolCallFingerprint(args *tool.BeforeToolArgs) ApprovedToolCall {
 		ToolName:       strings.TrimSpace(args.ToolName),
 		ArgumentsHash:  hash,
 		ArgumentsBytes: bytes,
+		Metadata:       args.Metadata,
 	}
 }
 

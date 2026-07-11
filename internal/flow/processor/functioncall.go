@@ -2226,6 +2226,7 @@ func (p *FunctionCallResponseProcessor) runBeforeToolPluginCallbacks(
 	invocation *agent.Invocation,
 	toolCall model.ToolCall,
 	toolDeclaration *tool.Declaration,
+	toolMetadata tool.ToolMetadata,
 ) (context.Context, model.ToolCall, any, error) {
 	if invocation == nil || invocation.Plugins == nil {
 		return ctx, toolCall, nil, nil
@@ -2241,6 +2242,7 @@ func (p *FunctionCallResponseProcessor) runBeforeToolPluginCallbacks(
 		ToolName:    toolCall.Function.Name,
 		Declaration: toolDeclaration,
 		Arguments:   toolCall.Function.Arguments,
+		Metadata:    toolMetadata,
 	}
 	result, err := callbacks.RunBeforeTool(ctx, args)
 	if err != nil {
@@ -2269,6 +2271,7 @@ func (p *FunctionCallResponseProcessor) runBeforeToolCallbacks(
 	ctx context.Context,
 	toolCall model.ToolCall,
 	toolDeclaration *tool.Declaration,
+	toolMetadata tool.ToolMetadata,
 ) (context.Context, model.ToolCall, any, error) {
 	if p.toolCallbacks == nil {
 		return ctx, toolCall, nil, nil
@@ -2279,6 +2282,7 @@ func (p *FunctionCallResponseProcessor) runBeforeToolCallbacks(
 		ToolName:    toolCall.Function.Name,
 		Declaration: toolDeclaration,
 		Arguments:   toolCall.Function.Arguments,
+		Metadata:    toolMetadata,
 	}
 	result, err := p.toolCallbacks.RunBeforeTool(ctx, args)
 	if err != nil {
@@ -2429,12 +2433,15 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 	}
 	rememberExecutingToolArgs(ctx, toolCall.Function.Arguments)
 	toolDeclaration := tl.Declaration()
+	semanticTool := itool.ResolveSemantic(tl)
+	toolMetadata := tool.MetadataOf(semanticTool)
 	visibilityResult, err := checkMandatoryToolVisibility(
 		ctx,
 		invocation,
 		toolCall,
 		tl,
 		toolDeclaration,
+		toolMetadata,
 	)
 	if err != nil {
 		return ctx, nil, toolCall.Function.Arguments, false, false, err
@@ -2450,6 +2457,7 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 		invocation,
 		toolCall,
 		toolDeclaration,
+		toolMetadata,
 	)
 	if err != nil {
 		return ctx, nil, toolCall.Function.Arguments, false, false, err
@@ -2464,6 +2472,7 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 		ctx,
 		toolCall,
 		toolDeclaration,
+		toolMetadata,
 	)
 	if err != nil {
 		return ctx, nil, toolCall.Function.Arguments, false, false, err
@@ -2480,6 +2489,7 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 		toolCall,
 		tl,
 		toolDeclaration,
+		toolMetadata,
 	)
 	if err != nil {
 		return ctx, nil, toolCall.Function.Arguments, false, false, err
@@ -2564,6 +2574,7 @@ func checkMandatoryToolVisibility(
 	toolCall model.ToolCall,
 	tl tool.Tool,
 	decl *tool.Declaration,
+	metadata tool.ToolMetadata,
 ) (*tool.PermissionResult, error) {
 	if invocation == nil || invocation.RunOptions.MandatoryToolFilter == nil {
 		return nil, nil
@@ -2580,7 +2591,7 @@ func checkMandatoryToolVisibility(
 		ToolCallID:  toolCall.ID,
 		Declaration: decl,
 		Arguments:   toolCall.Function.Arguments,
-		Metadata:    tool.MetadataOf(itool.ResolveSemantic(tl)),
+		Metadata:    metadata,
 	}
 	return normalizeToolPermissionResult(
 		req,
@@ -2600,6 +2611,7 @@ func (p *FunctionCallResponseProcessor) checkToolPermission(
 	toolCall model.ToolCall,
 	tl tool.Tool,
 	decl *tool.Declaration,
+	metadata tool.ToolMetadata,
 ) (*tool.PermissionResult, error) {
 	semanticTool := itool.ResolveSemantic(tl)
 	req := &tool.PermissionRequest{
@@ -2608,7 +2620,7 @@ func (p *FunctionCallResponseProcessor) checkToolPermission(
 		ToolCallID:  toolCall.ID,
 		Declaration: decl,
 		Arguments:   toolCall.Function.Arguments,
-		Metadata:    tool.MetadataOf(semanticTool),
+		Metadata:    metadata,
 	}
 	if checker, ok := semanticTool.(tool.PermissionChecker); ok {
 		decision, err := checker.CheckPermission(ctx, req)

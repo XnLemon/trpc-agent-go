@@ -9401,6 +9401,70 @@ func TestExecuteToolWithCallbacks_ToolPermissionReceivesMetadata(
 	require.JSONEq(t, `{"ok":true}`, string(mustJSON(res)))
 }
 
+func TestExecuteToolWithCallbacks_BeforeToolReceivesMetadata(
+	t *testing.T,
+) {
+	const toolName = "web_search"
+	metadata := tool.ToolMetadata{
+		ReadOnly:     true,
+		SearchOrRead: true,
+		OpenWorld:    true,
+	}
+	var pluginSawMetadata bool
+	approvalPlugin := &hookPlugin{
+		name: "metadata-before-tool",
+		reg: func(r *plugin.Registry) {
+			r.BeforeTool(func(_ context.Context, args *tool.BeforeToolArgs) (*tool.BeforeToolResult, error) {
+				require.Equal(t, metadata, args.Metadata)
+				pluginSawMetadata = true
+				return nil, nil
+			})
+		},
+	}
+	var localSawMetadata bool
+	callbacks := tool.NewCallbacks()
+	callbacks.RegisterBeforeTool(func(_ context.Context, args *tool.BeforeToolArgs) (*tool.BeforeToolResult, error) {
+		require.Equal(t, metadata, args.Metadata)
+		localSawMetadata = true
+		return nil, nil
+	})
+	tl := &permissionMockTool{
+		mockCallableTool: &mockCallableTool{
+			declaration: &tool.Declaration{Name: toolName},
+			callFn: func(_ context.Context, _ []byte) (any, error) {
+				return map[string]any{"ok": true}, nil
+			},
+		},
+		metadata: metadata,
+		decision: tool.AllowPermission(),
+	}
+	manager, err := plugin.NewManager(approvalPlugin)
+	require.NoError(t, err)
+	inv := &agent.Invocation{
+		Plugins:    manager,
+		RunOptions: agent.NewRunOptions(),
+	}
+
+	_, res, _, _, _, err := NewFunctionCallResponseProcessor(false, callbacks).
+		executeToolWithCallbacks(
+			context.Background(),
+			inv,
+			model.ToolCall{
+				ID: "call-allow",
+				Function: model.FunctionDefinitionParam{
+					Name:      toolName,
+					Arguments: []byte(`{}`),
+				},
+			},
+			tl,
+			nil,
+		)
+	require.NoError(t, err)
+	require.True(t, pluginSawMetadata)
+	require.True(t, localSawMetadata)
+	require.JSONEq(t, `{"ok":true}`, string(mustJSON(res)))
+}
+
 func TestExecuteToolCall_StreamableFinalStateOnlyResultAfterToolContextReplacementStillSkipsDefaultMessage(t *testing.T) {
 	ctx := context.Background()
 	callbacks := tool.NewCallbacks()

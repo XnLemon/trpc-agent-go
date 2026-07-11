@@ -35,6 +35,7 @@ func (p *Plugin) buildRequest(ctx context.Context, args *tool.BeforeToolArgs) (*
 			ToolName:        args.ToolName,
 			ToolDescription: declarationDescription(args.Declaration),
 			Arguments:       cloneJSON(args.Arguments),
+			Metadata:        args.Metadata,
 		},
 	}
 	invocation, ok := agent.InvocationFromContext(ctx)

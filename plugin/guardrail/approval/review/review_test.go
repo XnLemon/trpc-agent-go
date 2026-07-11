@@ -21,6 +21,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 type fakeRunner struct {
@@ -496,6 +497,11 @@ func TestRenderUserMessage_UsesStableTemplateLayout(t *testing.T) {
 			ToolName:        "shell",
 			ToolDescription: "Runs shell commands.",
 			Arguments:       jsonRaw(`{"command":"pwd"}`),
+			Metadata: tool.ToolMetadata{
+				ReadOnly:     false,
+				OpenWorld:    true,
+				SearchOrRead: false,
+			},
 		},
 		Transcript: []TranscriptEntry{
 			{Role: model.RoleUser, Content: "Show the current directory."},
@@ -520,6 +526,14 @@ Planned action JSON:
   "tool_description": "Runs shell commands.",
   "arguments": {
     "command": "pwd"
+  },
+  "metadata": {
+    "ReadOnly": false,
+    "Destructive": false,
+    "ConcurrencySafe": false,
+    "SearchOrRead": false,
+    "OpenWorld": true,
+    "MaxResultSize": 0
   }
 }
 >>> APPROVAL REQUEST END`, message)
