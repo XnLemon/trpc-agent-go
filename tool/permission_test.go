@@ -10,6 +10,7 @@ package tool
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -145,11 +146,63 @@ func TestPermissionResultFor(t *testing.T) {
 	}
 }
 
+func TestPermissionResultForRedactsSensitiveReason(t *testing.T) {
+	reason := "blocked Authorization: Bearer raw-token api_key=sk-1234567890abcdef db=postgres://user:password@example.com/db"
+	result := PermissionResultFor(testToolName, DenyPermission(reason))
+	for _, leaked := range []string{
+		"raw-token",
+		"sk-1234567890abcdef",
+		"user:password",
+	} {
+		if strings.Contains(result.Reason, leaked) {
+			t.Fatalf("permission result leaked %q in reason %q", leaked, result.Reason)
+		}
+	}
+	for _, want := range []string{
+		"Authorization: ****",
+		"api_key=****",
+		"postgres://****@example.com/db",
+	} {
+		if !strings.Contains(result.Reason, want) {
+			t.Fatalf("expected redacted reason to contain %q, got %q", want, result.Reason)
+		}
+	}
+}
+
+func TestPermissionResultForRedactsGenericAuthorizationAndCookieReasons(t *testing.T) {
+	reason := "blocked Authorization: raw-secret api_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"
+	result := PermissionResultFor(testToolName, AskPermission(reason))
+	for _, leaked := range []string{"raw-secret", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		if strings.Contains(result.Reason, leaked) {
+			t.Fatalf("permission result leaked %q in reason %q", leaked, result.Reason)
+		}
+	}
+	for _, want := range []string{"Authorization: ****", "Cookie: session=****"} {
+		if !strings.Contains(result.Reason, want) {
+			t.Fatalf("expected redacted reason to contain %q, got %q", want, result.Reason)
+		}
+	}
+}
+
 func TestApprovalDeniedResultFor(t *testing.T) {
 	result := ApprovalDeniedResultFor(testToolName, testReason)
 	if result.Status != PermissionResultStatusApprovalDenied ||
 		result.Tool != testToolName ||
 		result.Reason != testReason {
 		t.Fatalf("unexpected approval denied result: %+v", result)
+	}
+}
+
+func TestApprovalDeniedResultForRedactsSensitiveReason(t *testing.T) {
+	result := ApprovalDeniedResultFor(testToolName, `reviewer denied token: raw-token "password":"json-secret"`)
+	for _, leaked := range []string{"raw-token", "json-secret"} {
+		if strings.Contains(result.Reason, leaked) {
+			t.Fatalf("approval denied result leaked %q in reason %q", leaked, result.Reason)
+		}
+	}
+	for _, want := range []string{"token: ****", `"password": "****"`} {
+		if !strings.Contains(result.Reason, want) {
+			t.Fatalf("expected redacted reason to contain %q, got %q", want, result.Reason)
+		}
 	}
 }
