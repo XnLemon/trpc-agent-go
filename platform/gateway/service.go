@@ -28,6 +28,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
 	"trpc.group/trpc-go/trpc-agent-go/platform/toolpolicy"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
@@ -808,6 +809,12 @@ func (s *Service) runGatewayRunner(
 		UserIDHash:     platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID),
 		RequestID:      input.RequestID,
 		AgentName:      runtime.App.AgentName,
+	})
+	runnerCtx = approval.ContextWithAuditContext(runnerCtx, approval.AuditContext{
+		TenantID:  runtime.Tenant.TenantID,
+		AppID:     runtime.App.AppID,
+		RequestID: input.RequestID,
+		TraceID:   input.RequestID,
 	})
 	setInboundTraceAttributes(runnerSpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	if input.FencingToken > 0 {
