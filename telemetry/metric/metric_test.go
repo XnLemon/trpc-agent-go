@@ -296,12 +296,14 @@ func TestInitMeterProvider(t *testing.T) {
 	originalMP := itelemetry.MeterProvider
 	originalToolApprovalMeter := itelemetry.ToolApprovalMeter
 	originalToolApprovalRequired := itelemetry.ToolApprovalMetricRequiredTotal
+	originalToolPermissionDenied := itelemetry.ExecuteToolMetricToolPermissionDeniedTotal
 	originalAuditMeter := itelemetry.AuditMeter
 	originalAuditWriteFailed := itelemetry.AuditMetricWriteFailedTotal
 	defer func() {
 		itelemetry.MeterProvider = originalMP
 		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
 		itelemetry.ToolApprovalMetricRequiredTotal = originalToolApprovalRequired
+		itelemetry.ExecuteToolMetricToolPermissionDeniedTotal = originalToolPermissionDenied
 		itelemetry.AuditMeter = originalAuditMeter
 		itelemetry.AuditMetricWriteFailedTotal = originalAuditWriteFailed
 	}()
@@ -355,6 +357,9 @@ func TestInitMeterProvider(t *testing.T) {
 	}
 	if itelemetry.ExecuteToolMetricTRPCAgentGoClientRequestCnt == nil {
 		t.Error("ExecuteToolMetricTRPCAgentGoClientRequestCnt was not created")
+	}
+	if itelemetry.ExecuteToolMetricToolPermissionDeniedTotal == nil {
+		t.Error("ExecuteToolMetricToolPermissionDeniedTotal was not created")
 	}
 	if itelemetry.ExecuteToolMetricGenAIClientOperationDuration == nil {
 		t.Error("ExecuteToolMetricGenAIClientOperationDuration was not created")
@@ -432,6 +437,33 @@ func TestInitToolApprovalMetrics_ErrorHandling(t *testing.T) {
 		t.Fatalf("expected tool approval counter creation error")
 	}
 	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.tool_approval metric tool_approval_required_total") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInitMeterProvider_ToolPermissionDeniedMetricError(t *testing.T) {
+	originalMP := itelemetry.MeterProvider
+	originalExecuteToolMeter := itelemetry.ExecuteToolMeter
+	originalExecuteToolRequestCnt := itelemetry.ExecuteToolMetricTRPCAgentGoClientRequestCnt
+	originalToolPermissionDenied := itelemetry.ExecuteToolMetricToolPermissionDeniedTotal
+	originalExecuteToolDuration := itelemetry.ExecuteToolMetricGenAIClientOperationDuration
+	t.Cleanup(func() {
+		itelemetry.MeterProvider = originalMP
+		itelemetry.ExecuteToolMeter = originalExecuteToolMeter
+		itelemetry.ExecuteToolMetricTRPCAgentGoClientRequestCnt = originalExecuteToolRequestCnt
+		itelemetry.ExecuteToolMetricToolPermissionDeniedTotal = originalToolPermissionDenied
+		itelemetry.ExecuteToolMetricGenAIClientOperationDuration = originalExecuteToolDuration
+	})
+
+	mp := &mockMeterProvider{meter: &mockMeter{
+		shouldFail: true,
+		failOn:     metrics.MetricToolPermissionDeniedTotal,
+	}}
+	err := InitMeterProvider(mp)
+	if err == nil {
+		t.Fatalf("expected tool permission denied counter creation error")
+	}
+	if !strings.Contains(err.Error(), "failed to create execute tool metric ToolPermissionDeniedTotal") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -62,6 +62,8 @@ const (
 	KeyTRPCAgentGoMemoryWriteOperation = "trpc.go.agent.memory.write.operation"
 	// KeyTRPCAgentGoAuditDecision is the audit record decision.
 	KeyTRPCAgentGoAuditDecision = "trpc.go.agent.audit.decision"
+	// KeyTRPCAgentGoToolPermissionStatus is the structured tool permission result status.
+	KeyTRPCAgentGoToolPermissionStatus = "trpc.go.agent.tool.permission.status"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"

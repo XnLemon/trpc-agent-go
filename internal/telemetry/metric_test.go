@@ -811,3 +811,115 @@ func TestReportExecuteToolMetrics(t *testing.T) {
 		t.Error("expected metrics to be recorded")
 	}
 }
+
+func TestReportToolPermissionDeniedMetricsNoopWhenCounterNil(t *testing.T) {
+	originalCounter := ExecuteToolMetricToolPermissionDeniedTotal
+	t.Cleanup(func() {
+		ExecuteToolMetricToolPermissionDeniedTotal = originalCounter
+	})
+
+	ExecuteToolMetricToolPermissionDeniedTotal = nil
+	if panicked := func() (panicked bool) {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		ReportToolPermissionDeniedMetrics(context.Background(), ToolPermissionDeniedAttributes{
+			RequestModelName: "gpt-4",
+			ToolName:         "shell",
+			Status:           "denied",
+		})
+		return false
+	}(); panicked {
+		t.Fatal("ReportToolPermissionDeniedMetrics should not panic when counter is nil")
+	}
+}
+
+func TestReportToolPermissionDeniedMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := MeterProvider
+	originalMeter := ExecuteToolMeter
+	originalCounter := ExecuteToolMetricToolPermissionDeniedTotal
+	t.Cleanup(func() {
+		MeterProvider = originalProvider
+		ExecuteToolMeter = originalMeter
+		ExecuteToolMetricToolPermissionDeniedTotal = originalCounter
+	})
+
+	MeterProvider = provider
+	ExecuteToolMeter = provider.Meter(metrics.MeterNameExecuteTool)
+	var err error
+	ExecuteToolMetricToolPermissionDeniedTotal, err =
+		ExecuteToolMeter.Int64Counter(metrics.MetricToolPermissionDeniedTotal)
+	if err != nil {
+		t.Fatalf("failed to create counter: %v", err)
+	}
+
+	ctx := context.Background()
+	ReportToolPermissionDeniedMetrics(ctx, ToolPermissionDeniedAttributes{
+		RequestModelName: "gpt-4",
+		ToolName:         "shell",
+		AppName:          "test-app",
+		UserID:           "user-1",
+		SessionID:        "session-1",
+		AgentName:        "agent-1",
+		Status:           "approval_denied",
+	})
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("failed to collect metrics: %v", err)
+	}
+
+	points := executeToolSumPoints(t, rm, metrics.MetricToolPermissionDeniedTotal)
+	if len(points) != 1 {
+		t.Fatalf("expected 1 metric point, got %d", len(points))
+	}
+	if points[0].Value != 1 {
+		t.Fatalf("expected metric value 1, got %d", points[0].Value)
+	}
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, OperationExecuteTool)
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, "gpt-4")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIToolName, "shell")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoToolPermissionStatus, "approval_denied")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "test-app")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoUserID, "user-1")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIConversationID, "session-1")
+	requireMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIAgentName, "agent-1")
+}
+
+func executeToolSumPoints(
+	t *testing.T,
+	rm metricdata.ResourceMetrics,
+	metricName string,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metricName {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s has unexpected data type %T", metricName, metric.Data)
+			}
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metricName)
+	return nil
+}
+
+func requireMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			if kv.Value.AsString() != value {
+				t.Fatalf("attribute %s: expected %q, got %q", key, value, kv.Value.AsString())
+			}
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
+}

@@ -105,6 +105,13 @@ func InitMeterProvider(mp metric.MeterProvider) error {
 	); err != nil {
 		return fmt.Errorf("failed to create execute tool metric TRPCAgentGoClientRequestCnt: %w", err)
 	}
+	if itelemetry.ExecuteToolMetricToolPermissionDeniedTotal, err = itelemetry.ExecuteToolMeter.Int64Counter(
+		metrics.MetricToolPermissionDeniedTotal,
+		metric.WithDescription("Total number of tool calls denied before execution"),
+		metric.WithUnit("1"),
+	); err != nil {
+		return fmt.Errorf("failed to create execute tool metric ToolPermissionDeniedTotal: %w", err)
+	}
 	if itelemetry.ExecuteToolMetricGenAIClientOperationDuration, err = histogram.NewDynamicFloat64Histogram(
 		mp,
 		metrics.MeterNameExecuteTool,
