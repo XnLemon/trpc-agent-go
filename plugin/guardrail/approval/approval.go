@@ -153,8 +153,8 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 					CustomResult: fmt.Sprintf("approval review failed for tool %q: %v", args.ToolName, err),
 				}, nil
 			}
-			riskLevel := strings.TrimSpace(decision.RiskLevel)
-			reason := strings.TrimSpace(decision.Reason)
+			riskLevel := sanitizeReviewerText(decision.RiskLevel)
+			reason := sanitizeReviewerText(decision.Reason)
 			if decision.Approved {
 				if err := p.writeApprovalAudit(
 					ctx,
@@ -218,6 +218,18 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 			}, nil
 		}
 	}
+}
+
+func sanitizeReviewerText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return value
+	}
+	return redactor.Redact(value)
 }
 
 func (p *Plugin) resolvePolicy(args *tool.BeforeToolArgs) ToolPolicy {

@@ -310,6 +310,44 @@ func TestBeforeTool_ReviewerApprovedLogsInfo(t *testing.T) {
 	)
 }
 
+func TestBeforeTool_ReviewerApprovedLogRedactsSensitiveReason(t *testing.T) {
+	original := approvallog.InfofContext
+	var infoLog string
+	approvallog.InfofContext = func(ctx context.Context, format string, args ...any) {
+		infoLog = fmt.Sprintf(format, args...)
+	}
+	defer func() {
+		approvallog.InfofContext = original
+	}()
+	p, err := New(WithReviewer(&stubReviewer{
+		reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+			return &approvalreview.Decision{
+				Approved:  true,
+				RiskScore: 42,
+				RiskLevel: "medium token=sk-risk-level-secret",
+				Reason:    "Allowed with Authorization: Bearer raw-token and password=plain.",
+			}, nil
+		},
+	}))
+	require.NoError(t, err)
+	callbacks := registeredToolCallbacks(t, p)
+	result, runErr := callbacks.RunBeforeTool(context.Background(), &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-1",
+		Arguments:  []byte(`{"command":"pwd"}`),
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+
+	require.Contains(t, infoLog, "Automatic approval review approved")
+	require.NotContains(t, infoLog, "sk-risk-level-secret")
+	require.NotContains(t, infoLog, "raw-token")
+	require.NotContains(t, infoLog, "password=plain")
+	require.Contains(t, infoLog, "token=****")
+	require.Contains(t, infoLog, "Authorization: ****")
+	require.Contains(t, infoLog, "password=****")
+}
+
 func TestBeforeTool_MetadataRiskRequiresApproval(t *testing.T) {
 	metadata := tool.ToolMetadata{
 		ReadOnly:  false,
@@ -687,6 +725,48 @@ func TestBeforeTool_ReviewerDeniedLogsWarning(t *testing.T) {
 		"Automatic approval review denied (risk: high): The command is destructive and exceeds safe automatic approval.",
 		warning,
 	)
+}
+
+func TestBeforeTool_ReviewerDeniedRedactsSensitiveReason(t *testing.T) {
+	original := approvallog.WarnContext
+	var warning string
+	approvallog.WarnContext = func(ctx context.Context, args ...any) {
+		warning = fmt.Sprint(args...)
+	}
+	defer func() {
+		approvallog.WarnContext = original
+	}()
+	p, err := New(WithReviewer(&stubReviewer{
+		reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+			return &approvalreview.Decision{
+				Approved:  false,
+				RiskScore: 92,
+				RiskLevel: "high api_key=sk-risk-level-secret",
+				Reason:    "Blocked because Authorization: Bearer raw-token and password=plain were present.",
+			}, nil
+		},
+	}))
+	require.NoError(t, err)
+	callbacks := registeredToolCallbacks(t, p)
+	result, runErr := callbacks.RunBeforeTool(context.Background(), &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-1",
+		Arguments:  []byte(`{"command":"rm -rf /tmp/demo"}`),
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+	permission, ok := result.CustomResult.(tool.PermissionResult)
+	require.True(t, ok)
+
+	for _, text := range []string{permission.Reason, warning} {
+		require.Contains(t, text, "Automatic approval review denied")
+		require.NotContains(t, text, "sk-risk-level-secret")
+		require.NotContains(t, text, "raw-token")
+		require.NotContains(t, text, "password=plain")
+		require.Contains(t, text, "api_key=****")
+		require.Contains(t, text, "Authorization: ****")
+		require.Contains(t, text, "password=****")
+	}
 }
 
 func TestBeforeTool_UnsupportedPolicyReturnsFailureMessage(t *testing.T) {
