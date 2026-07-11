@@ -1501,6 +1501,43 @@ func TestServiceHandleInboundRejectsMissingRequiredMention(t *testing.T) {
 	assert.Equal(t, ErrBindingMentionRequired.Error(), audit.Records()[0].DecisionReason)
 }
 
+func TestServiceWriteAuditRecordsRedactionFailureFallback(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		NewInMemoryRegistry(),
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+	unsafe := platform.AuditRecord{
+		AuditID:        "audit-unsafe",
+		TenantID:       "tenant-a",
+		AppID:          "app",
+		RequestID:      "request-1",
+		MessageID:      "msg-1",
+		ToolName:       "workspace_write",
+		Decision:       "reject",
+		DecisionReason: "Authorization: Bearer raw-token",
+		CreatedAt:      time.Unix(1500, 0),
+	}
+
+	svc.writeAuditTo(context.Background(), audit, unsafe)
+
+	records := audit.Records()
+	require.Len(t, records, 1)
+	record := records[0]
+	assert.Equal(t, "tenant-a", record.TenantID)
+	assert.Equal(t, "app", record.AppID)
+	assert.Equal(t, "redaction_failed", record.Decision)
+	assert.Equal(t, "audit redaction failed", record.DecisionReason)
+	assert.Equal(t, "redaction_failed", record.ErrorType)
+	assert.Equal(t, "platform-gateway-redaction-failed-v1", record.RedactionVersion)
+	assert.NotEmpty(t, record.AuditID)
+	assert.Contains(t, record.RedactedDetailRef, "failed_audit:audit_")
+	assert.NotContains(t, record.DecisionReason, "raw-token")
+	assert.NotContains(t, record.RedactedDetailRef, "raw-token")
+	assert.NotContains(t, record.RedactedDetailRef, "Authorization")
+}
+
 func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
