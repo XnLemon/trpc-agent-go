@@ -18,6 +18,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/internal/workspacesession"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 )
 
 var nonExecutableCodeLanguages = map[string]struct{}{
@@ -100,7 +101,10 @@ func (p *CodeExecutionResponseProcessor) ProcessResponse(
 			event.WithResponse(&model.Response{
 				Choices: []model.Choice{
 					{
-						Message: model.Message{Role: model.RoleAssistant, Content: "Code execution failed: " + err.Error()},
+						Message: model.Message{
+							Role:    model.RoleAssistant,
+							Content: codeExecutionErrorMessage(err),
+						},
 					},
 				},
 			}),
@@ -124,6 +128,18 @@ func (p *CodeExecutionResponseProcessor) ProcessResponse(
 	))
 	//  [Step 3] Skip processing the original model response to continue code generation loop.
 	rsp.Choices[0].Message.Content = ""
+}
+
+func codeExecutionErrorMessage(err error) string {
+	if err == nil {
+		return "Code execution failed"
+	}
+	msg := err.Error()
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr == nil {
+		msg = redactor.Redact(msg)
+	}
+	return "Code execution failed: " + msg
 }
 
 func codeExecutorForInvocation(

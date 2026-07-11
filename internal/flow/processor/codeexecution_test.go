@@ -12,6 +12,7 @@ package processor_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -231,9 +232,63 @@ func TestCodeExecutionResponseProcessor_UsesSharedWorkspaceSessionKey(
 	}
 }
 
+func TestCodeExecutionResponseProcessor_RedactsExecutionError(t *testing.T) {
+	ctx := context.Background()
+	proc := iprocessor.NewCodeExecutionResponseProcessor()
+	exec := &stubExec{
+		err: errors.New(
+			"runner failed Authorization: ApiKey raw-token\napi_key=sk-1234567890abcdef\ndb=postgres://user:password@example.com/db\nCookie: session=abc; sid=def",
+		),
+	}
+	inv := &agent.Invocation{
+		Agent:     &testAgent{exec: exec},
+		Session:   &session.Session{ID: "test-session"},
+		AgentName: "test-agent",
+	}
+	rsp := &model.Response{
+		Done: true,
+		Choices: []model.Choice{
+			{Message: model.Message{
+				Role:    model.RoleAssistant,
+				Content: "```bash\necho hello\n```",
+			}},
+		},
+	}
+
+	ch := make(chan *event.Event, 4)
+	proc.ProcessResponse(ctx, inv, &model.Request{}, rsp, ch)
+
+	require.Len(t, ch, 2)
+	<-ch
+	result := <-ch
+	require.NotNil(t, result)
+	require.NotNil(t, result.Response)
+	require.Len(t, result.Response.Choices, 1)
+	content := result.Response.Choices[0].Message.Content
+	require.Contains(t, content, "Code execution failed:")
+	for _, leaked := range []string{
+		"raw-token",
+		"sk-1234567890abcdef",
+		"user:password",
+		"session=abc",
+		"sid=def",
+	} {
+		require.NotContains(t, content, leaked)
+	}
+	for _, want := range []string{
+		"Authorization: ****",
+		"api_key=****",
+		"postgres://****@example.com/db",
+		"Cookie: ****",
+	} {
+		require.Contains(t, content, want)
+	}
+}
+
 // stubExec is a simple CodeExecutor stub returning a fixed output
 type stubExec struct {
 	output    string
+	err       error
 	lastInput codeexecutor.CodeExecutionInput
 }
 
@@ -241,6 +296,9 @@ func (s *stubExec) ExecuteCode(
 	ctx context.Context, input codeexecutor.CodeExecutionInput,
 ) (codeexecutor.CodeExecutionResult, error) {
 	s.lastInput = input
+	if s.err != nil {
+		return codeexecutor.CodeExecutionResult{}, s.err
+	}
 	output := s.output
 	if output == "" {
 		output = "OK"

@@ -855,9 +855,17 @@ func TestRedactorMasksNonBearerAuthorizationCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRedactor: %v", err)
 	}
-	input := "Authorization: Token top-secret\nAuthorization=Digest username=\"bob\", response=\"abc123\"\n"
+	input := "Authorization: Token top-secret\nAuthorization=Digest username=\"bob\", response=\"abc123\"\nAuthorization: ApiKey raw-secret\nAuthorization = raw-secret-2\nCookie: session=abc; sid=def\n"
 	got := redactor.Redact(input)
-	for _, leaked := range []string{"top-secret", "username=\"bob\"", "abc123"} {
+	for _, leaked := range []string{
+		"top-secret",
+		"username=\"bob\"",
+		"abc123",
+		"raw-secret",
+		"raw-secret-2",
+		"session=abc",
+		"sid=def",
+	} {
 		if strings.Contains(got, leaked) {
 			t.Fatalf("redacted output leaked %q: %q", leaked, got)
 		}
@@ -867,6 +875,12 @@ func TestRedactorMasksNonBearerAuthorizationCredentials(t *testing.T) {
 	}
 	if !strings.Contains(got, "Authorization=****") {
 		t.Fatalf("expected key-value authorization mask, got %q", got)
+	}
+	if !strings.Contains(got, "Authorization =****") {
+		t.Fatalf("expected spaced key-value authorization mask, got %q", got)
+	}
+	if !strings.Contains(got, "Cookie: ****") {
+		t.Fatalf("expected cookie header mask, got %q", got)
 	}
 }
 
