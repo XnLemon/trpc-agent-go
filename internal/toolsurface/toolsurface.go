@@ -49,33 +49,37 @@ func ResolveBase(
 	ctx context.Context,
 	invocation *agent.Invocation,
 ) ([]tool.Tool, map[string]bool, bool) {
-	var allTools []tool.Tool
-	var userToolNames map[string]bool
-	hasUserToolTracking := false
 	if provider, ok := invocation.Agent.(agent.InvocationToolSurfaceProvider); ok {
-		allTools, userToolNames = provider.InvocationToolSurface(ctx, invocation)
-		hasUserToolTracking = userToolNames != nil
-	} else if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
-		allTools = provider.FilterTools(ctx)
-	} else {
-		allTools = invocation.Agent.Tools()
+		allTools, userToolNames := provider.InvocationToolSurface(ctx, invocation)
+		if userToolNames != nil {
+			return allTools, userToolNames, true
+		}
+		return withTrackedUserTools(invocation, allTools)
 	}
+	if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
+		return withTrackedUserTools(invocation, provider.FilterTools(ctx))
+	}
+	return withTrackedUserTools(invocation, invocation.Agent.Tools())
+}
 
+func withTrackedUserTools(
+	invocation *agent.Invocation,
+	allTools []tool.Tool,
+) ([]tool.Tool, map[string]bool, bool) {
 	// User tools are those explicitly registered via WithTools and
 	// WithToolSets. Framework tools (Knowledge, SubAgents) are never filtered.
-	if !hasUserToolTracking {
-		if provider, ok := invocation.Agent.(UserToolsProvider); ok {
-			userTools := provider.UserTools()
-			hasUserToolTracking = true
-			userToolNames = make(map[string]bool, len(userTools))
-			for _, t := range userTools {
-				if name := toolName(t); name != "" {
-					userToolNames[name] = true
-				}
-			}
+	provider, ok := invocation.Agent.(UserToolsProvider)
+	if !ok {
+		return allTools, nil, false
+	}
+	userTools := provider.UserTools()
+	userToolNames := make(map[string]bool, len(userTools))
+	for _, t := range userTools {
+		if name := toolName(t); name != "" {
+			userToolNames[name] = true
 		}
 	}
-	return allTools, userToolNames, hasUserToolTracking
+	return allTools, userToolNames, true
 }
 
 // AppendRunOptionTools appends RunOptions.AdditionalTools and ExternalTools to
