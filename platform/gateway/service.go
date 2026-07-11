@@ -655,20 +655,35 @@ func (s *Service) writeUsageRecord(
 	if isNilInterfaceValue(s.usageSink) || usage == nil {
 		return
 	}
+	modelCost, err := platform.ModelUsageCostForProfile(runtime.ModelProfile, usage)
+	if err != nil {
+		return
+	}
 	record := platform.UsageRecord{
 		TenantID:         runtime.Tenant.TenantID,
 		AppID:            runtime.App.AppID,
 		UserIDHash:       platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID),
 		SessionID:        input.SessionID,
 		RequestID:        input.RequestID,
-		ModelName:        runtime.App.ModelProfileID,
+		ModelName:        usageModelName(runtime),
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
+		ModelUnitPrice:   modelCost.UnitPrice,
+		ModelCost:        modelCost.Cost,
+		TotalCost:        modelCost.Cost,
 		TraceID:          input.RequestID,
 		CreatedAt:        s.now(),
 	}
 	_ = s.usageSink.WriteUsage(ctx, record)
+}
+
+func usageModelName(runtime Runtime) string {
+	modelName := strings.TrimSpace(runtime.ModelProfile.Model)
+	if modelName != "" {
+		return modelName
+	}
+	return runtime.App.ModelProfileID
 }
 
 func (s *Service) writeReply(

@@ -762,6 +762,17 @@ func TestModelProfileRejectsInlineSecrets(t *testing.T) {
 	}
 }
 
+func TestModelProfileRejectsInvalidCostPolicy(t *testing.T) {
+	profile := ModelProfile{
+		TenantID:       "tenant",
+		ProfileID:      "model",
+		CostPolicyJSON: `{"output_token_price_per_token":-0.01}`,
+	}
+	if err := profile.Validate(); err == nil || !strings.Contains(err.Error(), "output_token_price_per_token") {
+		t.Fatalf("expected cost policy validation error, got %v", err)
+	}
+}
+
 func TestIdempotencyUpdateUnknownKeyFails(t *testing.T) {
 	store := NewInMemoryIdempotencyStore()
 	_, err := store.Complete(context.Background(), "missing", "result")

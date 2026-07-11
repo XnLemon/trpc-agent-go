@@ -20,11 +20,12 @@ import (
 
 // Runtime contains the platform configuration and runner for one active binding.
 type Runtime struct {
-	Tenant  platform.Tenant
-	App     platform.AgentApp
-	Binding platform.ChannelBinding
-	Runner  runner.Runner
-	Audit   platform.AuditSink
+	Tenant       platform.Tenant
+	App          platform.AgentApp
+	Binding      platform.ChannelBinding
+	ModelProfile platform.ModelProfile
+	Runner       runner.Runner
+	Audit        platform.AuditSink
 	// ToolFilter narrows user-visible tools for this runtime.
 	ToolFilter tool.FilterFunc
 	// ToolPermissionPolicy enforces tool-call authorization before execution.
@@ -40,6 +41,9 @@ func (r Runtime) Validate() error {
 		return err
 	}
 	if err := r.Binding.Validate(); err != nil {
+		return err
+	}
+	if err := validateRuntimeModelProfile(r); err != nil {
 		return err
 	}
 	if r.Runner == nil {
@@ -62,6 +66,20 @@ func (r Runtime) Validate() error {
 	}
 	if r.Binding.Status != "" && r.Binding.Status != platform.BindingStatusActive {
 		return ErrRuntimeInactive
+	}
+	return nil
+}
+
+func validateRuntimeModelProfile(r Runtime) error {
+	if r.ModelProfile == (platform.ModelProfile{}) {
+		return nil
+	}
+	if err := r.ModelProfile.Validate(); err != nil {
+		return err
+	}
+	if r.ModelProfile.TenantID != r.Tenant.TenantID ||
+		r.ModelProfile.ProfileID != r.App.ModelProfileID {
+		return ErrRuntimeMismatch
 	}
 	return nil
 }
