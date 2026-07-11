@@ -67,6 +67,8 @@ const (
 	MetricAuditWriteFailedTotal = "audit_write_failed_total"
 	// MetricGatewayBudgetDeniedTotal records gateway requests denied by budget checks.
 	MetricGatewayBudgetDeniedTotal = "gateway_budget_denied_total"
+	// MetricIMRateLimitedTotal records inbound IM messages rejected by gateway rate limits.
+	MetricIMRateLimitedTotal = "im_rate_limited_total"
 
 	////////////////////////// server ////////////////////////
 

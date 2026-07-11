@@ -301,6 +301,7 @@ func TestInitMeterProvider(t *testing.T) {
 	originalAuditWriteFailed := itelemetry.AuditMetricWriteFailedTotal
 	originalGatewayMeter := itelemetry.GatewayMeter
 	originalGatewayBudgetDenied := itelemetry.GatewayMetricBudgetDeniedTotal
+	originalGatewayRateLimited := itelemetry.GatewayMetricRateLimitedTotal
 	defer func() {
 		itelemetry.MeterProvider = originalMP
 		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
@@ -310,6 +311,7 @@ func TestInitMeterProvider(t *testing.T) {
 		itelemetry.AuditMetricWriteFailedTotal = originalAuditWriteFailed
 		itelemetry.GatewayMeter = originalGatewayMeter
 		itelemetry.GatewayMetricBudgetDeniedTotal = originalGatewayBudgetDenied
+		itelemetry.GatewayMetricRateLimitedTotal = originalGatewayRateLimited
 	}()
 
 	// Create a test meter provider
@@ -385,6 +387,9 @@ func TestInitMeterProvider(t *testing.T) {
 	}
 	if itelemetry.GatewayMetricBudgetDeniedTotal == nil {
 		t.Error("GatewayMetricBudgetDeniedTotal was not created")
+	}
+	if itelemetry.GatewayMetricRateLimitedTotal == nil {
+		t.Error("GatewayMetricRateLimitedTotal was not created")
 	}
 	if itelemetry.WorkflowMeter == nil {
 		t.Error("WorkflowMeter was not created")
@@ -506,9 +511,11 @@ func TestInitAuditMetrics_ErrorHandling(t *testing.T) {
 func TestInitGatewayMetrics_ErrorHandling(t *testing.T) {
 	originalGatewayMeter := itelemetry.GatewayMeter
 	originalGatewayBudgetDenied := itelemetry.GatewayMetricBudgetDeniedTotal
+	originalGatewayRateLimited := itelemetry.GatewayMetricRateLimitedTotal
 	defer func() {
 		itelemetry.GatewayMeter = originalGatewayMeter
 		itelemetry.GatewayMetricBudgetDeniedTotal = originalGatewayBudgetDenied
+		itelemetry.GatewayMetricRateLimitedTotal = originalGatewayRateLimited
 	}()
 
 	if err := initGatewayMetrics(nil); err == nil || !strings.Contains(err.Error(), "gateway meter provider is nil") {
@@ -524,6 +531,18 @@ func TestInitGatewayMetrics_ErrorHandling(t *testing.T) {
 		t.Fatalf("expected gateway counter creation error")
 	}
 	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.gateway metric gateway_budget_denied_total") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mp = &mockMeterProvider{meter: &mockMeter{
+		shouldFail: true,
+		failOn:     metrics.MetricIMRateLimitedTotal,
+	}}
+	err = initGatewayMetrics(mp)
+	if err == nil {
+		t.Fatalf("expected gateway rate limited counter creation error")
+	}
+	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.gateway metric im_rate_limited_total") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

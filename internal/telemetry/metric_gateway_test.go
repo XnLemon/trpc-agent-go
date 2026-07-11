@@ -79,6 +79,61 @@ func TestReportGatewayBudgetDeniedMetrics(t *testing.T) {
 	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoBudgetDeniedReason, "total_tokens_exceeded")
 }
 
+func TestReportGatewayRateLimitedMetricsNoopWhenCounterNil(t *testing.T) {
+	originalCounter := GatewayMetricRateLimitedTotal
+	t.Cleanup(func() {
+		GatewayMetricRateLimitedTotal = originalCounter
+	})
+
+	GatewayMetricRateLimitedTotal = nil
+	require.NotPanics(t, func() {
+		ReportGatewayRateLimitedMetrics(context.Background(), GatewayRateLimitedAttributes{
+			TenantID: "tenant-1",
+			AppName:  "app-1",
+			Channel:  "wecom",
+		})
+	})
+}
+
+func TestReportGatewayRateLimitedMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := MeterProvider
+	originalMeter := GatewayMeter
+	originalCounter := GatewayMetricRateLimitedTotal
+	t.Cleanup(func() {
+		MeterProvider = originalProvider
+		GatewayMeter = originalMeter
+		GatewayMetricRateLimitedTotal = originalCounter
+	})
+
+	MeterProvider = provider
+	GatewayMeter = provider.Meter(metrics.MeterNameGateway)
+	var err error
+	GatewayMetricRateLimitedTotal, err = GatewayMeter.Int64Counter(metrics.MetricIMRateLimitedTotal)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	ReportGatewayRateLimitedMetrics(ctx, GatewayRateLimitedAttributes{
+		TenantID: "tenant-1",
+		AppName:  "app-1",
+		Channel:  "wecom",
+	})
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+
+	points := gatewaySumPoints(t, rm, metrics.MetricIMRateLimitedTotal)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, OperationGatewayRateLimit)
+	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-1")
+	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app-1")
+	requireGatewayAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
+}
+
 func gatewaySumPoints(
 	t *testing.T,
 	rm metricdata.ResourceMetrics,

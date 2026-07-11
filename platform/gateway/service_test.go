@@ -1292,6 +1292,9 @@ func TestServiceHandleInboundSkipsMIMEFilterWhenAllowlistUnset(t *testing.T) {
 
 func TestServiceHandleInboundRejectsRateLimitedBeforeBudgetAndIdempotency(t *testing.T) {
 	ctx := context.Background()
+	reader, restore := useGatewayMetrics(t)
+	defer restore()
+
 	registry := NewInMemoryRegistry()
 	r := &recordingRunner{response: "unused"}
 	runtime := validRuntime("tenant-a", r)
@@ -1334,6 +1337,15 @@ func TestServiceHandleInboundRejectsRateLimitedBeforeBudgetAndIdempotency(t *tes
 	assert.Equal(t, ErrRateLimited.Error(), audit.Records()[1].DecisionReason)
 	assert.NotEmpty(t, audit.Records()[1].SessionID)
 	assert.NotEmpty(t, audit.Records()[1].InternalUserID)
+
+	points := collectGatewayRateLimitedPoints(t, reader)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationGatewayRateLimit)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
 }
 
 func TestServiceHandleInboundRateLimitRefillsOverTime(t *testing.T) {
@@ -2749,7 +2761,8 @@ func useGatewayMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
 
 	originalProvider := itelemetry.MeterProvider
 	originalMeter := itelemetry.GatewayMeter
-	originalCounter := itelemetry.GatewayMetricBudgetDeniedTotal
+	originalBudgetCounter := itelemetry.GatewayMetricBudgetDeniedTotal
+	originalRateLimitCounter := itelemetry.GatewayMetricRateLimitedTotal
 
 	itelemetry.MeterProvider = provider
 	itelemetry.GatewayMeter = provider.Meter(metrics.MeterNameGateway)
@@ -2757,11 +2770,15 @@ func useGatewayMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
 	itelemetry.GatewayMetricBudgetDeniedTotal, err =
 		itelemetry.GatewayMeter.Int64Counter(metrics.MetricGatewayBudgetDeniedTotal)
 	require.NoError(t, err)
+	itelemetry.GatewayMetricRateLimitedTotal, err =
+		itelemetry.GatewayMeter.Int64Counter(metrics.MetricIMRateLimitedTotal)
+	require.NoError(t, err)
 
 	return reader, func() {
 		itelemetry.MeterProvider = originalProvider
 		itelemetry.GatewayMeter = originalMeter
-		itelemetry.GatewayMetricBudgetDeniedTotal = originalCounter
+		itelemetry.GatewayMetricBudgetDeniedTotal = originalBudgetCounter
+		itelemetry.GatewayMetricRateLimitedTotal = originalRateLimitCounter
 	}
 }
 
@@ -2804,6 +2821,27 @@ func collectGatewayBudgetDeniedPoints(
 		}
 	}
 	t.Fatalf("metric %s not found", metrics.MetricGatewayBudgetDeniedTotal)
+	return nil
+}
+
+func collectGatewayRateLimitedPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricIMRateLimitedTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metrics.MetricIMRateLimitedTotal)
 	return nil
 }
 

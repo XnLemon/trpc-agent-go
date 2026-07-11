@@ -264,6 +264,14 @@ func initGatewayMetrics(mp metric.MeterProvider) error {
 	if err != nil {
 		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricGatewayBudgetDeniedTotal, err)
 	}
+	itelemetry.GatewayMetricRateLimitedTotal, err = itelemetry.GatewayMeter.Int64Counter(
+		metrics.MetricIMRateLimitedTotal,
+		metric.WithDescription("Total number of inbound IM messages rejected by gateway rate limits"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricIMRateLimitedTotal, err)
+	}
 	return nil
 }
 
