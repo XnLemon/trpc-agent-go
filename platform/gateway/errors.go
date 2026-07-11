@@ -25,6 +25,8 @@ var (
 	ErrUnsupportedMessageType = errors.New("gateway only supports text messages")
 	// ErrEmptyText indicates that a text message does not contain usable text.
 	ErrEmptyText = errors.New("gateway text content is required")
+	// ErrBudgetExceeded indicates that a runtime budget gate rejected the request.
+	ErrBudgetExceeded = errors.New("gateway budget exceeded")
 	// ErrRunnerResponseEmpty indicates that the runner completed without assistant text.
 	ErrRunnerResponseEmpty = errors.New("gateway runner response is empty")
 )

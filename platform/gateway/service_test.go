@@ -724,6 +724,86 @@ func TestServiceHandleInboundRejectsMissingRequiredMention(t *testing.T) {
 	assert.Equal(t, ErrBindingMentionRequired.Error(), audit.Records()[0].DecisionReason)
 }
 
+func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Tenant.QuotaJSON = `{"max_total_tokens":10}`
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	store := platform.NewInMemoryIdempotencyStore()
+	var estimateRequest BudgetEstimateRequest
+	svc := NewService(
+		registry,
+		store,
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+		WithBudgetEstimator(BudgetEstimatorFunc(func(
+			ctx context.Context,
+			request BudgetEstimateRequest,
+		) (platform.UsageEstimate, error) {
+			estimateRequest = request
+			return platform.UsageEstimate{PromptTokens: 8, CompletionTokens: 5}, nil
+		})),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.TraceContext = map[string]string{"request_id": "req-budget"}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrBudgetExceeded)
+	assert.Empty(t, r.calls)
+	_, ok, getErr := store.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	require.Len(t, audit.Records(), 1)
+	record := audit.Records()[0]
+	assert.Equal(t, "budget:tenant", record.ToolName)
+	assert.Equal(t, string(platform.BudgetDecisionOutcomeDeny), record.Decision)
+	assert.Equal(t, "total_tokens_exceeded", record.DecisionReason)
+	assert.Equal(t, "req-budget", record.RequestID)
+	assert.Equal(t, "req-budget", record.TraceID)
+	assert.Contains(t, record.TokenUsageJSON, "prompt_tokens:8")
+	assert.Contains(t, record.TokenUsageJSON, "completion_tokens:5")
+	assert.Contains(t, record.TokenUsageJSON, "total_tokens:13")
+	assert.Equal(t, runtime.Tenant.TenantID, estimateRequest.Runtime.Tenant.TenantID)
+	assert.Equal(t, "hello", estimateRequest.Text)
+	assert.Equal(t, "req-budget", estimateRequest.RequestID)
+	assert.NotEmpty(t, estimateRequest.SessionID)
+	assert.NotEmpty(t, estimateRequest.InternalUserID)
+}
+
+func TestServiceHandleInboundAllowsWithinBudget(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "within budget"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Tenant.QuotaJSON = `{"max_total_tokens":20}`
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+		WithBudgetEstimator(BudgetEstimatorFunc(func(
+			ctx context.Context,
+			request BudgetEstimateRequest,
+		) (platform.UsageEstimate, error) {
+			return platform.UsageEstimate{PromptTokens: 8, CompletionTokens: 5}, nil
+		})),
+	)
+
+	result, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "within budget", result.Outbound.Content)
+	require.Len(t, r.calls, 1)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "completed", audit.Records()[0].Decision)
+}
+
 func TestServiceHandleInboundAllowsAuthorizedGroupMention(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
