@@ -38,24 +38,26 @@ type Policy struct {
 
 // ApprovalSummary is the safe approval-facing summary of one tool call.
 type ApprovalSummary struct {
-	TenantID         string
-	AppID            string
-	PolicyID         string
-	ToolName         string
-	ToolCallID       string
-	Decision         tool.PermissionAction
-	Reason           string
-	ArgumentsDigest  string
-	ArgumentsBytes   int
-	RequiresApproval bool
-	ReadOnly         bool
-	Destructive      bool
-	OpenWorld        bool
-	ConcurrencySafe  bool
-	SearchOrRead     bool
-	MaxResultSize    int
-	RedactionVersion string
-	CreatedAt        time.Time
+	TenantID                  string
+	AppID                     string
+	PolicyID                  string
+	ToolName                  string
+	ToolCallID                string
+	Decision                  tool.PermissionAction
+	Reason                    string
+	ArgumentsDigest           string
+	ArgumentsBytes            int
+	ToolBudgetRemainingDigest string
+	ToolBudgetRemainingBytes  int
+	RequiresApproval          bool
+	ReadOnly                  bool
+	Destructive               bool
+	OpenWorld                 bool
+	ConcurrencySafe           bool
+	SearchOrRead              bool
+	MaxResultSize             int
+	RedactionVersion          string
+	CreatedAt                 time.Time
 }
 
 type auditContextKey struct{}
@@ -506,25 +508,28 @@ func (p *Policy) ApprovalSummary(
 		return ApprovalSummary{}, err
 	}
 	argumentsDigest, argumentsBytes := argumentDigest(req.Arguments)
+	toolBudgetRemainingDigest, toolBudgetRemainingBytes := policyJSONDigest(p.policy.ToolBudgetRemainingJSON)
 	summary := ApprovalSummary{
-		TenantID:         strings.TrimSpace(p.policy.TenantID),
-		AppID:            strings.TrimSpace(p.policy.AppID),
-		PolicyID:         strings.TrimSpace(p.policy.PolicyID),
-		ToolName:         name,
-		ToolCallID:       strings.TrimSpace(req.ToolCallID),
-		Decision:         decision.Action,
-		Reason:           reason,
-		ArgumentsDigest:  argumentsDigest,
-		ArgumentsBytes:   argumentsBytes,
-		RequiresApproval: decision.Action == tool.PermissionActionAsk,
-		ReadOnly:         req.Metadata.ReadOnly,
-		Destructive:      req.Metadata.Destructive,
-		OpenWorld:        req.Metadata.OpenWorld,
-		ConcurrencySafe:  req.Metadata.ConcurrencySafe,
-		SearchOrRead:     req.Metadata.SearchOrRead,
-		MaxResultSize:    req.Metadata.MaxResultSize,
-		RedactionVersion: "platform-toolpolicy-v1",
-		CreatedAt:        p.now(),
+		TenantID:                  strings.TrimSpace(p.policy.TenantID),
+		AppID:                     strings.TrimSpace(p.policy.AppID),
+		PolicyID:                  strings.TrimSpace(p.policy.PolicyID),
+		ToolName:                  name,
+		ToolCallID:                strings.TrimSpace(req.ToolCallID),
+		Decision:                  decision.Action,
+		Reason:                    reason,
+		ArgumentsDigest:           argumentsDigest,
+		ArgumentsBytes:            argumentsBytes,
+		ToolBudgetRemainingDigest: toolBudgetRemainingDigest,
+		ToolBudgetRemainingBytes:  toolBudgetRemainingBytes,
+		RequiresApproval:          decision.Action == tool.PermissionActionAsk,
+		ReadOnly:                  req.Metadata.ReadOnly,
+		Destructive:               req.Metadata.Destructive,
+		OpenWorld:                 req.Metadata.OpenWorld,
+		ConcurrencySafe:           req.Metadata.ConcurrencySafe,
+		SearchOrRead:              req.Metadata.SearchOrRead,
+		MaxResultSize:             req.Metadata.MaxResultSize,
+		RedactionVersion:          "platform-toolpolicy-v1",
+		CreatedAt:                 p.now(),
 	}
 	if err := summary.Validate(); err != nil {
 		return ApprovalSummary{}, err
@@ -538,6 +543,9 @@ func (s ApprovalSummary) Validate() error {
 		return err
 	}
 	if err := s.validateArguments(); err != nil {
+		return err
+	}
+	if err := s.validateToolBudgetRemaining(); err != nil {
 		return err
 	}
 	if err := s.validateDecision(); err != nil {
@@ -599,6 +607,20 @@ func (s ApprovalSummary) validateArguments() error {
 	}
 	if s.MaxResultSize < 0 {
 		return fmt.Errorf("max_result_size must be greater than or equal to 0")
+	}
+	return nil
+}
+
+func (s ApprovalSummary) validateToolBudgetRemaining() error {
+	if s.ToolBudgetRemainingBytes < 0 {
+		return fmt.Errorf("tool_budget_remaining_bytes must be greater than or equal to 0")
+	}
+	if s.ToolBudgetRemainingBytes == 0 {
+		if s.ToolBudgetRemainingDigest != "" {
+			return fmt.Errorf("tool_budget_remaining_digest must be empty when tool_budget_remaining_bytes is 0")
+		}
+	} else if !validSHA256Digest(s.ToolBudgetRemainingDigest) {
+		return fmt.Errorf("tool_budget_remaining_digest must be sha256 followed by a 64 character hex digest")
 	}
 	return nil
 }
@@ -688,6 +710,10 @@ func (s ApprovalSummary) DetailRef() string {
 		parts = append(parts, "args:"+s.ArgumentsDigest)
 		parts = append(parts, "args_bytes:"+strconv.Itoa(s.ArgumentsBytes))
 	}
+	if s.ToolBudgetRemainingDigest != "" {
+		parts = append(parts, "tool_budget_remaining:"+s.ToolBudgetRemainingDigest)
+		parts = append(parts, "tool_budget_remaining_bytes:"+strconv.Itoa(s.ToolBudgetRemainingBytes))
+	}
 	if s.RequiresApproval {
 		parts = append(parts, "requires_approval:true")
 	}
@@ -709,6 +735,14 @@ func argumentDigest(args []byte) (string, int) {
 	}
 	sum := sha256.Sum256(args)
 	return "sha256:" + hex.EncodeToString(sum[:]), len(args)
+}
+
+func policyJSONDigest(value string) (string, int) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", 0
+	}
+	return argumentDigest([]byte(value))
 }
 
 var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)

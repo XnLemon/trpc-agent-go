@@ -328,6 +328,36 @@ func TestPolicyBuildsApprovalSummaryWithoutRawArguments(t *testing.T) {
 	}
 }
 
+func TestApprovalSummaryIncludesSafeToolBudgetRemainingDigest(t *testing.T) {
+	p := newPolicy(
+		t,
+		platform.ToolPolicy{
+			ToolBudgetRemainingJSON: `{"tenant":"tenant","remaining_calls":1,"token":"sk-secret"}`,
+		},
+	)
+	req := request("workspace_write", tool.ToolMetadata{}, []byte(`{"path":"/private/file"}`))
+	req.ToolCallID = "call-1"
+
+	summary, err := p.ApprovalSummary(req, tool.AllowPermission(), "")
+	if err != nil {
+		t.Fatalf("ApprovalSummary: %v", err)
+	}
+	if summary.ToolBudgetRemainingBytes == 0 ||
+		!strings.HasPrefix(summary.ToolBudgetRemainingDigest, "sha256:") {
+		t.Fatalf("expected tool budget remaining digest, got %+v", summary)
+	}
+	detail := summary.DetailRef()
+	if !strings.Contains(detail, "tool_budget_remaining:sha256:") ||
+		!strings.Contains(detail, "tool_budget_remaining_bytes:") {
+		t.Fatalf("expected budget digest in detail, got %q", detail)
+	}
+	if strings.Contains(detail, "remaining_calls") ||
+		strings.Contains(detail, "sk-secret") ||
+		strings.Contains(detail, "tenant") {
+		t.Fatalf("summary detail leaked raw budget remaining JSON: %q", detail)
+	}
+}
+
 func TestApprovalSummaryValidationRejectsUnsafeOrInconsistentFields(t *testing.T) {
 	now := time.Unix(300, 0)
 	valid := ApprovalSummary{
@@ -388,6 +418,21 @@ func TestApprovalSummaryValidationRejectsUnsafeOrInconsistentFields(t *testing.T
 	noArguments.ArgumentsBytes = 0
 	if err := noArguments.Validate(); err == nil || !strings.Contains(err.Error(), "arguments_digest") {
 		t.Fatalf("expected empty-arguments digest rejection, got %v", err)
+	}
+
+	invalidBudgetDigest := valid
+	invalidBudgetDigest.ToolBudgetRemainingDigest = "raw-json"
+	invalidBudgetDigest.ToolBudgetRemainingBytes = 16
+	if err := invalidBudgetDigest.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_budget_remaining_digest") {
+		t.Fatalf("expected budget digest rejection, got %v", err)
+	}
+
+	noBudgetBytes := valid
+	noBudgetBytes.ToolBudgetRemainingDigest = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	if err := noBudgetBytes.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_budget_remaining_digest") {
+		t.Fatalf("expected empty-budget digest rejection, got %v", err)
 	}
 
 	allowNeedsApproval := valid
