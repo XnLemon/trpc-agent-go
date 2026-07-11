@@ -819,6 +819,37 @@ func TestRedactorMasksSecrets(t *testing.T) {
 	}
 }
 
+func TestRedactorMasksSpacedSecretAssignments(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	input := `api_key = sk-1234567890abcdef password : plain-token token = raw-token secret : sk-secret-value cookie = session-secret`
+	got := redactor.Redact(input)
+	for _, leaked := range []string{
+		"sk-1234567890abcdef",
+		"plain-token",
+		"raw-token",
+		"sk-secret-value",
+		"session-secret",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("redacted output leaked %q: %q", leaked, got)
+		}
+	}
+	for _, want := range []string{
+		"api_key =****",
+		"password : ****",
+		"token =****",
+		"secret : ****",
+		"cookie =****",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in redacted output, got %q", want, got)
+		}
+	}
+}
+
 func TestRedactorMasksNonBearerAuthorizationCredentials(t *testing.T) {
 	redactor, err := NewRedactor()
 	if err != nil {
