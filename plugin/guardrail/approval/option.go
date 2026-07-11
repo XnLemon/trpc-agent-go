@@ -8,7 +8,12 @@
 
 package approval
 
-import "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
+import (
+	"time"
+
+	"trpc.group/trpc-go/trpc-agent-go/platform"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
+)
 
 const defaultPluginName = "approval"
 
@@ -20,6 +25,9 @@ type options struct {
 	reviewer          review.Reviewer
 	defaultToolPolicy ToolPolicy
 	toolPolicies      map[string]ToolPolicy
+	auditSink         platform.AuditSink
+	approverUserID    string
+	now               func() time.Time
 }
 
 func newOptions(opts ...Option) *options {
@@ -64,5 +72,27 @@ func WithToolPolicy(name string, policy ToolPolicy) Option {
 			opts.toolPolicies = make(map[string]ToolPolicy)
 		}
 		opts.toolPolicies[name] = policy
+	}
+}
+
+// WithAuditSink records approval request and decision boundaries to audit.
+func WithAuditSink(sink platform.AuditSink) Option {
+	return func(opts *options) {
+		opts.auditSink = sink
+	}
+}
+
+// WithApproverUserID sets the stable identity used for automatic reviewer decisions.
+func WithApproverUserID(userID string) Option {
+	return func(opts *options) {
+		opts.approverUserID = userID
+	}
+}
+
+func withNow(now func() time.Time) Option {
+	return func(opts *options) {
+		if now != nil {
+			opts.now = now
+		}
 	}
 }
