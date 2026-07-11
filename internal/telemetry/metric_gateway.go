@@ -26,6 +26,8 @@ var (
 	GatewayMetricBudgetDeniedTotal metric.Int64Counter
 	// GatewayMetricRateLimitedTotal records inbound IM messages rejected by gateway rate limits.
 	GatewayMetricRateLimitedTotal metric.Int64Counter
+	// GatewayMetricIdempotencyHitTotal records inbound IM messages served by gateway idempotency.
+	GatewayMetricIdempotencyHitTotal metric.Int64Counter
 )
 
 // GatewayBudgetDeniedAttributes is the attributes for gateway budget denial metrics.
@@ -41,6 +43,14 @@ type GatewayRateLimitedAttributes struct {
 	TenantID string
 	AppName  string
 	Channel  string
+}
+
+// GatewayIdempotencyHitAttributes is the attributes for gateway idempotency hit metrics.
+type GatewayIdempotencyHitAttributes struct {
+	TenantID string
+	AppName  string
+	Channel  string
+	Status   string
 }
 
 func (a GatewayBudgetDeniedAttributes) toAttributes() []attribute.KeyValue {
@@ -80,6 +90,26 @@ func (a GatewayRateLimitedAttributes) toAttributes() []attribute.KeyValue {
 	return attrs
 }
 
+func (a GatewayIdempotencyHitAttributes) toAttributes() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attribute.String(semconvtrace.KeyGenAIOperationName, OperationGatewayIdempotency),
+		attribute.String(semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent),
+	}
+	if a.TenantID != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoTenantID, a.TenantID))
+	}
+	if a.AppName != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoAppName, a.AppName))
+	}
+	if a.Channel != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoChannel, a.Channel))
+	}
+	if a.Status != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoIdempotencyStatus, a.Status))
+	}
+	return attrs
+}
+
 // ReportGatewayBudgetDeniedMetrics reports a gateway request denied by budget checks.
 func ReportGatewayBudgetDeniedMetrics(ctx context.Context, attrs GatewayBudgetDeniedAttributes) {
 	if GatewayMetricBudgetDeniedTotal == nil {
@@ -94,4 +124,12 @@ func ReportGatewayRateLimitedMetrics(ctx context.Context, attrs GatewayRateLimit
 		return
 	}
 	GatewayMetricRateLimitedTotal.Add(ctx, 1, metric.WithAttributes(attrs.toAttributes()...))
+}
+
+// ReportGatewayIdempotencyHitMetrics reports an inbound IM message served by gateway idempotency.
+func ReportGatewayIdempotencyHitMetrics(ctx context.Context, attrs GatewayIdempotencyHitAttributes) {
+	if GatewayMetricIdempotencyHitTotal == nil {
+		return
+	}
+	GatewayMetricIdempotencyHitTotal.Add(ctx, 1, metric.WithAttributes(attrs.toAttributes()...))
 }

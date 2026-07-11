@@ -68,6 +68,8 @@ const (
 	KeyTRPCAgentGoChannel = "trpc.go.agent.channel"
 	// KeyTRPCAgentGoBudgetDeniedReason is the normalized budget denial reason.
 	KeyTRPCAgentGoBudgetDeniedReason = "trpc.go.agent.budget.denied.reason"
+	// KeyTRPCAgentGoIdempotencyStatus is the stored gateway idempotency record status.
+	KeyTRPCAgentGoIdempotencyStatus = "trpc.go.agent.idempotency.status"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"

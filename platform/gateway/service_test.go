@@ -582,6 +582,8 @@ func TestServiceHandleInboundOutboxFailureDoesNotCompleteIdempotency(t *testing.
 
 func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing.T) {
 	ctx := context.Background()
+	reader, restore := useGatewayMetrics(t)
+	defer restore()
 	registry := NewInMemoryRegistry()
 	r := &recordingRunner{response: "queued"}
 	registerRuntime(t, registry, "tenant-a", r)
@@ -616,10 +618,22 @@ func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing
 	assert.Equal(t, resultRef, dup.ResultRef)
 	assert.Equal(t, "queued", dup.Outbound.Content)
 	assert.Len(t, r.calls, 1)
+
+	points := collectGatewayIdempotencyHitPoints(t, reader)
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(1), points[0].Value)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationGatewayIdempotency)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoIdempotencyStatus, "reply_failed")
 }
 
 func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
 	ctx := context.Background()
+	reader, restore := useGatewayMetrics(t)
+	defer restore()
 	registry := NewInMemoryRegistry()
 	r := &blockingRunner{started: make(chan struct{})}
 	registerRuntime(t, registry, "tenant-a", r)
@@ -642,8 +656,61 @@ func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
 	assert.True(t, dup.Duplicate)
 	assert.True(t, dup.Processing)
 	assert.Len(t, r.calls, 1)
+
+	points := collectGatewayIdempotencyHitPoints(t, reader)
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(1), points[0].Value)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationGatewayIdempotency)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoIdempotencyStatus, "processing")
 	r.finish("done")
 	require.NoError(t, <-errCh)
+}
+
+func TestServiceHandleInboundIdempotencyStartConflictRecordsMetric(t *testing.T) {
+	ctx := context.Background()
+	reader, restore := useGatewayMetrics(t)
+	defer restore()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "first"}
+	registerRuntime(t, registry, "tenant-a", r)
+	key := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1")
+	store := &startConflictIdempotencyStore{
+		record: platform.IdempotencyRecord{
+			TenantID:          "tenant-a",
+			Channel:           "wecom",
+			AccountID:         "acct",
+			PlatformMessageID: "msg-1",
+			IdempotencyKey:    key,
+			RequestID:         "existing-request",
+			SessionID:         "existing-session",
+			Status:            platform.IdempotencyStatusProcessing,
+		},
+	}
+	svc := NewService(registry, store, NewInMemoryOutboundStore())
+
+	result, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+	require.NoError(t, err)
+
+	assert.True(t, result.Duplicate)
+	assert.True(t, result.Processing)
+	assert.Equal(t, platform.IdempotencyStatusProcessing, result.Status)
+	assert.Len(t, r.calls, 0)
+	assert.Equal(t, 1, store.getCalls)
+	assert.Equal(t, 1, store.startCalls)
+
+	points := collectGatewayIdempotencyHitPoints(t, reader)
+	require.Len(t, points, 1)
+	assert.Equal(t, int64(1), points[0].Value)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationGatewayIdempotency)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoIdempotencyStatus, "processing")
 }
 
 func TestServiceHandleInboundSerializesSameSession(t *testing.T) {
@@ -2763,6 +2830,7 @@ func useGatewayMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
 	originalMeter := itelemetry.GatewayMeter
 	originalBudgetCounter := itelemetry.GatewayMetricBudgetDeniedTotal
 	originalRateLimitCounter := itelemetry.GatewayMetricRateLimitedTotal
+	originalIdempotencyHitCounter := itelemetry.GatewayMetricIdempotencyHitTotal
 
 	itelemetry.MeterProvider = provider
 	itelemetry.GatewayMeter = provider.Meter(metrics.MeterNameGateway)
@@ -2773,12 +2841,16 @@ func useGatewayMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
 	itelemetry.GatewayMetricRateLimitedTotal, err =
 		itelemetry.GatewayMeter.Int64Counter(metrics.MetricIMRateLimitedTotal)
 	require.NoError(t, err)
+	itelemetry.GatewayMetricIdempotencyHitTotal, err =
+		itelemetry.GatewayMeter.Int64Counter(metrics.MetricGatewayIdempotencyHitTotal)
+	require.NoError(t, err)
 
 	return reader, func() {
 		itelemetry.MeterProvider = originalProvider
 		itelemetry.GatewayMeter = originalMeter
 		itelemetry.GatewayMetricBudgetDeniedTotal = originalBudgetCounter
 		itelemetry.GatewayMetricRateLimitedTotal = originalRateLimitCounter
+		itelemetry.GatewayMetricIdempotencyHitTotal = originalIdempotencyHitCounter
 	}
 }
 
@@ -2845,6 +2917,27 @@ func collectGatewayRateLimitedPoints(
 	return nil
 }
 
+func collectGatewayIdempotencyHitPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricGatewayIdempotencyHitTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metrics.MetricGatewayIdempotencyHitTotal)
+	return nil
+}
+
 func requireGatewayMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
 	t.Helper()
 	for _, kv := range set.ToSlice() {
@@ -2865,4 +2958,54 @@ func requireGatewayAuditMetricAttr(t *testing.T, set attribute.Set, key string, 
 		}
 	}
 	t.Fatalf("attribute %s not found", key)
+}
+
+type startConflictIdempotencyStore struct {
+	record     platform.IdempotencyRecord
+	getCalls   int
+	startCalls int
+}
+
+func (s *startConflictIdempotencyStore) Start(
+	ctx context.Context,
+	record platform.IdempotencyRecord,
+) (platform.IdempotencyRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return platform.IdempotencyRecord{}, false, err
+	}
+	s.startCalls++
+	return s.record, false, nil
+}
+
+func (s *startConflictIdempotencyStore) Complete(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return platform.IdempotencyRecord{}, err
+	}
+	return platform.IdempotencyRecord{}, platform.ErrIdempotencyRecordNotFound
+}
+
+func (s *startConflictIdempotencyStore) MarkReplyFailed(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return platform.IdempotencyRecord{}, err
+	}
+	return platform.IdempotencyRecord{}, platform.ErrIdempotencyRecordNotFound
+}
+
+func (s *startConflictIdempotencyStore) Get(
+	ctx context.Context,
+	key string,
+) (platform.IdempotencyRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return platform.IdempotencyRecord{}, false, err
+	}
+	s.getCalls++
+	return platform.IdempotencyRecord{}, false, nil
 }
