@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -39,6 +40,7 @@ type Service struct {
 	messageEventSink platform.MessageEventSink
 	usageSink        platform.UsageSink
 	budgetEstimator  BudgetEstimator
+	rateLimiter      RateLimiter
 	now              func() time.Time
 }
 
@@ -76,6 +78,29 @@ func (f BudgetEstimatorFunc) EstimateBudget(
 ) (platform.UsageEstimate, error) {
 	if f == nil {
 		return platform.UsageEstimate{}, nil
+	}
+	return f(ctx, request)
+}
+
+// RateLimitRequest contains safe request metadata for gateway rate checks.
+type RateLimitRequest struct {
+	Key    string
+	Limits platform.ChannelLimits
+	Now    time.Time
+}
+
+// RateLimiter decides whether a gateway request may proceed under channel limits.
+type RateLimiter interface {
+	Allow(ctx context.Context, request RateLimitRequest) (bool, error)
+}
+
+// RateLimiterFunc adapts a function into a RateLimiter.
+type RateLimiterFunc func(ctx context.Context, request RateLimitRequest) (bool, error)
+
+// Allow implements RateLimiter.
+func (f RateLimiterFunc) Allow(ctx context.Context, request RateLimitRequest) (bool, error) {
+	if f == nil {
+		return true, nil
 	}
 	return f(ctx, request)
 }
@@ -124,6 +149,15 @@ func WithBudgetEstimator(estimator BudgetEstimator) Option {
 	}
 }
 
+// WithRateLimiter sets the limiter used for channel binding rate checks.
+func WithRateLimiter(limiter RateLimiter) Option {
+	return func(s *Service) {
+		if limiter != nil {
+			s.rateLimiter = limiter
+		}
+	}
+}
+
 // NewService creates a gateway service.
 func NewService(
 	registry Registry,
@@ -136,6 +170,7 @@ func NewService(
 		idempotencyStore: idempotencyStore,
 		outboundStore:    outboundStore,
 		leaseStore:       NewInMemorySessionLeaseStore(),
+		rateLimiter:      NewInMemoryRateLimiter(),
 		now:              time.Now,
 	}
 	for _, opt := range opts {
@@ -198,6 +233,9 @@ func (s *Service) HandleInbound(
 	internalUserID := platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID)
 	setInboundTraceAttributes(callbackSpan, msg, sessionID, requestID, internalUserID)
 	setInboundTraceAttributes(routeSpan, msg, sessionID, requestID, internalUserID)
+	if err := s.checkRateLimit(ctx, routeSpan, runtime, auditSink, msg, start); err != nil {
+		return Result{}, err
+	}
 	if err := s.checkBudget(
 		routeCtx,
 		ctx,
@@ -309,6 +347,36 @@ func (s *Service) lookupRuntime(
 		return Runtime{}, err
 	}
 	return runtime, nil
+}
+
+func (s *Service) checkRateLimit(
+	ctx context.Context,
+	routeSpan oteltrace.Span,
+	runtime Runtime,
+	auditSink platform.AuditSink,
+	msg platform.InboundMessage,
+	start time.Time,
+) error {
+	limits := runtime.Binding.ChannelLimits
+	if limits.RateLimitQPS <= 0 {
+		return nil
+	}
+	allowed, err := s.rateLimiter.Allow(ctx, RateLimitRequest{
+		Key:    rateLimitKey(runtime.Binding),
+		Limits: limits,
+		Now:    start,
+	})
+	if err != nil {
+		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return err
+	}
+	if allowed {
+		return nil
+	}
+	s.writeRejectAuditTo(ctx, auditSink, msg, start, ErrRateLimited)
+	recordSpanError(routeSpan, ErrRateLimited)
+	return ErrRateLimited
 }
 
 func (s *Service) checkBudget(
@@ -809,6 +877,9 @@ func (s *Service) validateService() error {
 	if s.outboundStore == nil {
 		return fmt.Errorf("gateway outbound store is required")
 	}
+	if s.rateLimiter == nil {
+		return fmt.Errorf("gateway rate limiter is required")
+	}
 	if s.leaseStore == nil {
 		return fmt.Errorf("gateway session lease store is required")
 	}
@@ -1215,6 +1286,7 @@ var traceErrorTypes = []struct {
 	{ErrEmptyText, "empty_text"},
 	{ErrTextTooLong, "text_too_long"},
 	{ErrFileTooLarge, "file_too_large"},
+	{ErrRateLimited, "rate_limited"},
 	{ErrBudgetExceeded, "budget_exceeded"},
 	{ErrRunnerResponseEmpty, "runner_response_empty"},
 }
@@ -1232,4 +1304,69 @@ func estimatedTotalTokens(estimate platform.UsageEstimate) int {
 
 func maxInt() int {
 	return int(^uint(0) >> 1)
+}
+
+type rateLimitBucket struct {
+	tokens float64
+	at     time.Time
+}
+
+// InMemoryRateLimiter is a process-local token bucket limiter for gateway bindings.
+type InMemoryRateLimiter struct {
+	mu      sync.Mutex
+	buckets map[string]rateLimitBucket
+}
+
+// NewInMemoryRateLimiter creates a process-local token bucket limiter.
+func NewInMemoryRateLimiter() *InMemoryRateLimiter {
+	return &InMemoryRateLimiter{buckets: make(map[string]rateLimitBucket)}
+}
+
+// Allow implements RateLimiter.
+func (l *InMemoryRateLimiter) Allow(ctx context.Context, request RateLimitRequest) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	qps := request.Limits.RateLimitQPS
+	if qps <= 0 {
+		return true, nil
+	}
+	burst := request.Limits.Burst
+	if burst <= 0 {
+		burst = qps
+	}
+	now := request.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	bucket := l.buckets[request.Key]
+	if bucket.at.IsZero() {
+		bucket.tokens = float64(burst)
+		bucket.at = now
+	} else if elapsed := now.Sub(bucket.at); elapsed > 0 {
+		bucket.tokens += elapsed.Seconds() * float64(qps)
+		if bucket.tokens > float64(burst) {
+			bucket.tokens = float64(burst)
+		}
+		bucket.at = now
+	}
+	if bucket.tokens < 1 {
+		l.buckets[request.Key] = bucket
+		return false, nil
+	}
+	bucket.tokens--
+	l.buckets[request.Key] = bucket
+	return true, nil
+}
+
+func rateLimitKey(binding platform.ChannelBinding) string {
+	return strings.Join([]string{
+		binding.TenantID,
+		binding.AppID,
+		binding.BindingID,
+		binding.Channel,
+		binding.AccountID,
+	}, "\x00")
 }

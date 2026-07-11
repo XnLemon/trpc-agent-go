@@ -31,6 +31,8 @@ var (
 	ErrTextTooLong = errors.New("gateway text content exceeds channel limit")
 	// ErrFileTooLarge indicates that an inbound file part exceeds the runtime binding limit.
 	ErrFileTooLarge = errors.New("gateway file content exceeds channel limit")
+	// ErrRateLimited indicates that a channel binding rate gate rejected the request.
+	ErrRateLimited = errors.New("gateway channel rate limit exceeded")
 	// ErrBudgetExceeded indicates that a runtime budget gate rejected the request.
 	ErrBudgetExceeded = errors.New("gateway budget exceeded")
 	// ErrRunnerResponseEmpty indicates that the runner completed without assistant text.
