@@ -377,8 +377,18 @@ func (r AuditRecord) Validate() error {
 		return fmt.Errorf("cost must be greater than or equal to 0")
 	}
 	for field, value := range map[string]string{
-		"request_id": r.RequestID,
-		"trace_id":   r.TraceID,
+		"channel":          r.Channel,
+		"binding_id":       r.BindingID,
+		"user_id":          r.UserID,
+		"internal_user_id": r.InternalUserID,
+		"user_id_hash":     r.UserIDHash,
+		"session_id":       r.SessionID,
+		"message_id":       r.MessageID,
+		"request_id":       r.RequestID,
+		"agent_name":       r.AgentName,
+		"model_name":       r.ModelName,
+		"tool_name":        r.ToolName,
+		"trace_id":         r.TraceID,
 	} {
 		if err := validateAuditRedactedText(field, value); err != nil {
 			return err

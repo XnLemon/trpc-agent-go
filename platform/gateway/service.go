@@ -27,6 +27,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
+	"trpc.group/trpc-go/trpc-agent-go/platform/toolpolicy"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
@@ -797,6 +798,15 @@ func (s *Service) runGatewayRunner(
 	runnerCtx, runnerSpan := telemetrytrace.Tracer.Start(routeCtx, "runner.run")
 	defer runnerSpan.End()
 	runnerCtx = platform.ContextWithStorageFencingToken(runnerCtx, input.FencingToken)
+	runnerCtx = toolpolicy.ContextWithAuditContext(runnerCtx, toolpolicy.AuditContext{
+		Channel:        msg.Channel,
+		BindingID:      msg.BindingID,
+		SessionID:      input.SessionID,
+		InternalUserID: input.InternalUserID,
+		UserIDHash:     platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID),
+		RequestID:      input.RequestID,
+		AgentName:      runtime.App.AgentName,
+	})
 	setInboundTraceAttributes(runnerSpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	if input.FencingToken > 0 {
 		runnerSpan.SetAttributes(attribute.Int64("storage.fencing_token", input.FencingToken))

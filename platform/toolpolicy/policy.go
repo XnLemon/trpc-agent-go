@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	oteltrace "go.opentelemetry.io/otel/trace"
+	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
@@ -54,6 +56,35 @@ type ApprovalSummary struct {
 	MaxResultSize    int
 	RedactionVersion string
 	CreatedAt        time.Time
+}
+
+type auditContextKey struct{}
+
+// AuditContext carries trusted platform identity for tool governance audit.
+// Tool policy deliberately does not infer user identity from generic agent
+// sessions because session.UserID is not guaranteed to be a platform-derived
+// internal user id outside the gateway runtime.
+type AuditContext struct {
+	Channel        string
+	BindingID      string
+	SessionID      string
+	InternalUserID string
+	UserIDHash     string
+	RequestID      string
+	AgentName      string
+}
+
+// ContextWithAuditContext attaches trusted platform audit context.
+func ContextWithAuditContext(ctx context.Context, auditCtx AuditContext) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, auditContextKey{}, auditCtx)
+}
+
+func auditContextFromContext(ctx context.Context) (AuditContext, bool) {
+	auditCtx, ok := ctx.Value(auditContextKey{}).(AuditContext)
+	return auditCtx, ok
 }
 
 // Option configures Policy.
@@ -599,7 +630,7 @@ func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) error 
 		return nil
 	}
 	detailRef := summary.DetailRef()
-	if err := p.audit.WriteAudit(ctx, platform.AuditRecord{
+	record := platform.AuditRecord{
 		AuditID:           platform.AuditID(summary.TenantID, summary.AppID, summary.ToolName, summary.ToolCallID, string(summary.Decision), detailRef),
 		TenantID:          summary.TenantID,
 		AppID:             summary.AppID,
@@ -609,10 +640,39 @@ func (p *Policy) writeAudit(ctx context.Context, summary ApprovalSummary) error 
 		RedactedDetailRef: detailRef,
 		RedactionVersion:  summary.RedactionVersion,
 		CreatedAt:         summary.CreatedAt,
-	}); err != nil {
+	}
+	applyAuditContext(ctx, &record)
+	if err := record.Validate(); err != nil {
+		return fmt.Errorf("tool policy audit record: %w", err)
+	}
+	if err := p.audit.WriteAudit(ctx, record); err != nil {
 		return fmt.Errorf("write tool policy audit: %w", err)
 	}
 	return nil
+}
+
+func applyAuditContext(ctx context.Context, record *platform.AuditRecord) {
+	if record == nil {
+		return
+	}
+	inv, ok := agent.InvocationFromContext(ctx)
+	if ok && inv != nil {
+		record.RequestID = strings.TrimSpace(inv.RunOptions.RequestID)
+	}
+	if auditCtx, ok := auditContextFromContext(ctx); ok {
+		if requestID := strings.TrimSpace(auditCtx.RequestID); requestID != "" {
+			record.RequestID = requestID
+		}
+		record.Channel = strings.TrimSpace(auditCtx.Channel)
+		record.BindingID = strings.TrimSpace(auditCtx.BindingID)
+		record.SessionID = strings.TrimSpace(auditCtx.SessionID)
+		record.InternalUserID = strings.TrimSpace(auditCtx.InternalUserID)
+		record.UserIDHash = strings.TrimSpace(auditCtx.UserIDHash)
+		record.AgentName = strings.TrimSpace(auditCtx.AgentName)
+	}
+	if spanCtx := oteltrace.SpanContextFromContext(ctx); spanCtx.IsValid() {
+		record.TraceID = spanCtx.TraceID().String()
+	}
 }
 
 // DetailRef returns compact non-secret detail that can be stored in audit logs.
