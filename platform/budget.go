@@ -249,6 +249,24 @@ func (s BudgetUsageSnapshot) Validate() error {
 	if err := validateAuditRedactedText("app_id", s.AppID); err != nil {
 		return err
 	}
+	if err := s.validateUsageValues(); err != nil {
+		return err
+	}
+	quota := s.quota()
+	if err := quota.Validate(); err != nil {
+		return err
+	}
+	estimate, err := s.estimate()
+	if err != nil {
+		return err
+	}
+	if err := s.validateDecision(quota, estimate); err != nil {
+		return err
+	}
+	return s.validateRemaining()
+}
+
+func (s BudgetUsageSnapshot) validateUsageValues() error {
 	if s.PromptTokensUsed < 0 ||
 		s.CompletionTokensUsed < 0 ||
 		s.TotalTokensUsed < 0 {
@@ -265,15 +283,19 @@ func (s BudgetUsageSnapshot) Validate() error {
 	if !isFiniteNonNegative(s.CostRemaining) {
 		return fmt.Errorf("budget cost remaining must be finite and non-negative")
 	}
-	quota := TenantQuota{
+	return nil
+}
+
+func (s BudgetUsageSnapshot) quota() TenantQuota {
+	return TenantQuota{
 		MaxPromptTokens:     s.MaxPromptTokens,
 		MaxCompletionTokens: s.MaxCompletionTokens,
 		MaxTotalTokens:      s.MaxTotalTokens,
 		MaxCost:             s.MaxCost,
 	}
-	if err := quota.Validate(); err != nil {
-		return err
-	}
+}
+
+func (s BudgetUsageSnapshot) estimate() (UsageEstimate, error) {
 	estimate := UsageEstimate{
 		PromptTokens:     s.PromptTokensUsed,
 		CompletionTokens: s.CompletionTokensUsed,
@@ -282,11 +304,15 @@ func (s BudgetUsageSnapshot) Validate() error {
 	}
 	effectiveTotalTokens, err := estimate.effectiveTotalTokens()
 	if err != nil {
-		return err
+		return UsageEstimate{}, err
 	}
 	if s.TotalTokensUsed != effectiveTotalTokens {
-		return fmt.Errorf("total_tokens_used must match effective total tokens")
+		return UsageEstimate{}, fmt.Errorf("total_tokens_used must match effective total tokens")
 	}
+	return estimate, nil
+}
+
+func (s BudgetUsageSnapshot) validateDecision(quota TenantQuota, estimate UsageEstimate) error {
 	expected, err := quota.Check(estimate)
 	if err != nil {
 		return err
@@ -294,6 +320,10 @@ func (s BudgetUsageSnapshot) Validate() error {
 	if s.Decision.Allowed != expected.Allowed || s.Decision.Reason != expected.Reason {
 		return fmt.Errorf("budget snapshot decision does not match quota")
 	}
+	return nil
+}
+
+func (s BudgetUsageSnapshot) validateRemaining() error {
 	if s.PromptTokensRemaining != remainingInt(s.MaxPromptTokens, s.PromptTokensUsed) {
 		return fmt.Errorf("prompt_tokens_remaining does not match quota")
 	}
