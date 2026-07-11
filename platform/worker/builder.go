@@ -21,6 +21,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/platform/gateway"
 	"trpc.group/trpc-go/trpc-agent-go/platform/storagerouter"
+	"trpc.group/trpc-go/trpc-agent-go/platform/toolpolicy"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -44,6 +47,8 @@ type AgentDependencies struct {
 	ToolFilter tool.FilterFunc
 	// ToolPermissionPolicy enforces tool-call authorization before execution.
 	ToolPermissionPolicy tool.PermissionPolicy
+	// Plugins contains runner-scoped plugins assembled by worker governance.
+	Plugins []plugin.Plugin
 }
 
 // AgentFactory builds an agent for one tenant app runtime.
@@ -162,6 +167,10 @@ func (b *RuntimeBuilder) Build(
 	if permissionPolicy != nil {
 		toolFilter = permissionPolicy.ToolFilter()
 	}
+	plugins, err := buildToolGovernancePlugins(resolvedPolicy, auditSink)
+	if err != nil {
+		return gateway.Runtime{}, err
+	}
 
 	dependencies := AgentDependencies{
 		Tenant:               tenant,
@@ -176,6 +185,7 @@ func (b *RuntimeBuilder) Build(
 		ToolPolicy:           resolvedPolicy,
 		ToolFilter:           toolFilter,
 		ToolPermissionPolicy: permissionPolicy,
+		Plugins:              plugins,
 	}
 	ag, err := b.factory.BuildAgent(ctx, dependencies)
 	if err != nil {
@@ -188,6 +198,15 @@ func (b *RuntimeBuilder) Build(
 		return gateway.Runtime{}, ErrAgentNameMismatch
 	}
 
+	runnerOptions := []runner.Option{
+		runner.WithSessionService(sessionService),
+		runner.WithMemoryService(memoryService),
+		runner.WithArtifactService(artifactService),
+	}
+	if len(plugins) > 0 {
+		runnerOptions = append(runnerOptions, runner.WithPlugins(plugins...))
+	}
+
 	runtime := gateway.Runtime{
 		Tenant:  tenant,
 		App:     app,
@@ -195,9 +214,7 @@ func (b *RuntimeBuilder) Build(
 		Runner: runner.NewRunner(
 			storage.Scope().ScopedAppName(app.AppID),
 			ag,
-			runner.WithSessionService(sessionService),
-			runner.WithMemoryService(memoryService),
-			runner.WithArtifactService(artifactService),
+			runnerOptions...,
 		),
 		Audit:                auditSink,
 		ToolFilter:           toolFilter,
@@ -248,6 +265,90 @@ func validateRuntimeConfig(
 		return ErrStorageProfileIDRequired
 	}
 	return nil
+}
+
+func buildToolGovernancePlugins(
+	policy platform.ToolPolicy,
+	auditSink platform.AuditSink,
+) ([]plugin.Plugin, error) {
+	if strings.TrimSpace(policy.PolicyID) == "" {
+		return nil, nil
+	}
+	opts, approvalRequired := toolApprovalOptions(policy)
+	if !approvalRequired {
+		return nil, nil
+	}
+	reviewer, err := toolpolicy.NewReviewer(policy)
+	if err != nil {
+		return nil, fmt.Errorf("build tool approval reviewer: %w", err)
+	}
+	opts = append(
+		opts,
+		approval.WithReviewer(reviewer),
+		approval.WithAuditSink(auditSink),
+		approval.WithApproverUserID("platform-tool-policy-reviewer"),
+	)
+	approvalPlugin, err := approval.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("build tool approval plugin: %w", err)
+	}
+	return []plugin.Plugin{approvalPlugin}, nil
+}
+
+func toolApprovalOptions(policy platform.ToolPolicy) ([]approval.Option, bool) {
+	opts := []approval.Option{
+		approval.WithDefaultToolPolicy(approval.ToolPolicySkipApproval),
+	}
+	if policy.DangerousToolAction != platform.DangerousToolActionAsk {
+		return opts, false
+	}
+	whitelist := normalizedToolNames(policy.ToolWhitelist)
+	denied := normalizedToolNames(policy.ToolDenylist, policy.PlatformDenylist)
+	hasWhitelist := len(whitelist) > 0
+	approvalRequired := false
+	for _, name := range normalizedToolNames(policy.HighRiskTools) {
+		if hasWhitelist && !containsToolName(whitelist, name) {
+			continue
+		}
+		if containsToolName(denied, name) {
+			continue
+		}
+		opts = append(opts, approval.WithToolPolicy(name, approval.ToolPolicyRequireApproval))
+		approvalRequired = true
+	}
+	return opts, approvalRequired
+}
+
+func normalizedToolNames(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, list := range lists {
+		for _, raw := range list {
+			name := strings.TrimSpace(raw)
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func containsToolName(names []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, name := range names {
+		if name == target {
+			return true
+		}
+	}
+	return false
 }
 
 func isNilDependency(value any) bool {

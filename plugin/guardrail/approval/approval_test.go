@@ -223,7 +223,13 @@ func TestBeforeTool_RequireApprovalBuildsRequestFromSession(t *testing.T) {
 		Arguments:   []byte(`{"command":"pwd"}`),
 	})
 	require.NoError(t, err)
-	require.Nil(t, result)
+	require.NotNil(t, result)
+	approvedToolCall, ok := ApprovedToolCallFromContext(result.Context)
+	require.True(t, ok)
+	require.Equal(t, "call-2", approvedToolCall.ToolCallID)
+	require.Equal(t, "shell", approvedToolCall.ToolName)
+	require.NotEmpty(t, approvedToolCall.ArgumentsHash)
+	require.Equal(t, len([]byte(`{"command":"pwd"}`)), approvedToolCall.ArgumentsBytes)
 	require.NotNil(t, captured)
 	require.Equal(t, "shell", captured.Action.ToolName)
 	require.Equal(t, "Runs shell commands.", captured.Action.ToolDescription)
@@ -263,7 +269,13 @@ func TestBeforeTool_ReviewerApprovedLogsInfo(t *testing.T) {
 		Arguments:  []byte(`{"command":"pwd"}`),
 	})
 	require.NoError(t, runErr)
-	require.Nil(t, result)
+	require.NotNil(t, result)
+	approvedToolCall, ok := ApprovedToolCallFromContext(result.Context)
+	require.True(t, ok)
+	require.Equal(t, "call-1", approvedToolCall.ToolCallID)
+	require.Equal(t, "shell", approvedToolCall.ToolName)
+	require.NotEmpty(t, approvedToolCall.ArgumentsHash)
+	require.Equal(t, len([]byte(`{"command":"pwd"}`)), approvedToolCall.ArgumentsBytes)
 	require.Equal(
 		t,
 		"Automatic approval review approved (risk: medium): The action is scoped and user-authorized.",
@@ -304,7 +316,13 @@ func TestBeforeTool_RequireApprovalWritesApprovedAuditRecords(t *testing.T) {
 		Arguments:  []byte(`{"command":"git status --short"}`),
 	})
 	require.NoError(t, runErr)
-	require.Nil(t, result)
+	require.NotNil(t, result)
+	approvedToolCall, ok := ApprovedToolCallFromContext(result.Context)
+	require.True(t, ok)
+	require.Equal(t, "call-1", approvedToolCall.ToolCallID)
+	require.Equal(t, "shell", approvedToolCall.ToolName)
+	require.NotEmpty(t, approvedToolCall.ArgumentsHash)
+	require.Equal(t, len([]byte(`{"command":"git status --short"}`)), approvedToolCall.ArgumentsBytes)
 
 	records := audit.Records()
 	require.Len(t, records, 2)

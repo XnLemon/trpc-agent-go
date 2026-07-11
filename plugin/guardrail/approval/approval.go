@@ -173,7 +173,12 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 					riskLevel,
 					reason,
 				)
-				return nil, nil
+				if strings.TrimSpace(args.ToolCallID) == "" {
+					return nil, nil
+				}
+				return &tool.BeforeToolResult{
+					Context: contextWithApprovedToolCall(ctx, args),
+				}, nil
 			}
 			denyMessage := fmt.Sprintf(
 				"Automatic approval review denied (risk: %s): %s",
