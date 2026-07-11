@@ -91,6 +91,13 @@ func TestNewSecretRotationStatusReportRejectsInvalidInputs(t *testing.T) {
 		t.Fatalf("expected tenant requirement, got %v", err)
 	}
 
+	sensitiveTenant := base
+	sensitiveTenant.TenantID = "tenant Authorization: Bearer raw-token"
+	if _, err := NewSecretRotationStatusReport(sensitiveTenant); err == nil ||
+		!strings.Contains(err.Error(), "tenant_id") {
+		t.Fatalf("expected sensitive tenant rejection, got %v", err)
+	}
+
 	missingResource := base
 	missingResource.ResourceID = " "
 	if _, err := NewSecretRotationStatusReport(missingResource); err == nil ||
@@ -197,6 +204,13 @@ func TestSecretRotationStatusReportValidateRejectsUnsafeReport(t *testing.T) {
 		t.Fatalf("expected report to validate: %v", err)
 	}
 
+	report.TenantID = "tenant Authorization: Bearer raw-token"
+	if err := report.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "tenant_id") {
+		t.Fatalf("expected sensitive tenant rejection, got %v", err)
+	}
+
+	report.TenantID = "tenant"
 	report.NextRef = "postgres://user:password@example.com/db"
 	if err := report.Validate(); !errors.Is(err, ErrInlineSecretRejected) {
 		t.Fatalf("expected unsafe next ref rejection, got %v", err)
