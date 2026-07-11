@@ -276,7 +276,7 @@ func EffectiveWithExternal(
 		ctx = context.Background()
 	}
 	allTools, userToolNames, hasUserToolTracking := ResolveBase(ctx, invocation)
-	allTools, userToolNames, hasUserToolTracking, externalNames :=
+	allTools, userToolNames, _, externalNames :=
 		AppendRunOptionTools(
 			allTools,
 			userToolNames,
