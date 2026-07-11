@@ -274,7 +274,10 @@ func TestServerRunReturnsFailedAgentResultAsHTTP200(t *testing.T) {
 		&model.Response{
 			Object: model.ObjectTypeRunnerCompletion,
 			Done:   true,
-			Error:  &model.ResponseError{Message: "agent failed", Type: model.ErrorTypeRunError},
+			Error: &model.ResponseError{
+				Message: "agent failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+				Type:    model.ErrorTypeRunError,
+			},
 		},
 	)
 	completion.ExecutionTrace = &atrace.Trace{
@@ -299,7 +302,11 @@ func TestServerRunReturnsFailedAgentResultAsHTTP200(t *testing.T) {
 	var response runResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 	assert.Equal(t, atrace.TraceStatusFailed, response.Status)
-	assert.Equal(t, "agent failed", response.ErrorMessage)
+	assert.Contains(t, response.ErrorMessage, "agent failed")
+	assertRedactedServerErrorMessage(t, response.ErrorMessage)
+	require.Len(t, response.Events, 1)
+	require.NotNil(t, response.Events[0].Error)
+	assertRedactedServerErrorMessage(t, response.Events[0].Error.Message)
 	require.NotNil(t, response.ExecutionTrace)
 	assert.Equal(t, atrace.TraceStatusFailed, response.ExecutionTrace.Status)
 }
@@ -340,7 +347,7 @@ func TestServerRunPreservesCompletedTraceWithStopAgentError(t *testing.T) {
 
 func TestServerRunReturnsFailedRunResponseWhenRunnerReturnsError(t *testing.T) {
 	ag := newFakeAgent()
-	ag.runErr = errors.New("agent run failed directly")
+	ag.runErr = errors.New("agent run failed directly Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def")
 	srv, _ := newTestServer(t, ag)
 	path := "/trpc-agent/v1/apps/sports-agent/runs"
 	input := model.NewUserMessage("match_001")
@@ -355,13 +362,25 @@ func TestServerRunReturnsFailedRunResponseWhenRunnerReturnsError(t *testing.T) {
 	var response runResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 	assert.Equal(t, atrace.TraceStatusFailed, response.Status)
-	assert.Equal(t, "agent run failed directly", response.ErrorMessage)
+	assert.Contains(t, response.ErrorMessage, "agent run failed directly")
+	assertRedactedServerErrorMessage(t, response.ErrorMessage)
 	assert.Equal(t, []model.Message{input}, response.Messages)
 	require.Len(t, response.Events, 2)
 	assert.True(t, response.Events[0].IsTerminalError())
 	assert.True(t, response.Events[1].IsRunnerCompletion())
-	assert.Equal(t, "agent run failed directly", response.Events[1].Error.Message)
+	assertRedactedServerErrorMessage(t, response.Events[0].Error.Message)
+	assertRedactedServerErrorMessage(t, response.Events[1].Error.Message)
 	assert.NotEmpty(t, response.Events[1].RequestID)
+}
+
+func assertRedactedServerErrorMessage(t *testing.T, message string) {
+	t.Helper()
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, message, secret)
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		require.Contains(t, message, redacted)
+	}
 }
 
 func TestServerRunReturnsIncompleteRunResponseForContextError(t *testing.T) {
