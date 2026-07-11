@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -725,7 +726,9 @@ type blockingStreamHandler struct{}
 
 type invalidSSEHandler struct{}
 
-type errReader struct{}
+type errReader struct {
+	err error
+}
 
 func (h *streamContentTypeHandler) ServeHTTP(
 	w http.ResponseWriter,
@@ -749,10 +752,18 @@ func (h *invalidSSEHandler) ServeHTTP(
 ) {
 	w.Header().Set(headerContentType, gwproto.SSEContentType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("event: run.started\ndata: {\n\n"))
+	_, _ = w.Write([]byte(
+		"event: run.started\n" +
+			"data: {\"error\":\"Authorization: Bearer raw-token\"," +
+			"\"api_key\":\"sk-testsecret\",\"secret\":\"raw-secret\"," +
+			"\"password\":\"raw-password\",\"cookie\":\"raw-cookie\"\n\n",
+	))
 }
 
 func (r errReader) Read(_ []byte) (int, error) {
+	if r.err != nil {
+		return 0, r.err
+	}
 	return 0, io.ErrUnexpectedEOF
 }
 
@@ -855,6 +866,16 @@ func TestClient_StreamMessage_ParseErrorEmitsRunError(t *testing.T) {
 	require.Contains(t, events[0].Error.Message, "decode stream event")
 }
 
+func requireClientErrorMessageRedacted(t *testing.T, message string) {
+	t.Helper()
+	require.NotContains(t, message, "raw-token")
+	require.NotContains(t, message, "sk-testsecret")
+	require.NotContains(t, message, "raw-secret")
+	require.NotContains(t, message, "raw-password")
+	require.NotContains(t, message, "raw-cookie")
+	require.Contains(t, message, "****")
+}
+
 func TestParseSSEStream_EventFallbackAndErrors(t *testing.T) {
 	t.Parallel()
 
@@ -903,6 +924,19 @@ func TestParseSSEStream_EventFallbackAndErrors(t *testing.T) {
 		make(chan StreamEvent, 1),
 	)
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+	err = parseSSEStream(
+		context.Background(),
+		errReader{err: errors.New(sensitiveClientErrorMessage())},
+		make(chan StreamEvent, 1),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "client stream read failed")
+	requireClientErrorMessageRedacted(t, redactErrorText(err.Error()))
+}
+
+func sensitiveClientErrorMessage() string {
+	return "client stream read failed Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie"
 }
 
 func TestStreamResponseRecorderHelpers(t *testing.T) {

@@ -11,6 +11,7 @@ package openai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -706,6 +707,24 @@ func TestFormatError(t *testing.T) {
 			errorType: "",
 			check: func(t *testing.T, errResp *openAIError) {
 				assert.Equal(t, errorTypeInvalidRequest, errResp.Error.Type)
+			},
+		},
+		{
+			name: "redacts sensitive error message",
+			err: errors.New(
+				"failed Authorization: Bearer raw-token api_key=sk-testsecret " +
+					"token=raw-token secret: raw-secret password=raw-password " +
+					"Cookie: session=raw-cookie",
+			),
+			errorType: errorTypeInternal,
+			check: func(t *testing.T, errResp *openAIError) {
+				assert.Equal(t, errorTypeInternal, errResp.Error.Type)
+				assert.NotContains(t, errResp.Error.Message, "raw-token")
+				assert.NotContains(t, errResp.Error.Message, "sk-testsecret")
+				assert.NotContains(t, errResp.Error.Message, "raw-secret")
+				assert.NotContains(t, errResp.Error.Message, "raw-password")
+				assert.NotContains(t, errResp.Error.Message, "raw-cookie")
+				assert.Contains(t, errResp.Error.Message, "****")
 			},
 		},
 	}

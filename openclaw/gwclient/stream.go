@@ -111,7 +111,7 @@ func (c *Client) streamMessage(
 				Type: gwproto.StreamEventTypeRunError,
 				Error: &APIError{
 					Type:    "internal_error",
-					Message: err.Error(),
+					Message: redactErrorText(err.Error()),
 				},
 			}:
 			case <-ctx.Done():
