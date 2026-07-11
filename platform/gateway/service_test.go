@@ -956,6 +956,147 @@ func TestServiceHandleInboundSkipsFileLimitWhenChannelLimitUnset(t *testing.T) {
 	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
 }
 
+func TestServiceHandleInboundRejectsDisallowedMIMEBeforeIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.AllowedMIMETypes = []string{"image/png"}
+	require.NoError(t, registry.Register(runtime))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		idempotency,
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/pdf",
+			SizeBytes: 10,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrMIMETypeNotAllowed)
+	assert.Empty(t, r.calls)
+	_, ok, getErr := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrMIMETypeNotAllowed.Error(), audit.Records()[0].DecisionReason)
+	assert.NotContains(t, audit.Records()[0].DecisionReason, "application/pdf")
+}
+
+func TestServiceHandleInboundRejectsMissingMIMEWhenAllowlistConfigured(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.AllowedMIMETypes = []string{" ", "image/png"}
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "",
+			SizeBytes: 10,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrMIMETypeNotAllowed)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrMIMETypeNotAllowed.Error(), audit.Records()[0].DecisionReason)
+}
+
+func TestServiceHandleInboundAllowsMIMECaseInsensitiveBeforeUnsupportedFile(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.AllowedMIMETypes = []string{" Application/PDF "}
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/pdf",
+			SizeBytes: 10,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrUnsupportedMessageType)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
+}
+
+func TestServiceHandleInboundSkipsMIMEFilterWhenAllowlistUnset(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.AllowedMIMETypes = nil
+	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.MessageType = platform.MessageTypeFile
+	msg.ContentParts = []platform.ContentPart{
+		{
+			Type:      platform.ContentPartTypeFile,
+			FileRef:   "artifact://file@1",
+			MIMEType:  "application/x-custom",
+			SizeBytes: 10,
+		},
+	}
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, ErrUnsupportedMessageType)
+	assert.Empty(t, r.calls)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrUnsupportedMessageType.Error(), audit.Records()[0].DecisionReason)
+}
+
 func TestServiceHandleInboundRejectsRateLimitedBeforeBudgetAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()

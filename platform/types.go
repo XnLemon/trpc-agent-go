@@ -293,6 +293,7 @@ type ChannelLimits struct {
 	MaxTextLength      int
 	CallbackACKTimeout time.Duration
 	FileMaxBytes       int64
+	AllowedMIMETypes   []string
 	RateLimitQPS       int
 	Burst              int
 	SupportsAsyncReply bool

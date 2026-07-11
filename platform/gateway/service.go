@@ -974,18 +974,41 @@ func validateTextLimit(text string, limits platform.ChannelLimits) error {
 }
 
 func validateFileLimits(msg platform.InboundMessage, limits platform.ChannelLimits) error {
-	if limits.FileMaxBytes <= 0 {
+	if limits.FileMaxBytes <= 0 && len(limits.AllowedMIMETypes) == 0 {
 		return nil
 	}
 	for _, part := range msg.ContentParts {
 		if !contentPartHasFile(part) {
 			continue
 		}
-		if part.SizeBytes > limits.FileMaxBytes {
+		if limits.FileMaxBytes > 0 && part.SizeBytes > limits.FileMaxBytes {
 			return ErrFileTooLarge
+		}
+		if !mimeTypeAllowed(part.MIMEType, limits.AllowedMIMETypes) {
+			return ErrMIMETypeNotAllowed
 		}
 	}
 	return nil
+}
+
+func mimeTypeAllowed(mimeType string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if mimeType == "" {
+		return false
+	}
+	for _, candidate := range allowed {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if candidate == mimeType {
+			return true
+		}
+	}
+	return false
 }
 
 func contentPartHasFile(part platform.ContentPart) bool {
@@ -1286,6 +1309,7 @@ var traceErrorTypes = []struct {
 	{ErrEmptyText, "empty_text"},
 	{ErrTextTooLong, "text_too_long"},
 	{ErrFileTooLarge, "file_too_large"},
+	{ErrMIMETypeNotAllowed, "mime_type_not_allowed"},
 	{ErrRateLimited, "rate_limited"},
 	{ErrBudgetExceeded, "budget_exceeded"},
 	{ErrRunnerResponseEmpty, "runner_response_empty"},
