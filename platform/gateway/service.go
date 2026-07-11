@@ -1342,7 +1342,31 @@ func (s *Service) writeAuditTo(
 	if isNilInterfaceValue(auditSink) {
 		return
 	}
+	if err := record.Validate(); err != nil {
+		if !isAuditRedactionFailure(err) {
+			return
+		}
+		record = redactionFailedAuditRecord(record, err)
+	}
 	_ = auditSink.WriteAudit(ctx, record)
+}
+
+func isAuditRedactionFailure(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "contains unredacted sensitive content")
+}
+
+func redactionFailedAuditRecord(record platform.AuditRecord, err error) platform.AuditRecord {
+	return platform.AuditRecord{
+		AuditID:           platform.AuditID(record.TenantID, record.AppID, record.RequestID, record.TraceID, record.MessageID, "redaction_failed"),
+		TenantID:          record.TenantID,
+		AppID:             record.AppID,
+		Decision:          "redaction_failed",
+		DecisionReason:    "audit redaction failed",
+		ErrorType:         "redaction_failed",
+		RedactedDetailRef: "failed_audit:" + platform.AuditID(record.AuditID, record.ToolName, record.Decision, fmt.Sprintf("%T", err)),
+		RedactionVersion:  "platform-gateway-redaction-failed-v1",
+		CreatedAt:         record.CreatedAt,
+	}
 }
 
 func (s *Service) auditSinkForRuntime(runtime Runtime) platform.AuditSink {
