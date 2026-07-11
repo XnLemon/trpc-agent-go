@@ -1355,7 +1355,14 @@ func (s *Service) writeAuditTo(
 		}
 		record = redactionFailedAuditRecord(record, err)
 	}
-	_ = auditSink.WriteAudit(ctx, record)
+	if err := auditSink.WriteAudit(ctx, record); err != nil {
+		itelemetry.ReportAuditWriteFailedMetrics(ctx, itelemetry.AuditAttributes{
+			TenantID: record.TenantID,
+			AppName:  record.AppID,
+			Decision: record.Decision,
+			Error:    err,
+		})
+	}
 }
 
 func isAuditRedactionFailure(err error) bool {

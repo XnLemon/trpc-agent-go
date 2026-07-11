@@ -120,7 +120,7 @@ func TestRuntimeBuilderRunsApprovalPluginBeforeMandatoryPolicy(t *testing.T) {
 		DangerousToolAction: platform.DangerousToolActionAsk,
 	}
 	var captured AgentDependencies
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			_ context.Context,
@@ -235,7 +235,7 @@ func TestRuntimeBuilderRunsApprovalPluginForMetadataRisk(t *testing.T) {
 		DangerousToolAction: platform.DangerousToolActionAsk,
 	}
 	var captured AgentDependencies
-	builder, err := NewRuntimeBuilder(
+	builder, err := NewRuntimeBuilderWithOptions(
 		router,
 		AgentFactoryFunc(func(
 			_ context.Context,

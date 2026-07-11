@@ -60,6 +60,8 @@ const (
 	KeyTRPCAgentGoMemorySearchDeduplicate = "trpc.go.agent.memory.search.deduplicate"
 	// KeyTRPCAgentGoMemoryWriteOperation is the memory write operation type.
 	KeyTRPCAgentGoMemoryWriteOperation = "trpc.go.agent.memory.write.operation"
+	// KeyTRPCAgentGoAuditDecision is the audit record decision.
+	KeyTRPCAgentGoAuditDecision = "trpc.go.agent.audit.decision"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"

@@ -118,6 +118,9 @@ func InitMeterProvider(mp metric.MeterProvider) error {
 	if err := initToolApprovalMetrics(mp); err != nil {
 		return err
 	}
+	if err := initAuditMetrics(mp); err != nil {
+		return err
+	}
 	if err := initInvokeAgentMetrics(mp); err != nil {
 		return err
 	}
@@ -214,6 +217,24 @@ func initToolApprovalMetrics(mp metric.MeterProvider) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricToolApprovalRequiredTotal, err)
+	}
+	return nil
+}
+
+func initAuditMetrics(mp metric.MeterProvider) error {
+	if mp == nil {
+		return fmt.Errorf("audit meter provider is nil")
+	}
+	meterName := metrics.MeterNameAudit
+	itelemetry.AuditMeter = mp.Meter(meterName)
+	var err error
+	itelemetry.AuditMetricWriteFailedTotal, err = itelemetry.AuditMeter.Int64Counter(
+		metrics.MetricAuditWriteFailedTotal,
+		metric.WithDescription("Total number of failed audit sink writes"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricAuditWriteFailedTotal, err)
 	}
 	return nil
 }

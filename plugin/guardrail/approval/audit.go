@@ -120,7 +120,16 @@ func (p *Plugin) writeApprovalAudit(
 	if err != nil {
 		return err
 	}
-	return p.auditSink.WriteAudit(ctx, record)
+	if err := p.auditSink.WriteAudit(ctx, record); err != nil {
+		itelemetry.ReportAuditWriteFailedMetrics(ctx, itelemetry.AuditAttributes{
+			TenantID: record.TenantID,
+			AppName:  record.AppID,
+			Decision: record.Decision,
+			Error:    err,
+		})
+		return err
+	}
+	return nil
 }
 
 func reportApprovalRequiredMetric(ctx context.Context, args *tool.BeforeToolArgs) {

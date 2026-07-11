@@ -16,14 +16,20 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	"trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/metrics"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -590,9 +596,14 @@ func TestPolicyRejectsMissingRuntimeIdentity(t *testing.T) {
 }
 
 func TestPolicyReturnsAuditSinkErrors(t *testing.T) {
+	reader, restore := usePolicyAuditMetrics(t)
+	defer restore()
+
 	p := newPolicy(
 		t,
 		platform.ToolPolicy{
+			TenantID:            "tenant",
+			AppID:               "app",
 			DangerousToolAction: platform.DangerousToolActionAllowWithAudit,
 			HighRiskTools:       []string{"http_post"},
 		},
@@ -606,6 +617,14 @@ func TestPolicyReturnsAuditSinkErrors(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "write tool policy audit") {
 		t.Fatalf("expected audit sink error, got %v", err)
 	}
+
+	points := collectPolicyAuditWriteFailedPoints(t, reader)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requirePolicyAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationAuditWrite)
+	requirePolicyAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant")
+	requirePolicyAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requirePolicyAuditMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAuditDecision, string(tool.PermissionActionAllow))
 }
 
 func TestApprovalOptionsMapPolicy(t *testing.T) {
@@ -906,4 +925,58 @@ type failingAuditSink struct{}
 
 func (failingAuditSink) WriteAudit(context.Context, platform.AuditRecord) error {
 	return errors.New("audit unavailable")
+}
+
+func usePolicyAuditMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.AuditMeter
+	originalCounter := itelemetry.AuditMetricWriteFailedTotal
+
+	itelemetry.MeterProvider = provider
+	itelemetry.AuditMeter = provider.Meter(metrics.MeterNameAudit)
+	var err error
+	itelemetry.AuditMetricWriteFailedTotal, err = itelemetry.AuditMeter.Int64Counter(metrics.MetricAuditWriteFailedTotal)
+	require.NoError(t, err)
+
+	return reader, func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.AuditMeter = originalMeter
+		itelemetry.AuditMetricWriteFailedTotal = originalCounter
+	}
+}
+
+func collectPolicyAuditWriteFailedPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricAuditWriteFailedTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metrics.MetricAuditWriteFailedTotal)
+	return nil
+}
+
+func requirePolicyAuditMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			require.Equal(t, value, kv.Value.AsString())
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
 }
