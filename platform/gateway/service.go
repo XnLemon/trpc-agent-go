@@ -186,7 +186,7 @@ func (s *Service) HandleInbound(
 		return Result{}, err
 	}
 	auditSink := s.auditSinkForRuntime(runtime)
-	text, err := s.validateInboundContent(ctx, routeSpan, msg, start, auditSink)
+	text, err := s.validateInboundContent(ctx, routeSpan, runtime, msg, start, auditSink)
 	if err != nil {
 		return Result{}, err
 	}
@@ -429,12 +429,18 @@ func validateRuntimeForMessage(runtime Runtime, msg platform.InboundMessage) err
 func (s *Service) validateInboundContent(
 	ctx context.Context,
 	routeSpan oteltrace.Span,
+	runtime Runtime,
 	msg platform.InboundMessage,
 	start time.Time,
 	auditSink platform.AuditSink,
 ) (string, error) {
 	text, err := inboundText(msg)
 	if err != nil {
+		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		return "", err
+	}
+	if err := validateTextLimit(text, runtime.Binding.ChannelLimits); err != nil {
 		s.writeRejectAuditTo(ctx, auditSink, msg, start, err)
 		recordSpanError(routeSpan, err)
 		return "", err
@@ -881,6 +887,16 @@ func inboundText(msg platform.InboundMessage) (string, error) {
 	return text, nil
 }
 
+func validateTextLimit(text string, limits platform.ChannelLimits) error {
+	if limits.MaxTextLength <= 0 {
+		return nil
+	}
+	if len([]rune(text)) > limits.MaxTextLength {
+		return ErrTextTooLong
+	}
+	return nil
+}
+
 func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, error) {
 	output, err := collectAssistantOutput(ctx, ch)
 	if err != nil {
@@ -1165,6 +1181,7 @@ var traceErrorTypes = []struct {
 	{ErrBindingMentionRequired, "binding_mention_required"},
 	{ErrUnsupportedMessageType, "unsupported_message_type"},
 	{ErrEmptyText, "empty_text"},
+	{ErrTextTooLong, "text_too_long"},
 	{ErrBudgetExceeded, "budget_exceeded"},
 	{ErrRunnerResponseEmpty, "runner_response_empty"},
 }
