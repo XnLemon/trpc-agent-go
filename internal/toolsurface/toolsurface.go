@@ -287,7 +287,6 @@ func EffectiveWithExternal(
 			userToolNames,
 			externalNames,
 		)
-	hasUserToolTracking = userToolNames != nil
 	allTools, userToolNames, externalNames = ApplyMandatoryToolFilter(
 		ctx,
 		allTools,

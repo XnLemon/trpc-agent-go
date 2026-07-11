@@ -4493,14 +4493,16 @@ func runToolWithEventContexts(
 	)
 	completeInvocation = invocationFromContextOrFallback(ctx, completeInvocation)
 	if err != nil {
-		if customResult != nil {
-			return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, err
-		}
-		var interruptErr *InterruptError
-		if errors.As(err, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, err
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments, err
+		return toolCallbackErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			customResult,
+			toolCall.Function.Arguments,
+			err,
+		)
 	}
 	if customResult != nil {
 		return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, nil
@@ -4516,28 +4518,70 @@ func runToolWithEventContexts(
 	)
 	completeInvocation = invocationFromContextOrFallback(ctx, completeInvocation)
 	if err != nil {
-		if customResult != nil {
-			return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, err
-		}
-		var interruptErr *InterruptError
-		if errors.As(err, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, err
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments, err
+		return toolCallbackErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			customResult,
+			toolCall.Function.Arguments,
+			err,
+		)
 	}
 	if customResult != nil {
 		return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, nil
 	}
 
 	if toolErr != nil {
-		var interruptErr *InterruptError
-		if errors.As(toolErr, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, toolErr
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments,
-			fmt.Errorf("tool %s call failed: %w", toolCall.Function.Name, toolErr)
+		return toolRunErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			toolCall,
+			toolErr,
+		)
 	}
 	return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, nil
+}
+
+func toolCallbackErrorResult(
+	startCtx context.Context,
+	startInvocation *agent.Invocation,
+	completeCtx context.Context,
+	completeInvocation *agent.Invocation,
+	result any,
+	customResult any,
+	modifiedArgs []byte,
+	err error,
+) (context.Context, *agent.Invocation, context.Context, *agent.Invocation, any, []byte, error) {
+	if customResult != nil {
+		return startCtx, startInvocation, completeCtx, completeInvocation, customResult, modifiedArgs, err
+	}
+	var interruptErr *InterruptError
+	if errors.As(err, &interruptErr) {
+		return startCtx, startInvocation, completeCtx, completeInvocation, result, modifiedArgs, err
+	}
+	return startCtx, startInvocation, completeCtx, completeInvocation, nil, modifiedArgs, err
+}
+
+func toolRunErrorResult(
+	startCtx context.Context,
+	startInvocation *agent.Invocation,
+	completeCtx context.Context,
+	completeInvocation *agent.Invocation,
+	result any,
+	toolCall model.ToolCall,
+	err error,
+) (context.Context, *agent.Invocation, context.Context, *agent.Invocation, any, []byte, error) {
+	var interruptErr *InterruptError
+	if errors.As(err, &interruptErr) {
+		return startCtx, startInvocation, completeCtx, completeInvocation, result, toolCall.Function.Arguments, err
+	}
+	return startCtx, startInvocation, completeCtx, completeInvocation, nil, toolCall.Function.Arguments,
+		fmt.Errorf("tool %s call failed: %w", toolCall.Function.Name, err)
 }
 
 func agentToolGraphRuntimeContext(

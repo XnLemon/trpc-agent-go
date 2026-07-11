@@ -1991,7 +1991,7 @@ func (f *Flow) getFilteredTools(
 		hasUserToolTracking,
 		userToolNames,
 	)
-	allTools, userToolNames, hasUserToolTracking, externalToolNames :=
+	allTools, userToolNames, _, externalToolNames :=
 		toolsurface.AppendRunOptionTools(
 			allTools,
 			userToolNames,
@@ -2023,7 +2023,6 @@ func (f *Flow) getFilteredTools(
 				userToolNames,
 				externalToolNames,
 			)
-		hasUserToolTracking = userToolNames != nil
 	}
 	allTools, userToolNames, externalToolNames =
 		toolsurface.ApplyMandatoryToolFilter(
