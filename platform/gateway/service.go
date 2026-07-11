@@ -414,6 +414,14 @@ func (s *Service) checkRateLimit(
 	if allowed {
 		return nil
 	}
+	itelemetry.ReportGatewayRateLimitedMetrics(
+		ctx,
+		itelemetry.GatewayRateLimitedAttributes{
+			TenantID: runtime.Tenant.TenantID,
+			AppName:  runtime.App.AppID,
+			Channel:  msg.Channel,
+		},
+	)
 	s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, ErrRateLimited, auditContext)
 	recordSpanError(routeSpan, ErrRateLimited)
 	return ErrRateLimited

@@ -24,6 +24,8 @@ var (
 
 	// GatewayMetricBudgetDeniedTotal records gateway requests denied by budget checks.
 	GatewayMetricBudgetDeniedTotal metric.Int64Counter
+	// GatewayMetricRateLimitedTotal records inbound IM messages rejected by gateway rate limits.
+	GatewayMetricRateLimitedTotal metric.Int64Counter
 )
 
 // GatewayBudgetDeniedAttributes is the attributes for gateway budget denial metrics.
@@ -32,6 +34,13 @@ type GatewayBudgetDeniedAttributes struct {
 	AppName  string
 	Channel  string
 	Reason   string
+}
+
+// GatewayRateLimitedAttributes is the attributes for gateway rate limit metrics.
+type GatewayRateLimitedAttributes struct {
+	TenantID string
+	AppName  string
+	Channel  string
 }
 
 func (a GatewayBudgetDeniedAttributes) toAttributes() []attribute.KeyValue {
@@ -54,10 +63,35 @@ func (a GatewayBudgetDeniedAttributes) toAttributes() []attribute.KeyValue {
 	return attrs
 }
 
+func (a GatewayRateLimitedAttributes) toAttributes() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{
+		attribute.String(semconvtrace.KeyGenAIOperationName, OperationGatewayRateLimit),
+		attribute.String(semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent),
+	}
+	if a.TenantID != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoTenantID, a.TenantID))
+	}
+	if a.AppName != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoAppName, a.AppName))
+	}
+	if a.Channel != "" {
+		attrs = append(attrs, attribute.String(semconvtrace.KeyTRPCAgentGoChannel, a.Channel))
+	}
+	return attrs
+}
+
 // ReportGatewayBudgetDeniedMetrics reports a gateway request denied by budget checks.
 func ReportGatewayBudgetDeniedMetrics(ctx context.Context, attrs GatewayBudgetDeniedAttributes) {
 	if GatewayMetricBudgetDeniedTotal == nil {
 		return
 	}
 	GatewayMetricBudgetDeniedTotal.Add(ctx, 1, metric.WithAttributes(attrs.toAttributes()...))
+}
+
+// ReportGatewayRateLimitedMetrics reports an inbound IM message rejected by gateway rate limits.
+func ReportGatewayRateLimitedMetrics(ctx context.Context, attrs GatewayRateLimitedAttributes) {
+	if GatewayMetricRateLimitedTotal == nil {
+		return
+	}
+	GatewayMetricRateLimitedTotal.Add(ctx, 1, metric.WithAttributes(attrs.toAttributes()...))
 }
