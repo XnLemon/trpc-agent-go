@@ -1060,6 +1060,56 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	assert.Equal(t, result.Outbound.TraceID, events[1].TraceID)
 }
 
+func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{
+		response: "usage reply",
+		usage: &model.Usage{
+			PromptTokens:     11,
+			CompletionTokens: 7,
+			TotalTokens:      18,
+			PromptTokensDetails: model.PromptTokensDetails{
+				CachedTokens: 3,
+			},
+		},
+	}
+	runtime := validRuntime("tenant-a", r)
+	runtime.App.ModelProfileID = "profile-gpt"
+	require.NoError(t, registry.Register(runtime))
+	usageSink := platform.NewInMemoryUsageSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithUsageSink(usageSink),
+	)
+	msg := inbound("tenant-a", "msg-1", "external-user-raw", "hello")
+	msg.TraceContext = map[string]string{"request_id": "req-usage"}
+
+	result, err := svc.HandleInbound(ctx, msg)
+
+	require.NoError(t, err)
+	assert.Equal(t, "usage reply", result.Outbound.Content)
+	records := usageSink.Records()
+	require.Len(t, records, 1)
+	record := records[0]
+	assert.Equal(t, "tenant-a", record.TenantID)
+	assert.Equal(t, "app", record.AppID)
+	assert.Equal(t, platform.UserIDHash("tenant-a", "wecom", "external-user-raw"), record.UserIDHash)
+	assert.Equal(t, result.SessionID, record.SessionID)
+	assert.Equal(t, "req-usage", record.RequestID)
+	assert.Equal(t, "profile-gpt", record.ModelName)
+	assert.Equal(t, 11, record.PromptTokens)
+	assert.Equal(t, 7, record.CompletionTokens)
+	assert.Equal(t, 3, record.CachedTokens)
+	assert.Equal(t, "req-usage", record.TraceID)
+	assert.False(t, record.CreatedAt.IsZero())
+	assert.Zero(t, record.ModelCost)
+	assert.Zero(t, record.ToolCost)
+	assert.Zero(t, record.TotalCost)
+}
+
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
 	recorder := useGatewaySpanRecorder(t)
 	ctx := context.Background()
@@ -1431,6 +1481,7 @@ type runnerCall struct {
 type recordingRunner struct {
 	response string
 	chunks   []string
+	usage    *model.Usage
 	runErr   error
 	calls    []runnerCall
 }
@@ -1480,11 +1531,19 @@ func (r *recordingRunner) Run(
 		defer close(out)
 		if len(r.chunks) > 0 {
 			for i, chunk := range r.chunks {
-				out <- chunkEvent(chunk, i != len(r.chunks)-1)
+				evt := chunkEvent(chunk, i != len(r.chunks)-1)
+				if i == len(r.chunks)-1 && r.usage != nil {
+					evt.Response.Usage = r.usage
+				}
+				out <- evt
 			}
 			return
 		}
-		out <- responseEvent(r.response, true)
+		evt := responseEvent(r.response, true)
+		if r.usage != nil {
+			evt.Response.Usage = r.usage
+		}
+		out <- evt
 	}()
 	return out, nil
 }

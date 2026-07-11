@@ -37,6 +37,7 @@ type Service struct {
 	leaseStore       SessionLeaseStore
 	auditSink        platform.AuditSink
 	messageEventSink platform.MessageEventSink
+	usageSink        platform.UsageSink
 	budgetEstimator  BudgetEstimator
 	now              func() time.Time
 }
@@ -90,6 +91,13 @@ func WithAuditSink(sink platform.AuditSink) Option {
 func WithMessageEventSink(sink platform.MessageEventSink) Option {
 	return func(s *Service) {
 		s.messageEventSink = sink
+	}
+}
+
+// WithUsageSink sets the usage sink used for post-run accounting records.
+func WithUsageSink(sink platform.UsageSink) Option {
+	return func(s *Service) {
+		s.usageSink = sink
 	}
 }
 
@@ -259,6 +267,11 @@ type inboundRunInput struct {
 	Key            string
 	FencingToken   int64
 	Start          time.Time
+}
+
+type runnerOutput struct {
+	Content string
+	Usage   *model.Usage
 }
 
 func (s *Service) lookupRuntime(
@@ -550,7 +563,7 @@ func (s *Service) runAndReply(
 	msg platform.InboundMessage,
 	input inboundRunInput,
 ) (Result, error) {
-	content, err := s.runGatewayRunner(
+	output, err := s.runGatewayRunner(
 		routeCtx,
 		auditCtx,
 		runtime,
@@ -561,15 +574,20 @@ func (s *Service) runAndReply(
 	if err != nil {
 		return Result{}, err
 	}
-	return s.writeReply(
+	result, err := s.writeReply(
 		routeCtx,
 		auditCtx,
 		runtime,
 		auditSink,
 		msg,
 		input,
-		content,
+		output.Content,
 	)
+	if err != nil {
+		return Result{}, err
+	}
+	s.writeUsageRecord(auditCtx, runtime, msg, input, output.Usage)
+	return result, nil
 }
 
 func (s *Service) runGatewayRunner(
@@ -579,7 +597,7 @@ func (s *Service) runGatewayRunner(
 	auditSink platform.AuditSink,
 	msg platform.InboundMessage,
 	input inboundRunInput,
-) (string, error) {
+) (runnerOutput, error) {
 	runnerCtx, runnerSpan := telemetrytrace.Tracer.Start(routeCtx, "runner.run")
 	defer runnerSpan.End()
 	runnerCtx = platform.ContextWithStorageFencingToken(runnerCtx, input.FencingToken)
@@ -616,15 +634,41 @@ func (s *Service) runGatewayRunner(
 	if err != nil {
 		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
-		return "", err
+		return runnerOutput{}, err
 	}
-	content, err := collectAssistantText(auditCtx, ch)
+	output, err := collectAssistantOutput(auditCtx, ch)
 	if err != nil {
 		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
-		return "", err
+		return runnerOutput{}, err
 	}
-	return content, nil
+	return output, nil
+}
+
+func (s *Service) writeUsageRecord(
+	ctx context.Context,
+	runtime Runtime,
+	msg platform.InboundMessage,
+	input inboundRunInput,
+	usage *model.Usage,
+) {
+	if isNilInterfaceValue(s.usageSink) || usage == nil {
+		return
+	}
+	record := platform.UsageRecord{
+		TenantID:         runtime.Tenant.TenantID,
+		AppID:            runtime.App.AppID,
+		UserIDHash:       platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID),
+		SessionID:        input.SessionID,
+		RequestID:        input.RequestID,
+		ModelName:        runtime.App.ModelProfileID,
+		PromptTokens:     usage.PromptTokens,
+		CompletionTokens: usage.CompletionTokens,
+		CachedTokens:     usage.PromptTokensDetails.CachedTokens,
+		TraceID:          input.RequestID,
+		CreatedAt:        s.now(),
+	}
+	_ = s.usageSink.WriteUsage(ctx, record)
 }
 
 func (s *Service) writeReply(
@@ -823,13 +867,22 @@ func inboundText(msg platform.InboundMessage) (string, error) {
 }
 
 func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, error) {
+	output, err := collectAssistantOutput(ctx, ch)
+	if err != nil {
+		return "", err
+	}
+	return output.Content, nil
+}
+
+func collectAssistantOutput(ctx context.Context, ch <-chan *event.Event) (runnerOutput, error) {
 	var parts []string
 	var final string
+	var usage *model.Usage
 	for {
 		var evt *event.Event
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return runnerOutput{}, ctx.Err()
 		case next, ok := <-ch:
 			if !ok {
 				goto done
@@ -839,8 +892,11 @@ func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, 
 		if evt == nil || evt.Response == nil {
 			continue
 		}
+		if evt.Response.Usage != nil {
+			usage = evt.Response.Usage
+		}
 		if evt.IsTerminalError() {
-			return "", evt.Response.Error
+			return runnerOutput{}, evt.Response.Error
 		}
 		if evt.IsRunnerCompletion() {
 			break
@@ -864,13 +920,13 @@ func collectAssistantText(ctx context.Context, ch <-chan *event.Event) (string, 
 	}
 done:
 	if strings.TrimSpace(final) != "" {
-		return strings.TrimSpace(final), nil
+		return runnerOutput{Content: strings.TrimSpace(final), Usage: usage}, nil
 	}
 	content := strings.TrimSpace(strings.Join(parts, ""))
 	if content == "" {
-		return "", ErrRunnerResponseEmpty
+		return runnerOutput{}, ErrRunnerResponseEmpty
 	}
-	return content, nil
+	return runnerOutput{Content: content, Usage: usage}, nil
 }
 
 func requestIDFor(msg platform.InboundMessage) string {
