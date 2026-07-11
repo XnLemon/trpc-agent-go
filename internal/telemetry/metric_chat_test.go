@@ -102,6 +102,7 @@ func TestChatMetricsTracker_TrackResponse_ReasoningDuration_UsesLazyNow(t *testi
 	require.True(t, tracker.isFirstToken, "expected empty chunk to be ignored for TTFT")
 	require.Zero(t, tracker.firstTokenTimeDuration, "expected TTFT to remain unset after empty chunk")
 
+	time.Sleep(time.Millisecond)
 	tracker.TrackResponse(&model.Response{
 		Choices: []model.Choice{
 			{

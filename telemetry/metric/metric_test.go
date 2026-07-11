@@ -294,8 +294,12 @@ func TestInitMeterProvider(t *testing.T) {
 
 	// Save original meter provider
 	originalMP := itelemetry.MeterProvider
+	originalToolApprovalMeter := itelemetry.ToolApprovalMeter
+	originalToolApprovalRequired := itelemetry.ToolApprovalMetricRequiredTotal
 	defer func() {
 		itelemetry.MeterProvider = originalMP
+		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
+		itelemetry.ToolApprovalMetricRequiredTotal = originalToolApprovalRequired
 	}()
 
 	// Create a test meter provider
@@ -351,6 +355,12 @@ func TestInitMeterProvider(t *testing.T) {
 	if itelemetry.ExecuteToolMetricGenAIClientOperationDuration == nil {
 		t.Error("ExecuteToolMetricGenAIClientOperationDuration was not created")
 	}
+	if itelemetry.ToolApprovalMeter == nil {
+		t.Error("ToolApprovalMeter was not created")
+	}
+	if itelemetry.ToolApprovalMetricRequiredTotal == nil {
+		t.Error("ToolApprovalMetricRequiredTotal was not created")
+	}
 	if itelemetry.WorkflowMeter == nil {
 		t.Error("WorkflowMeter was not created")
 	}
@@ -387,6 +397,31 @@ func TestInitMeterProvider_WorkflowMetricError(t *testing.T) {
 		t.Fatalf("expected workflow metric initialization error")
 	}
 	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.workflow metric gen_ai.client.operation.duration") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInitToolApprovalMetrics_ErrorHandling(t *testing.T) {
+	originalToolApprovalMeter := itelemetry.ToolApprovalMeter
+	originalToolApprovalRequired := itelemetry.ToolApprovalMetricRequiredTotal
+	defer func() {
+		itelemetry.ToolApprovalMeter = originalToolApprovalMeter
+		itelemetry.ToolApprovalMetricRequiredTotal = originalToolApprovalRequired
+	}()
+
+	if err := initToolApprovalMetrics(nil); err == nil || !strings.Contains(err.Error(), "tool approval meter provider is nil") {
+		t.Fatalf("expected nil provider error, got %v", err)
+	}
+
+	mp := &mockMeterProvider{meter: &mockMeter{
+		shouldFail: true,
+		failOn:     metrics.MetricToolApprovalRequiredTotal,
+	}}
+	err := initToolApprovalMetrics(mp)
+	if err == nil {
+		t.Fatalf("expected tool approval counter creation error")
+	}
+	if !strings.Contains(err.Error(), "failed to create trpc_agent_go.internal.tool_approval metric tool_approval_required_total") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

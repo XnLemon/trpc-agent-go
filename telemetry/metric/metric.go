@@ -115,6 +115,9 @@ func InitMeterProvider(mp metric.MeterProvider) error {
 		return fmt.Errorf("failed to create execute tool metric GenAIClientOperationDuration: %w", err)
 	}
 
+	if err := initToolApprovalMetrics(mp); err != nil {
+		return err
+	}
 	if err := initInvokeAgentMetrics(mp); err != nil {
 		return err
 	}
@@ -195,6 +198,24 @@ func setExecuteToolHistogramBuckets(metricName string, boundaries []float64) err
 	default:
 		return fmt.Errorf("unknown or unsupported execute tool histogram metric: %s", metricName)
 	}
+}
+
+func initToolApprovalMetrics(mp metric.MeterProvider) error {
+	if mp == nil {
+		return fmt.Errorf("tool approval meter provider is nil")
+	}
+	meterName := metrics.MeterNameToolApproval
+	itelemetry.ToolApprovalMeter = mp.Meter(meterName)
+	var err error
+	itelemetry.ToolApprovalMetricRequiredTotal, err = itelemetry.ToolApprovalMeter.Int64Counter(
+		metrics.MetricToolApprovalRequiredTotal,
+		metric.WithDescription("Total number of tool calls requiring explicit approval"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricToolApprovalRequiredTotal, err)
+	}
+	return nil
 }
 
 func setInvokeAgentHistogramBuckets(metricName string, boundaries []float64) error {

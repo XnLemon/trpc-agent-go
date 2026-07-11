@@ -128,6 +128,7 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 					CustomResult: fmt.Sprintf("approval audit failed for tool %q: %v", args.ToolName, err),
 				}, nil
 			}
+			reportApprovalRequiredMetric(ctx, args)
 			decision, err := p.reviewer.Review(ctx, req)
 			if err != nil {
 				log.ErrorfContext(

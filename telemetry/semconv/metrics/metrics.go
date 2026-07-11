@@ -59,6 +59,8 @@ const (
 
 	// MetricTRPCAgentGoClientRequestCnt represents the request count for client.
 	MetricTRPCAgentGoClientRequestCnt = "trpc_agent_go.client.request_cnt"
+	// MetricToolApprovalRequiredTotal records tool calls that require explicit approval.
+	MetricToolApprovalRequiredTotal = "tool_approval_required_total"
 
 	////////////////////////// server ////////////////////////
 
@@ -79,4 +81,6 @@ const (
 	MeterNameWorkflow = "trpc_agent_go.internal.workflow"
 	// MeterNameInvokeAgent is the meter name for invoke agent operations.
 	MeterNameInvokeAgent = "trpc_agent_go.internal.invoke_agent"
+	// MeterNameToolApproval is the meter name for tool approval operations.
+	MeterNameToolApproval = "trpc_agent_go.internal.tool_approval"
 )
