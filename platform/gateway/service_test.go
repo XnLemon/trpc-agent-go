@@ -1976,11 +1976,16 @@ func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
 		}`,
 	}
 	require.NoError(t, registry.Register(runtime))
+	audit := platform.NewInMemoryAuditSink()
+	messageEvents := platform.NewInMemoryMessageEventSink()
+	outbox := channeladapter.NewInMemoryOutboxStore()
 	usageSink := platform.NewInMemoryUsageSink()
 	svc := NewService(
 		registry,
 		platform.NewInMemoryIdempotencyStore(),
-		NewInMemoryOutboundStore(),
+		NewOutboxBackedOutboundStore(outbox),
+		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
 		WithUsageSink(usageSink),
 	)
 	msg := inbound("tenant-a", "msg-1", "external-user-raw", "hello")
@@ -1990,6 +1995,8 @@ func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "usage reply", result.Outbound.Content)
+	assert.Equal(t, "req-usage", result.RequestID)
+	assert.Equal(t, "req-usage", result.Outbound.TraceID)
 	records := usageSink.Records()
 	require.Len(t, records, 1)
 	record := records[0]
@@ -2008,6 +2015,29 @@ func TestServiceHandleInboundWritesUsageRecord(t *testing.T) {
 	assert.InDelta(t, 0.000025, record.ModelCost, 0.000000000001)
 	assert.Zero(t, record.ToolCost)
 	assert.InDelta(t, 0.000025, record.TotalCost, 0.000000000001)
+	auditRecords := audit.Records()
+	require.Len(t, auditRecords, 1)
+	assert.Equal(t, "req-usage", auditRecords[0].RequestID)
+	assert.Equal(t, "req-usage", auditRecords[0].TraceID)
+	assert.Equal(t, result.SessionID, auditRecords[0].SessionID)
+	assert.Equal(t, "completed", auditRecords[0].Decision)
+	events := messageEvents.Events()
+	require.Len(t, events, 2)
+	assert.Equal(t, "req-usage", events[0].TraceID)
+	assert.Equal(t, "req-usage", events[1].TraceID)
+	assert.Equal(t, result.SessionID, events[0].SessionID)
+	assert.Equal(t, result.SessionID, events[1].SessionID)
+	assert.Equal(t, platform.MessageEventRoleUser, events[0].Role)
+	assert.Equal(t, platform.MessageEventRoleAssistant, events[1].Role)
+	due, err := outbox.ListDue(ctx, time.Now().Add(time.Hour), 10)
+	require.NoError(t, err)
+	require.Len(t, due, 1)
+	assert.Equal(t, result.Outbound, due[0].Message)
+	assert.Equal(t, result.Outbound.TraceID, auditRecords[0].TraceID)
+	assert.Equal(t, result.Outbound.TraceID, events[0].TraceID)
+	assert.Equal(t, result.Outbound.TraceID, events[1].TraceID)
+	assert.Equal(t, result.Outbound.TraceID, record.TraceID)
+	assert.Equal(t, result.Outbound.TraceID, due[0].Message.TraceID)
 }
 
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
