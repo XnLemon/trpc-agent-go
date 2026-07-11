@@ -294,7 +294,6 @@ func EffectiveWithExternal(
 		externalNames,
 		invocation.RunOptions,
 	)
-	hasUserToolTracking = userToolNames != nil
 	if invocation.RunOptions.ToolFilter == nil {
 		return allTools, userToolNames, externalNames
 	}
@@ -302,7 +301,7 @@ func EffectiveWithExternal(
 		ctx,
 		allTools,
 		userToolNames,
-		hasUserToolTracking,
+		userToolNames != nil,
 		invocation.RunOptions,
 	), userToolNames, externalNames
 }
