@@ -478,6 +478,15 @@ func (s *Service) checkBudget(
 		return nil
 	}
 	budgetSpan.SetAttributes(attribute.String("decision", "deny"))
+	itelemetry.ReportGatewayBudgetDeniedMetrics(
+		auditCtx,
+		itelemetry.GatewayBudgetDeniedAttributes{
+			TenantID: runtime.Tenant.TenantID,
+			AppName:  runtime.App.AppID,
+			Channel:  msg.Channel,
+			Reason:   decision.Reason,
+		},
+	)
 	s.writeBudgetDeniedAudit(
 		auditCtx,
 		auditSink,

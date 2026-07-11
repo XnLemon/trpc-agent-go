@@ -58,6 +58,7 @@ const (
 	OperationToolCall        = "tool.call"
 	OperationToolApproval    = "tool.approval"
 	OperationAuditWrite      = "audit.write"
+	OperationGatewayBudget   = "gateway.budget"
 	OperationMemorySearch    = "memory.search"
 	OperationMemoryWrite     = "memory.write"
 	OperationSummaryCreate   = "summary.create"

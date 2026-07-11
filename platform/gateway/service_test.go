@@ -1633,6 +1633,9 @@ func TestServiceWriteAuditRecordsAuditWriteFailureMetric(t *testing.T) {
 
 func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T) {
 	ctx := context.Background()
+	reader, restore := useGatewayMetrics(t)
+	defer restore()
+
 	registry := NewInMemoryRegistry()
 	r := &recordingRunner{response: "unused"}
 	runtime := validRuntime("tenant-a", r)
@@ -1694,6 +1697,16 @@ func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T
 	assert.Equal(t, "req-budget", estimateRequest.RequestID)
 	assert.NotEmpty(t, estimateRequest.SessionID)
 	assert.NotEmpty(t, estimateRequest.InternalUserID)
+
+	points := collectGatewayBudgetDeniedPoints(t, reader)
+	require.Len(t, points, 1)
+	require.Equal(t, int64(1), points[0].Value)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAIOperationName, itelemetry.OperationGatewayBudget)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyGenAISystem, semconvtrace.SystemTRPCGoAgent)
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoTenantID, "tenant-a")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoAppName, "app")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoChannel, "wecom")
+	requireGatewayMetricAttr(t, points[0].Attributes, semconvtrace.KeyTRPCAgentGoBudgetDeniedReason, "total_tokens_exceeded")
 
 	matches, queryErr := audit.Query(platform.AuditQueryFilter{
 		TenantID:  "tenant-a",
@@ -2729,6 +2742,29 @@ func useAuditMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
 	}
 }
 
+func useGatewayMetrics(t *testing.T) (*sdkmetric.ManualReader, func()) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	originalProvider := itelemetry.MeterProvider
+	originalMeter := itelemetry.GatewayMeter
+	originalCounter := itelemetry.GatewayMetricBudgetDeniedTotal
+
+	itelemetry.MeterProvider = provider
+	itelemetry.GatewayMeter = provider.Meter(metrics.MeterNameGateway)
+	var err error
+	itelemetry.GatewayMetricBudgetDeniedTotal, err =
+		itelemetry.GatewayMeter.Int64Counter(metrics.MetricGatewayBudgetDeniedTotal)
+	require.NoError(t, err)
+
+	return reader, func() {
+		itelemetry.MeterProvider = originalProvider
+		itelemetry.GatewayMeter = originalMeter
+		itelemetry.GatewayMetricBudgetDeniedTotal = originalCounter
+	}
+}
+
 func collectGatewayAuditWriteFailedPoints(
 	t *testing.T,
 	reader *sdkmetric.ManualReader,
@@ -2748,6 +2784,38 @@ func collectGatewayAuditWriteFailedPoints(
 	}
 	t.Fatalf("metric %s not found", metrics.MetricAuditWriteFailedTotal)
 	return nil
+}
+
+func collectGatewayBudgetDeniedPoints(
+	t *testing.T,
+	reader *sdkmetric.ManualReader,
+) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, scopeMetric := range rm.ScopeMetrics {
+		for _, metric := range scopeMetric.Metrics {
+			if metric.Name != metrics.MetricGatewayBudgetDeniedTotal {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			return sum.DataPoints
+		}
+	}
+	t.Fatalf("metric %s not found", metrics.MetricGatewayBudgetDeniedTotal)
+	return nil
+}
+
+func requireGatewayMetricAttr(t *testing.T, set attribute.Set, key string, value string) {
+	t.Helper()
+	for _, kv := range set.ToSlice() {
+		if string(kv.Key) == key {
+			require.Equal(t, value, kv.Value.AsString())
+			return
+		}
+	}
+	t.Fatalf("attribute %s not found", key)
 }
 
 func requireGatewayAuditMetricAttr(t *testing.T, set attribute.Set, key string, value string) {

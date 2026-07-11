@@ -128,6 +128,9 @@ func InitMeterProvider(mp metric.MeterProvider) error {
 	if err := initAuditMetrics(mp); err != nil {
 		return err
 	}
+	if err := initGatewayMetrics(mp); err != nil {
+		return err
+	}
 	if err := initInvokeAgentMetrics(mp); err != nil {
 		return err
 	}
@@ -242,6 +245,24 @@ func initAuditMetrics(mp metric.MeterProvider) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricAuditWriteFailedTotal, err)
+	}
+	return nil
+}
+
+func initGatewayMetrics(mp metric.MeterProvider) error {
+	if mp == nil {
+		return fmt.Errorf("gateway meter provider is nil")
+	}
+	meterName := metrics.MeterNameGateway
+	itelemetry.GatewayMeter = mp.Meter(meterName)
+	var err error
+	itelemetry.GatewayMetricBudgetDeniedTotal, err = itelemetry.GatewayMeter.Int64Counter(
+		metrics.MetricGatewayBudgetDeniedTotal,
+		metric.WithDescription("Total number of gateway requests denied by budget checks"),
+		metric.WithUnit("1"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create %s metric %s: %w", meterName, metrics.MetricGatewayBudgetDeniedTotal, err)
 	}
 	return nil
 }

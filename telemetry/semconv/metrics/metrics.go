@@ -65,6 +65,8 @@ const (
 	MetricToolPermissionDeniedTotal = "tool_permission_denied_total"
 	// MetricAuditWriteFailedTotal records failed audit sink writes.
 	MetricAuditWriteFailedTotal = "audit_write_failed_total"
+	// MetricGatewayBudgetDeniedTotal records gateway requests denied by budget checks.
+	MetricGatewayBudgetDeniedTotal = "gateway_budget_denied_total"
 
 	////////////////////////// server ////////////////////////
 
@@ -89,4 +91,6 @@ const (
 	MeterNameToolApproval = "trpc_agent_go.internal.tool_approval"
 	// MeterNameAudit is the meter name for audit operations.
 	MeterNameAudit = "trpc_agent_go.internal.audit"
+	// MeterNameGateway is the meter name for gateway operations.
+	MeterNameGateway = "trpc_agent_go.internal.gateway"
 )
