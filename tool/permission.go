@@ -27,6 +27,9 @@ const (
 	PermissionResultStatusDenied = "denied"
 	// PermissionResultStatusApprovalRequired is returned when a tool call needs approval.
 	PermissionResultStatusApprovalRequired = "approval_required"
+	// PermissionResultStatusApprovalDenied is returned when an approval reviewer
+	// rejects a tool call.
+	PermissionResultStatusApprovalDenied = "approval_denied"
 )
 
 // PermissionAction is the normalized action returned by permission checks.
@@ -137,5 +140,15 @@ func PermissionResultFor(toolName string, decision PermissionDecision) Permissio
 		Status: status,
 		Tool:   toolName,
 		Reason: decision.Reason,
+	}
+}
+
+// ApprovalDeniedResultFor builds the structured tool result returned when an
+// approval reviewer explicitly rejects a tool call.
+func ApprovalDeniedResultFor(toolName string, reason string) PermissionResult {
+	return PermissionResult{
+		Status: PermissionResultStatusApprovalDenied,
+		Tool:   toolName,
+		Reason: reason,
 	}
 }

@@ -440,7 +440,11 @@ func TestBeforeTool_RequireApprovalWritesRejectedAuditRecords(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	require.NotNil(t, result)
-	require.Equal(t, "Automatic approval review denied (risk: high): Command rm -rf workspace can delete workspace files.", result.CustomResult)
+	require.Equal(t, tool.PermissionResult{
+		Status: tool.PermissionResultStatusApprovalDenied,
+		Tool:   "shell",
+		Reason: "Automatic approval review denied (risk: high): Command rm -rf workspace can delete workspace files.",
+	}, result.CustomResult)
 
 	records := audit.Records()
 	require.Len(t, records, 2)
@@ -530,7 +534,11 @@ func TestBeforeTool_EmptyDecisionFieldsDoNotFail(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	require.NotNil(t, result)
-	require.Equal(t, "Automatic approval review denied (risk: ): ", result.CustomResult)
+	require.Equal(t, tool.PermissionResult{
+		Status: tool.PermissionResultStatusApprovalDenied,
+		Tool:   "shell",
+		Reason: "Automatic approval review denied (risk: ): ",
+	}, result.CustomResult)
 }
 
 func TestBeforeTool_ReviewerDeniedLogsWarning(t *testing.T) {
@@ -563,7 +571,11 @@ func TestBeforeTool_ReviewerDeniedLogsWarning(t *testing.T) {
 	require.NotNil(t, result)
 	require.Equal(
 		t,
-		"Automatic approval review denied (risk: high): The command is destructive and exceeds safe automatic approval.",
+		tool.PermissionResult{
+			Status: tool.PermissionResultStatusApprovalDenied,
+			Tool:   "shell",
+			Reason: "Automatic approval review denied (risk: high): The command is destructive and exceeds safe automatic approval.",
+		},
 		result.CustomResult,
 	)
 	require.Equal(

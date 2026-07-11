@@ -209,7 +209,7 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 			}
 			log.WarnContext(ctx, denyMessage)
 			return &tool.BeforeToolResult{
-				CustomResult: denyMessage,
+				CustomResult: tool.ApprovalDeniedResultFor(args.ToolName, denyMessage),
 			}, nil
 		default:
 			return &tool.BeforeToolResult{

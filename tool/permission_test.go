@@ -144,3 +144,12 @@ func TestPermissionResultFor(t *testing.T) {
 		t.Fatalf("unexpected ask result: %+v", ask)
 	}
 }
+
+func TestApprovalDeniedResultFor(t *testing.T) {
+	result := ApprovalDeniedResultFor(testToolName, testReason)
+	if result.Status != PermissionResultStatusApprovalDenied ||
+		result.Tool != testToolName ||
+		result.Reason != testReason {
+		t.Fatalf("unexpected approval denied result: %+v", result)
+	}
+}
