@@ -116,6 +116,46 @@ func TestQueryAuditFiltersRuntimeAndRedactionDimensions(t *testing.T) {
 	}
 }
 
+func TestQueryAuditFiltersBudgetDecisionByRedactedDetailRef(t *testing.T) {
+	now := time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC)
+	quota := TenantQuota{MaxCost: 1.00}
+	estimate := UsageEstimate{PromptTokens: 10, CompletionTokens: 5, Cost: 2.00}
+	decision, err := quota.Check(estimate)
+	if err != nil {
+		t.Fatalf("quota check: %v", err)
+	}
+	target, err := NewBudgetDecisionAuditRecord(BudgetDecisionAuditInput{
+		TenantID:  "tenant",
+		AppID:     "app",
+		RequestID: "request-1",
+		TraceID:   "trace-1",
+		Decision:  decision,
+		Estimate:  estimate,
+		Quota:     quota,
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("NewBudgetDecisionAuditRecord: %v", err)
+	}
+	other := target
+	other.AuditID = "other-budget-audit"
+	other.RedactedDetailRef = strings.ReplaceAll(target.RedactedDetailRef, "estimated_cost:2.000000", "estimated_cost:3.000000")
+
+	matches, err := QueryAudit([]AuditRecord{other, target}, AuditQueryFilter{
+		TenantID:          "tenant",
+		ToolName:          "budget:tenant",
+		Decision:          string(BudgetDecisionOutcomeDeny),
+		RedactionVersion:  "platform-budget-decision-v1",
+		RedactedDetailRef: " " + target.RedactedDetailRef + " ",
+	})
+	if err != nil {
+		t.Fatalf("query budget audit detail: %v", err)
+	}
+	if len(matches) != 1 || matches[0].AuditID != target.AuditID {
+		t.Fatalf("expected target budget audit, got %+v", matches)
+	}
+}
+
 func TestAuditSinkQueryUsesSnapshotAndReturnsCopies(t *testing.T) {
 	sink := NewInMemoryAuditSink()
 	record := auditRecordForQuery("tenant", "audit-1", "app", "telegram", "binding", "session", "request", "message", "tool", "allow", "trace", time.Now())
@@ -163,6 +203,9 @@ func TestQueryAuditRejectsUnsafeFilterValues(t *testing.T) {
 		},
 		"redaction_version": {
 			RedactionVersion: "platform-v1 Authorization: Bearer raw-token",
+		},
+		"redacted_detail_ref": {
+			RedactedDetailRef: "outcome:deny Authorization: Bearer raw-token",
 		},
 	}
 	for name, filter := range tests {
