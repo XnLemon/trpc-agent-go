@@ -11,6 +11,8 @@ package tool
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
 const (
@@ -130,6 +132,22 @@ type PermissionResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+var permissionReasonRedactionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9._~+/\-]+=*`),
+	regexp.MustCompile(`(?i)(Authorization\s*=\s*Bearer\s+)[^\r\n\s]+`),
+	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
+	regexp.MustCompile(`(?im)(authorization\s*:\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*=\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*[:=]\s*)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(cookie\s*[:=]\s*)[^\r\n]+`),
+	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)\s*=\s*([^&\s]+)`),
+	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)\s*:\s*([^,\s]+)`),
+	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
+	regexp.MustCompile(`(?i)(sk-[A-Za-z0-9._~+/\-]{8,})`),
+	regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s/?#]+`),
+	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
+}
+
 // PermissionResultFor builds the structured tool result for a non-allow decision.
 func PermissionResultFor(toolName string, decision PermissionDecision) PermissionResult {
 	status := PermissionResultStatusDenied
@@ -139,7 +157,7 @@ func PermissionResultFor(toolName string, decision PermissionDecision) Permissio
 	return PermissionResult{
 		Status: status,
 		Tool:   toolName,
-		Reason: decision.Reason,
+		Reason: redactPermissionReason(decision.Reason),
 	}
 }
 
@@ -149,6 +167,91 @@ func ApprovalDeniedResultFor(toolName string, reason string) PermissionResult {
 	return PermissionResult{
 		Status: PermissionResultStatusApprovalDenied,
 		Tool:   toolName,
-		Reason: reason,
+		Reason: redactPermissionReason(reason),
 	}
+}
+
+func redactPermissionReason(reason string) string {
+	redacted := reason
+	for _, pattern := range permissionReasonRedactionPatterns {
+		redacted = pattern.ReplaceAllStringFunc(redacted, redactPermissionReasonMatch)
+	}
+	return redacted
+}
+
+func redactPermissionReasonMatch(match string) string {
+	lower := strings.ToLower(match)
+	if strings.Contains(lower, "authorization:") ||
+		strings.Contains(lower, "authorization=") {
+		return redactPermissionAuthorizationMatch(match)
+	}
+	if strings.Contains(lower, "bearer ") {
+		return match[:strings.Index(lower, "bearer ")+7] + "****"
+	}
+	if strings.Contains(match, "://") && strings.Contains(match, "@") {
+		if redacted, ok := redactPermissionReasonURLUserinfo(match); ok {
+			return redacted
+		}
+	}
+	if strings.HasPrefix(match, "-----BEGIN ") {
+		return "-----BEGIN PRIVATE KEY-----****-----END PRIVATE KEY-----"
+	}
+	if idx := strings.Index(match, "="); idx >= 0 {
+		return match[:idx+1] + "****"
+	}
+	if idx := strings.Index(match, ":"); idx >= 0 {
+		prefix := match[:idx+1]
+		rest := match[idx+1:]
+		if strings.HasPrefix(strings.TrimLeft(rest, " \t"), "\"") && strings.HasSuffix(match, "\"") {
+			return prefix + " \"****\""
+		}
+		return prefix + " ****"
+	}
+	if len(match) <= 8 {
+		return "****"
+	}
+	return match[:4] + "****" + match[len(match)-4:]
+}
+
+func redactPermissionAuthorizationMatch(match string) string {
+	separator := strings.Index(match, ":")
+	if separator < 0 {
+		separator = strings.Index(match, "=")
+	}
+	if separator < 0 {
+		return "Authorization: ****"
+	}
+	prefix := match[:separator+1]
+	rest := match[separator+1:]
+	trimmed := strings.TrimLeft(rest, " \t")
+	mask := "****"
+	if match[separator] == ':' {
+		mask = " ****"
+	}
+	if !strings.HasPrefix(trimmed, "****") {
+		return prefix + mask
+	}
+	tail := strings.TrimPrefix(trimmed, "****")
+	if strings.TrimSpace(tail) == "" {
+		return prefix + mask
+	}
+	return prefix + mask + redactPermissionReason(tail)
+}
+
+func redactPermissionReasonURLUserinfo(match string) (string, bool) {
+	scheme := strings.Index(match, "://")
+	if scheme < 0 {
+		return match, false
+	}
+	authorityStart := scheme + len("://")
+	authorityEnd := len(match)
+	if end := strings.IndexAny(match[authorityStart:], "/?# \t\r\n"); end >= 0 {
+		authorityEnd = authorityStart + end
+	}
+	at := strings.LastIndex(match[authorityStart:authorityEnd], "@")
+	if at <= 0 {
+		return match, false
+	}
+	at += authorityStart
+	return match[:authorityStart] + "****" + match[at:], true
 }
