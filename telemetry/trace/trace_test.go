@@ -12,6 +12,7 @@ package trace
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -155,6 +156,39 @@ func TestStartHTTP_InvalidEndpointURL(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatalf("expected error from invalid endpoint URL")
+	}
+}
+
+func TestStartHTTP_InvalidEndpointURLRedactsSensitiveConfig(t *testing.T) {
+	for _, endpointURL := range []string{
+		"http://user:password@/bad?api_key=sk-1234567890abcdef",
+		"user:password@/bad?api_key=sk-1234567890abcdef",
+		"http://user:password@%zz/bad?api_key=sk-1234567890abcdef",
+		"user:password@%zz/bad?api_key=sk-1234567890abcdef",
+	} {
+		t.Run(endpointURL, func(t *testing.T) {
+			ctx := context.Background()
+			_, err := Start(ctx,
+				WithProtocol("http"),
+				WithEndpoint("localhost:4318"),
+				WithEndpointURL(endpointURL),
+			)
+			if err == nil {
+				t.Fatalf("expected error from invalid endpoint URL")
+			}
+			for _, leaked := range []string{
+				"user:password",
+				"password",
+				"sk-1234567890abcdef",
+			} {
+				if strings.Contains(err.Error(), leaked) {
+					t.Fatalf("trace config error leaked %q: %v", leaked, err)
+				}
+			}
+			if !strings.Contains(err.Error(), "failed to parse endpoint URL") {
+				t.Fatalf("expected endpoint context in error, got %v", err)
+			}
+		})
 	}
 }
 

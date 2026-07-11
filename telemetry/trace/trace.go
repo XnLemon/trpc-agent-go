@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 
 	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 )
 
 // TracerProvider is the global tracer TracerProvider for telemetry.
@@ -248,13 +249,20 @@ func parseEndpointURL(endpointURL string) (endpoint, urlPath string, err error) 
 
 	u, err := url.Parse(endpointURL)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to parse URL %q: %w", originalURL, err)
+		return "", "", redactedTraceConfigError{
+			msg: fmt.Sprintf(
+				"failed to parse URL %q: %s",
+				redactTraceConfigValue(originalURL),
+				redactTraceConfigValue(err.Error()),
+			),
+			err: err,
+		}
 	}
 
 	// Extract host:port
 	endpoint = u.Host
 	if endpoint == "" {
-		return "", "", fmt.Errorf("no host found in URL %q", originalURL)
+		return "", "", fmt.Errorf("no host found in URL %q", redactTraceConfigValue(originalURL))
 	}
 
 	// Extract path
@@ -305,7 +313,7 @@ func initHTTPTracerProvider(ctx context.Context, res *resource.Resource, opts *o
 		// Parse the full URL to extract host:port and path components
 		endpoint, urlPath, err := parseEndpointURL(opts.tracesEndpointURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse endpoint URL %q: %w", opts.tracesEndpointURL, err)
+			return nil, fmt.Errorf("failed to parse endpoint URL %q: %w", redactTraceConfigValue(opts.tracesEndpointURL), err)
 		}
 		otelOpts = append(otelOpts,
 			otlptracehttp.WithEndpoint(endpoint),
@@ -318,6 +326,50 @@ func initHTTPTracerProvider(ctx context.Context, res *resource.Resource, opts *o
 	}
 
 	return setupTracerProvider(res, traceExporter), nil
+}
+
+func redactTraceConfigValue(value string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return "<redacted>"
+	}
+	return redactTraceConfigURLUserinfo(redactor.Redact(value))
+}
+
+type redactedTraceConfigError struct {
+	msg string
+	err error
+}
+
+func (e redactedTraceConfigError) Error() string {
+	return e.msg
+}
+
+func (e redactedTraceConfigError) Unwrap() error {
+	return e.err
+}
+
+func redactTraceConfigURLUserinfo(value string) string {
+	authorityStart := 0
+	schemeIndex := strings.Index(value, "://")
+	if schemeIndex >= 0 {
+		authorityStart = schemeIndex + len("://")
+	}
+	if authorityStart >= len(value) {
+		return value
+	}
+	authorityEnd := len(value)
+	for _, delimiter := range []string{"/", "?", "#"} {
+		if index := strings.Index(value[authorityStart:], delimiter); index >= 0 {
+			authorityEnd = min(authorityEnd, authorityStart+index)
+		}
+	}
+	authority := value[authorityStart:authorityEnd]
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return value
+	}
+	return value[:authorityStart] + "****" + value[authorityStart+at:]
 }
 
 // setupTracerProvider sets up the tracer provider with the given resource and exporter.
