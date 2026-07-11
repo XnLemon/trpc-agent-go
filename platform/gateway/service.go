@@ -532,6 +532,8 @@ func (s *Service) writeBudgetDeniedAudit(
 	record.UserIDHash = platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID)
 	record.SessionID = auditContext.SessionID
 	record.MessageID = msg.PlatformMessageID
+	record.AgentName = runtime.App.AgentName
+	record.ModelName = usageModelName(runtime)
 	if err := record.Validate(); err != nil {
 		s.writeRejectAuditWithContextTo(ctx, auditSink, msg, start, err, auditContext)
 		return

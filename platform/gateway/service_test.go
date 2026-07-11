@@ -1506,6 +1506,13 @@ func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T
 	registry := NewInMemoryRegistry()
 	r := &recordingRunner{response: "unused"}
 	runtime := validRuntime("tenant-a", r)
+	runtime.App.AgentName = "budget-agent"
+	runtime.App.ModelProfileID = "profile-gpt"
+	runtime.ModelProfile = platform.ModelProfile{
+		TenantID:  "tenant-a",
+		ProfileID: "profile-gpt",
+		Model:     "gpt-budget",
+	}
 	runtime.Tenant.QuotaJSON = `{"max_total_tokens":10}`
 	require.NoError(t, registry.Register(runtime))
 	audit := platform.NewInMemoryAuditSink()
@@ -1544,6 +1551,8 @@ func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T
 	assert.Equal(t, msg.Channel, record.Channel)
 	assert.Equal(t, msg.BindingID, record.BindingID)
 	assert.Equal(t, msg.PlatformMessageID, record.MessageID)
+	assert.Equal(t, "budget-agent", record.AgentName)
+	assert.Equal(t, "gpt-budget", record.ModelName)
 	assert.NotEmpty(t, record.SessionID)
 	assert.NotEmpty(t, record.InternalUserID)
 	assert.Equal(t, platform.UserIDHash(msg.TenantID, msg.Channel, msg.ExternalUserID), record.UserIDHash)
@@ -1555,6 +1564,16 @@ func TestServiceHandleInboundRejectsBudgetExceededBeforeIdempotency(t *testing.T
 	assert.Equal(t, "req-budget", estimateRequest.RequestID)
 	assert.NotEmpty(t, estimateRequest.SessionID)
 	assert.NotEmpty(t, estimateRequest.InternalUserID)
+
+	matches, queryErr := audit.Query(platform.AuditQueryFilter{
+		TenantID:  "tenant-a",
+		ToolName:  "budget:tenant",
+		AgentName: "budget-agent",
+		ModelName: "gpt-budget",
+	})
+	require.NoError(t, queryErr)
+	require.Len(t, matches, 1)
+	assert.Equal(t, record.AuditID, matches[0].AuditID)
 }
 
 func TestServiceHandleInboundAllowsWithinBudget(t *testing.T) {
