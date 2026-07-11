@@ -780,6 +780,75 @@ func TestServiceHandleInboundRejectsUnsupportedMessage(t *testing.T) {
 	assert.NotEqual(t, "user-1", audit.Records()[0].UserID)
 }
 
+func TestServiceHandleInboundRejectsTextOverChannelLimitBeforeIdempotency(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "unused"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxTextLength = 5
+	require.NoError(t, registry.Register(runtime))
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(
+		registry,
+		idempotency,
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "你好世界呀!"))
+
+	require.ErrorIs(t, err, ErrTextTooLong)
+	assert.Empty(t, r.calls)
+	_, ok, getErr := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, getErr)
+	assert.False(t, ok)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "reject", audit.Records()[0].Decision)
+	assert.Equal(t, ErrTextTooLong.Error(), audit.Records()[0].DecisionReason)
+	assert.NotContains(t, audit.Records()[0].DecisionReason, "你好世界呀")
+}
+
+func TestServiceHandleInboundAllowsTextAtChannelLimitBoundary(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxTextLength = 5
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	result, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "你好世界呀"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result.Outbound.Content)
+	assert.Len(t, r.calls, 1)
+}
+
+func TestServiceHandleInboundAllowsTextWhenChannelLimitUnset(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	runtime := validRuntime("tenant-a", r)
+	runtime.Binding.ChannelLimits.MaxTextLength = 0
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+	)
+
+	result, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", strings.Repeat("x", 8192)))
+
+	require.NoError(t, err)
+	assert.Equal(t, "ok", result.Outbound.Content)
+	assert.Len(t, r.calls, 1)
+}
+
 func TestServiceHandleInboundRejectsDisallowedUser(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
