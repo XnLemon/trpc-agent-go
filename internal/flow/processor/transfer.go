@@ -18,6 +18,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	iflow "trpc.group/trpc-go/trpc-agent-go/internal/flow"
 	istructure "trpc.group/trpc-go/trpc-agent-go/internal/structure"
 	itransfer "trpc.group/trpc-go/trpc-agent-go/internal/transfer"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -95,7 +96,9 @@ func (p *TransferResponseProcessor) ProcessResponse(
 			invocation.InvocationID,
 			invocation.AgentName,
 			model.ErrorTypeFlowError,
-			"Transfer failed: target agent '"+targetAgentName+"' not found",
+			iflow.RedactErrorText(
+				"Transfer failed: target agent '"+targetAgentName+"' not found",
+			),
 		))
 		return
 	}
@@ -115,10 +118,7 @@ func (p *TransferResponseProcessor) ProcessResponse(
 				invocation.InvocationID,
 				invocation.AgentName,
 				model.ErrorTypeFlowError,
-				fmt.Sprintf(
-					"Transfer rejected: %v",
-					err,
-				),
+				iflow.RedactErrorText(fmt.Sprintf("Transfer rejected: %v", err)),
 			))
 			return
 		}
@@ -141,7 +141,9 @@ func (p *TransferResponseProcessor) ProcessResponse(
 			invocation.InvocationID,
 			invocation.AgentName,
 			model.ErrorTypeFlowError,
-			fmt.Sprintf("Transfer customization rejected: %v", err),
+			iflow.RedactErrorText(
+				fmt.Sprintf("Transfer customization rejected: %v", err),
+			),
 		))
 		return
 	}
@@ -220,7 +222,7 @@ func (p *TransferResponseProcessor) ProcessResponse(
 			invocation.InvocationID,
 			invocation.AgentName,
 			model.ErrorTypeFlowError,
-			"Transfer failed: "+err.Error(),
+			iflow.RedactErrorText("Transfer failed: "+err.Error()),
 		))
 		return
 	}

@@ -1039,6 +1039,25 @@ func TestFunctionCallResponseProcessor_AttachStateDelta(t *testing.T) {
 	require.Equal(t, []byte(deltaVal2), ev2.StateDelta[deltaKey2])
 }
 
+func TestCreateErrorChoiceRedactsSensitiveContent(t *testing.T) {
+	p := NewFunctionCallResponseProcessor(false, nil)
+
+	choice := p.createErrorChoice(
+		0,
+		"call-1",
+		"tool failed Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token",
+	)
+
+	require.NotNil(t, choice)
+	require.Equal(t, model.RoleTool, choice.Message.Role)
+	require.Equal(t, "call-1", choice.Message.ToolID)
+	require.Contains(t, choice.Message.Content, "tool failed")
+	require.Contains(t, choice.Message.Content, "****")
+	for _, leaked := range []string{"raw-token", "sk-testsecret"} {
+		require.NotContains(t, choice.Message.Content, leaked)
+	}
+}
+
 func TestExecuteSingleToolCallSequential_PreservesCustomInvocationState(
 	t *testing.T,
 ) {
@@ -7069,6 +7088,21 @@ func TestExecuteStreamableTool_TerminalToolResponseErrorStopsStream(t *testing.T
 	require.NotNil(t, evt.Response)
 	require.NotNil(t, evt.Response.Error)
 	require.Contains(t, evt.StateDelta, graph.MetadataKeyTool)
+}
+
+func TestStreamToolEventErrorRedactsSensitiveDetails(t *testing.T) {
+	err := streamToolEventError(event.NewErrorEvent(
+		"inv-stream-redact",
+		"child",
+		model.ErrorTypeFlowError,
+		"stream failed Authorization: Bearer raw-token api_key=sk-testsecret",
+	))
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stream failed")
+	require.Contains(t, err.Error(), "****")
+	require.NotContains(t, err.Error(), "raw-token")
+	require.NotContains(t, err.Error(), "sk-testsecret")
 }
 
 func TestProcessStreamChunk_PointerFinalResultChunkMarksSeen(t *testing.T) {

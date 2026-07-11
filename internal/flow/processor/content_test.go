@@ -5170,6 +5170,26 @@ func TestContentRequestProcessor_getCurrentInvocationMessages(t *testing.T) {
 			expectedCount:   2,
 			expectedContent: []string{"", "type: flow_error, message: call err"},
 		},
+		{
+			name: "redacts filled tool result error content",
+			sessionEvents: []event.Event{
+				createToolCallEvent("inv1", "agent1", "call1", baseTime),
+				createToolResultErrEvent(
+					"inv1",
+					"agent1",
+					"call1",
+					"call err Authorization: Bearer raw-token api_key=sk-testsecret",
+					baseTime.Add(time.Second),
+				),
+			},
+			invocationID:  "inv1",
+			agentName:     "agent1",
+			expectedCount: 2,
+			expectedContent: []string{
+				"",
+				"type: flow_error, message: call err Authorization: ****",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -5207,6 +5227,31 @@ func TestContentRequestProcessor_getCurrentInvocationMessages(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNormalizeCurrentInvocationEvent_RedactsResponseErrorFallback(t *testing.T) {
+	evt := event.Event{
+		Response: &model.Response{
+			Choices: []model.Choice{
+				{Message: model.Message{Role: model.RoleTool}},
+			},
+			Error: &model.ResponseError{
+				Type:    model.ErrorTypeFlowError,
+				Message: "failed Authorization: Bearer raw-token api_key=sk-testsecret Cookie: session=raw-cookie",
+			},
+		},
+	}
+
+	got := normalizeCurrentInvocationEvent(evt)
+
+	require.NotNil(t, got.Response)
+	require.NotEmpty(t, got.Response.Choices)
+	content := got.Response.Choices[0].Message.Content
+	require.Contains(t, content, "type: flow_error, message: failed")
+	require.Contains(t, content, "****")
+	for _, leaked := range []string{"raw-token", "sk-testsecret", "raw-cookie"} {
+		require.NotContains(t, content, leaked)
 	}
 }
 

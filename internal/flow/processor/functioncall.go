@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
+	iflow "trpc.group/trpc-go/trpc-agent-go/internal/flow"
 	"trpc.group/trpc-go/trpc-agent-go/internal/jsonrepair"
 	"trpc.group/trpc-go/trpc-agent-go/internal/jsonutils"
 	"trpc.group/trpc-go/trpc-agent-go/internal/state/appender"
@@ -375,7 +376,7 @@ func (p *FunctionCallResponseProcessor) handleFunctionCallsAndSendEventWithReque
 			invocation.InvocationID,
 			invocation.AgentName,
 			model.ErrorTypeFlowError,
-			err.Error(),
+			iflow.RedactError(err),
 		))
 		return nil, err
 	}
@@ -797,7 +798,7 @@ func (p *FunctionCallResponseProcessor) executeSingleToolCallSequentialResult(
 	if err != nil {
 		if shouldIgnoreError {
 			// Create error choice for ignorable errors
-			choice := p.createErrorChoice(index, toolCall.ID, err.Error())
+			choice := p.createErrorChoice(index, toolCall.ID, iflow.RedactError(err))
 			choices = []model.Choice{*choice}
 		} else {
 			// Return critical errors (e.g., stop errors) immediately
@@ -2231,7 +2232,7 @@ func (p *FunctionCallResponseProcessor) createErrorChoice(index int, toolID stri
 		Index: index,
 		Message: model.Message{
 			Role:    model.RoleTool,
-			Content: errorMsg,
+			Content: iflow.RedactErrorText(errorMsg),
 			ToolID:  toolID,
 		},
 	}
@@ -3132,7 +3133,7 @@ func streamToolEventError(ev *event.Event) error {
 		return nil
 	}
 	if ev.Error != nil && ev.Error.Type == agent.ErrorTypeStopAgentError {
-		return agent.NewStopError(ev.Error.Message)
+		return agent.NewStopError(iflow.RedactErrorText(ev.Error.Message))
 	}
 	if isRetryingGraphNodeErrorEvent(ev) {
 		return nil
@@ -3141,8 +3142,8 @@ func streamToolEventError(ev *event.Event) error {
 		return fmt.Errorf(
 			"%s: %s: %s",
 			ErrorStreamableToolExecution,
-			ev.Error.Type,
-			ev.Error.Message,
+			iflow.RedactErrorText(ev.Error.Type),
+			iflow.RedactErrorText(ev.Error.Message),
 		)
 	}
 	return fmt.Errorf(ErrorStreamableToolExecution)

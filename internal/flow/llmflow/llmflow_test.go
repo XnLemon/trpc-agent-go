@@ -2092,7 +2092,7 @@ func (p *injectToolsRequestProcessor) ProcessRequest(
 	}
 }
 
-const flowRunPanicTestMsg = "boom"
+const flowRunPanicTestMsg = "boom Authorization: Bearer raw-token api_key=sk-testsecret"
 
 type panicRequestProcessor struct{}
 
@@ -2194,7 +2194,10 @@ func TestFlow_Run_RecoversPanic(t *testing.T) {
 
 	require.NotNil(t, errorEvent)
 	require.Equal(t, model.ErrorTypeFlowError, errorEvent.Error.Type)
-	require.Contains(t, errorEvent.Error.Message, flowRunPanicTestMsg)
+	require.Contains(t, errorEvent.Error.Message, "boom")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "sk-testsecret")
 }
 
 const flowRunPanicTestUnknownValue = 123
@@ -2312,7 +2315,7 @@ func TestModelCallbacks_BeforeError(t *testing.T) {
 
 	modelCallbacks := model.NewCallbacks()
 	modelCallbacks.RegisterBeforeModel(func(ctx context.Context, req *model.Request) (*model.Response, error) {
-		return nil, errors.New("before error")
+		return nil, errors.New("before error Authorization: Bearer raw-token api_key=sk-testsecret")
 	})
 
 	llmFlow := New(nil, nil, Options{ModelCallbacks: modelCallbacks})
@@ -2335,13 +2338,16 @@ func TestModelCallbacks_BeforeError(t *testing.T) {
 			break
 		}
 		// Receive the first error event and cancel ctx to prevent deadlock.
-		if evt.Error != nil && evt.Error.Message == "before error" {
+		if evt.Error != nil {
 			cancel()
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Equal(t, "before error", events[1].Error.Message)
+	require.Contains(t, events[1].Error.Message, "before error")
+	require.Contains(t, events[1].Error.Message, "****")
+	require.NotContains(t, events[1].Error.Message, "raw-token")
+	require.NotContains(t, events[1].Error.Message, "sk-testsecret")
 }
 
 func TestModelCallbacks_BeforeSetsContext_AfterSeesValue(t *testing.T) {
@@ -2443,7 +2449,7 @@ func TestModelCallbacks_AfterError(t *testing.T) {
 	modelCallbacks := model.NewCallbacks()
 	modelCallbacks.RegisterAfterModel(
 		func(ctx context.Context, req *model.Request, rsp *model.Response, modelErr error) (*model.Response, error) {
-			return nil, errors.New("after error")
+			return nil, errors.New("after error token=raw-token password=raw-password")
 		},
 	)
 
@@ -2464,13 +2470,16 @@ func TestModelCallbacks_AfterError(t *testing.T) {
 			break
 		}
 		// Receive the first error event and cancel ctx to prevent deadlock.
-		if evt.Error != nil && evt.Error.Message == "after error" {
+		if evt.Error != nil {
 			cancel()
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Equal(t, "after error", events[1].Error.Message)
+	require.Contains(t, events[1].Error.Message, "after error")
+	require.Contains(t, events[1].Error.Message, "****")
+	require.NotContains(t, events[1].Error.Message, "raw-token")
+	require.NotContains(t, events[1].Error.Message, "raw-password")
 }
 
 func TestFlow_RunBeforeModelCallbacks_NoModelCallbacks(t *testing.T) {
