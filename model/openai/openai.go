@@ -38,6 +38,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	imodel "trpc.group/trpc-go/trpc-agent-go/model/internal/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/internal/modeltailoring"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -2376,7 +2377,7 @@ func (m *Model) emitStreamingFinalResponse(
 	// Send error response.
 	emit(&model.Response{
 		Error: &model.ResponseError{
-			Message: stream.Err().Error(),
+			Message: redactErrorMessage(stream.Err()),
 			Type:    model.ErrorTypeStreamError,
 		},
 		Timestamp: time.Now(),
@@ -2519,7 +2520,7 @@ func (m *Model) handleNonStreamingResponseWithEmitter(
 		}
 		emit(&model.Response{
 			Error: &model.ResponseError{
-				Message: err.Error(),
+				Message: redactErrorMessage(err),
 				Type:    model.ErrorTypeAPIError,
 			},
 			Timestamp: time.Now(),
@@ -3041,7 +3042,7 @@ func extractEmbeddedErrorResponse(cc *openai.ChatCompletion) *model.Response {
 	}
 	log.Debugf("OpenAI-compatible API returned HTTP 200 with embedded error (type=%s)", errBody.Type)
 	respErr := &model.ResponseError{
-		Message: errMsg,
+		Message: redactErrorText(errMsg),
 		Type:    model.ErrorTypeAPIError,
 	}
 	if code := normalizeEmbeddedErrorCode(errBody.Code); code != "" {
@@ -3055,6 +3056,21 @@ func extractEmbeddedErrorResponse(cc *openai.ChatCompletion) *model.Response {
 		Timestamp: time.Now(),
 		Done:      true,
 	}
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return redactErrorText(err.Error())
+}
+
+func redactErrorText(message string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(message)
 }
 
 // normalizeEmbeddedErrorString extracts a JSON string value.

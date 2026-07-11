@@ -27,6 +27,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	imodel "trpc.group/trpc-go/trpc-agent-go/model/internal/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/internal/modeltailoring"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -269,7 +270,7 @@ func (m *Model) handleNonStreamingResponse(
 	if err != nil {
 		errorResponse := &model.Response{
 			Error: &model.ResponseError{
-				Message: err.Error(),
+				Message: redactErrorMessage(err),
 				Type:    model.ErrorTypeAPIError,
 			},
 			Timestamp: time.Now(),
@@ -295,7 +296,7 @@ func (m *Model) handleNonStreamingResponse(
 		if err != nil {
 			errorResponse := &model.Response{
 				Error: &model.ResponseError{
-					Message: err.Error(),
+					Message: redactErrorMessage(err),
 					Type:    model.ErrorTypeAPIError,
 				},
 				Timestamp: time.Now(),
@@ -375,7 +376,7 @@ func (m *Model) handleStreamingResponse(
 			}
 			sendTerminalResponse(&model.Response{
 				Error: &model.ResponseError{
-					Message: err.Error(),
+					Message: redactErrorMessage(err),
 					Type:    model.ErrorTypeAPIError,
 				},
 				Timestamp: time.Now(),
@@ -411,7 +412,7 @@ func (m *Model) handleStreamingResponse(
 		if retryErr != nil {
 			sendTerminalResponse(&model.Response{
 				Error: &model.ResponseError{
-					Message: retryErr.Error(),
+					Message: redactErrorMessage(retryErr),
 					Type:    model.ErrorTypeAPIError,
 				},
 				Timestamp: time.Now(),
@@ -445,6 +446,17 @@ func (m *Model) handleStreamingResponse(
 		}
 	}
 	sendTerminalResponse(finalResponse)
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(err.Error())
 }
 
 // convertContentBlock builds a single assistant message from Gemini Candidate.

@@ -1483,7 +1483,7 @@ func TestModel_GenerateContentError(t *testing.T) {
 			},
 		},
 	}
-	err := errors.New("error")
+	err := errors.New("error: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie")
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1521,7 +1521,19 @@ func TestModel_GenerateContentError(t *testing.T) {
 			m := &Model{
 				client: mockClient,
 			}
-			_, _ = m.GenerateContent(tt.args.ctx, tt.args.request)
+			ch, _ := m.GenerateContent(tt.args.ctx, tt.args.request)
+			if tt.name != "error" {
+				return
+			}
+			resp := <-ch
+			require.NotNil(t, resp.Error)
+			assert.Contains(t, resp.Error.Message, "error")
+			assert.NotContains(t, resp.Error.Message, "raw-token")
+			assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+			assert.NotContains(t, resp.Error.Message, "raw-secret")
+			assert.NotContains(t, resp.Error.Message, "raw-password")
+			assert.NotContains(t, resp.Error.Message, "raw-cookie")
+			assert.Contains(t, resp.Error.Message, "****")
 		})
 	}
 }
@@ -1760,7 +1772,7 @@ func TestModel_GenerateContentStreamingError(t *testing.T) {
 
 	t.Run("immediate_stream_error", func(t *testing.T) {
 		// Test when the stream immediately returns an error on the first chunk
-		streamErr := errors.New("stream connection failed")
+		streamErr := errors.New("stream connection failed: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie")
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
 
@@ -1781,7 +1793,13 @@ func TestModel_GenerateContentStreamingError(t *testing.T) {
 		resp := <-respChan
 		assert.NotNil(t, resp)
 		assert.NotNil(t, resp.Error)
-		assert.Equal(t, "stream connection failed", resp.Error.Message)
+		assert.Contains(t, resp.Error.Message, "stream connection failed")
+		assert.NotContains(t, resp.Error.Message, "raw-token")
+		assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+		assert.NotContains(t, resp.Error.Message, "raw-secret")
+		assert.NotContains(t, resp.Error.Message, "raw-password")
+		assert.NotContains(t, resp.Error.Message, "raw-cookie")
+		assert.Contains(t, resp.Error.Message, "****")
 		assert.Equal(t, model.ErrorTypeAPIError, resp.Error.Type)
 		assert.True(t, resp.Done)
 
@@ -2240,7 +2258,7 @@ func TestModel_NonStreaming_MalformedFunctionCallRetryError(t *testing.T) {
 			{FinishReason: genai.FinishReason("MALFORMED_FUNCTION_CALL")},
 		},
 	}
-	retryErr := errors.New("network error on retry")
+	retryErr := errors.New("network error on retry: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie")
 
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -2264,7 +2282,13 @@ func TestModel_NonStreaming_MalformedFunctionCallRetryError(t *testing.T) {
 	require.Len(t, responses, 1)
 	require.True(t, responses[0].Done)
 	require.NotNil(t, responses[0].Error)
-	require.Equal(t, "network error on retry", responses[0].Error.Message)
+	require.Contains(t, responses[0].Error.Message, "network error on retry")
+	require.NotContains(t, responses[0].Error.Message, "raw-token")
+	require.NotContains(t, responses[0].Error.Message, "sk-testsecret")
+	require.NotContains(t, responses[0].Error.Message, "raw-secret")
+	require.NotContains(t, responses[0].Error.Message, "raw-password")
+	require.NotContains(t, responses[0].Error.Message, "raw-cookie")
+	require.Contains(t, responses[0].Error.Message, "****")
 }
 
 // TestModel_Streaming_MalformedFunctionCallRetry verifies that when the
