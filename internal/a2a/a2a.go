@@ -194,16 +194,16 @@ func WithResponseErrorMetadata(
 	}
 	metadata[MessageMetadataObjectTypeKey] = model.ObjectTypeError
 	if err.Type != "" {
-		metadata[MessageMetadataErrorTypeKey] = err.Type
+		metadata[MessageMetadataErrorTypeKey] = redactErrorText(err.Type)
 	}
 	if err.Message != "" {
-		metadata[MessageMetadataErrorMessageKey] = err.Message
+		metadata[MessageMetadataErrorMessageKey] = redactErrorText(err.Message)
 	}
 	if err.Code != nil && *err.Code != "" {
-		metadata[MessageMetadataErrorCodeKey] = *err.Code
+		metadata[MessageMetadataErrorCodeKey] = redactErrorText(*err.Code)
 	}
 	if err.Param != nil && *err.Param != "" {
-		metadata[MessageMetadataErrorParamKey] = *err.Param
+		metadata[MessageMetadataErrorParamKey] = redactErrorText(*err.Param)
 	}
 	return metadata
 }
@@ -246,22 +246,29 @@ func ResponseErrorFromMetadata(
 		errorType = fallbackType
 	}
 	respErr := &model.ResponseError{
-		Type:    errorType,
-		Message: message,
+		Type:    redactErrorText(errorType),
+		Message: redactErrorText(message),
 	}
 	if code := metadataStringValue(
 		metadata,
 		MessageMetadataErrorCodeKey,
 	); code != "" {
+		code = redactErrorText(code)
 		respErr.Code = &code
 	}
 	if param := metadataStringValue(
 		metadata,
 		MessageMetadataErrorParamKey,
 	); param != "" {
+		param = redactErrorText(param)
 		respErr.Param = &param
 	}
 	return respErr
+}
+
+// RedactErrorText redacts sensitive content from A2A error text fields.
+func RedactErrorText(message string) string {
+	return redactErrorText(message)
 }
 
 func metadataStringValue(

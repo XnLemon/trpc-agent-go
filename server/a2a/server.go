@@ -397,7 +397,9 @@ func buildTaskErrorMessage(
 
 	var parts []protocol.Part
 	if respErr.Message != "" {
-		parts = append(parts, protocol.NewTextPart(respErr.Message))
+		parts = append(parts, protocol.NewTextPart(
+			taskErrorMessageText(respErr, metadata),
+		))
 	}
 	msg := protocol.NewMessageWithContext(
 		protocol.MessageRoleAgent,
@@ -410,6 +412,20 @@ func buildTaskErrorMessage(
 		msg.MessageID = agentEvent.Response.ID
 	}
 	return &msg
+}
+
+func taskErrorMessageText(
+	respErr *model.ResponseError,
+	metadata map[string]any,
+) string {
+	if metadataMessage, ok := metadata[ia2a.MessageMetadataErrorMessageKey].(string); ok &&
+		metadataMessage != "" {
+		return metadataMessage
+	}
+	if respErr == nil {
+		return ""
+	}
+	return ia2a.RedactErrorText(respErr.Message)
 }
 
 func buildStructuredFailureTask(

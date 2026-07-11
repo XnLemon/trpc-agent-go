@@ -10,6 +10,7 @@
 package a2a
 
 import (
+	"strings"
 	"testing"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -111,14 +112,26 @@ func TestGetDataPartType(t *testing.T) {
 }
 
 func TestResponseErrorMetadataHelpers(t *testing.T) {
-	code := "A2A_42"
-	param := "task_id"
+	code := "A2A_42 token=raw-token"
+	param := "Authorization: Bearer raw-token"
 	metadata := WithResponseErrorMetadata(nil, &model.ResponseError{
 		Type:    model.ErrorTypeFlowError,
-		Message: "task failed",
+		Message: sensitiveA2AErrorMessage(),
 		Code:    &code,
 		Param:   &param,
 	})
+	assertA2AErrorMessageRedacted(
+		t,
+		metadata[MessageMetadataErrorMessageKey].(string),
+	)
+	assertA2AErrorMessageRedacted(
+		t,
+		metadata[MessageMetadataErrorCodeKey].(string),
+	)
+	assertA2AErrorMessageRedacted(
+		t,
+		metadata[MessageMetadataErrorParamKey].(string),
+	)
 
 	got := ResponseErrorFromMetadata(
 		metadata,
@@ -131,15 +144,15 @@ func TestResponseErrorMetadataHelpers(t *testing.T) {
 	if got.Type != model.ErrorTypeFlowError {
 		t.Fatalf("Type = %q, want %q", got.Type, model.ErrorTypeFlowError)
 	}
-	if got.Message != "task failed" {
-		t.Fatalf("Message = %q, want %q", got.Message, "task failed")
+	assertA2AErrorMessageRedacted(t, got.Message)
+	if got.Code == nil {
+		t.Fatalf("Code = nil, want redacted value")
 	}
-	if got.Code == nil || *got.Code != code {
-		t.Fatalf("Code = %v, want %q", got.Code, code)
+	assertA2AErrorMessageRedacted(t, *got.Code)
+	if got.Param == nil {
+		t.Fatalf("Param = nil, want redacted value")
 	}
-	if got.Param == nil || *got.Param != param {
-		t.Fatalf("Param = %v, want %q", got.Param, param)
-	}
+	assertA2AErrorMessageRedacted(t, *got.Param)
 }
 
 func TestResponseErrorFromMetadata_IgnoresPlainTextFallback(t *testing.T) {
@@ -150,5 +163,58 @@ func TestResponseErrorFromMetadata_IgnoresPlainTextFallback(t *testing.T) {
 	)
 	if got != nil {
 		t.Fatalf("expected nil response error, got %+v", got)
+	}
+}
+
+func TestResponseErrorFromMetadata_RedactsFallbackAndRawMetadata(t *testing.T) {
+	code := "api_key=sk-testsecret"
+	param := "Cookie: session=raw-cookie"
+	got := ResponseErrorFromMetadata(
+		map[string]any{
+			MessageMetadataObjectTypeKey:   model.ObjectTypeError,
+			MessageMetadataErrorTypeKey:    "flow_error secret: raw-secret",
+			MessageMetadataErrorCodeKey:    code,
+			MessageMetadataErrorParamKey:   param,
+			MessageMetadataErrorMessageKey: "",
+			MessageMetadataResponseIDKey:   "resp-1",
+			MessageMetadataTaskStateKey:    "failed",
+		},
+		sensitiveA2AErrorMessage(),
+		model.ErrorTypeFlowError,
+	)
+	if got == nil {
+		t.Fatal("ResponseErrorFromMetadata() returned nil")
+	}
+	assertA2AErrorMessageRedacted(t, got.Type)
+	assertA2AErrorMessageRedacted(t, got.Message)
+	if got.Code == nil {
+		t.Fatalf("Code = nil, want redacted value")
+	}
+	assertA2AErrorMessageRedacted(t, *got.Code)
+	if got.Param == nil {
+		t.Fatalf("Param = nil, want redacted value")
+	}
+	assertA2AErrorMessageRedacted(t, *got.Param)
+}
+
+func sensitiveA2AErrorMessage() string {
+	return "task failed Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie"
+}
+
+func assertA2AErrorMessageRedacted(t *testing.T, message string) {
+	t.Helper()
+	for _, leaked := range []string{
+		"raw-token",
+		"sk-testsecret",
+		"raw-secret",
+		"raw-password",
+		"raw-cookie",
+	} {
+		if strings.Contains(message, leaked) {
+			t.Fatalf("redacted message leaked %q: %q", leaked, message)
+		}
+	}
+	if !strings.Contains(message, "****") {
+		t.Fatalf("redacted message missing mask: %q", message)
 	}
 }
