@@ -2328,26 +2328,29 @@ func TestModelCallbacks_BeforeError(t *testing.T) {
 	eventChan, err := llmFlow.Run(ctx, invocation)
 	require.NoError(t, err)
 	var events []*event.Event
+	var errorEvent *event.Event
 	for evt := range eventChan {
 		if evt.RequiresCompletion {
 			key := agent.AppendEventNoticeKeyPrefix + evt.ID
 			invocation.NotifyCompletion(ctx, key)
 		}
 		events = append(events, evt)
-		if len(events) >= 2 {
-			break
-		}
 		// Receive the first error event and cancel ctx to prevent deadlock.
 		if evt.Error != nil {
+			errorEvent = evt
 			cancel()
+			break
+		}
+		if len(events) >= 2 {
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Contains(t, events[1].Error.Message, "before error")
-	require.Contains(t, events[1].Error.Message, "****")
-	require.NotContains(t, events[1].Error.Message, "raw-token")
-	require.NotContains(t, events[1].Error.Message, "sk-testsecret")
+	require.NotNil(t, errorEvent)
+	require.Contains(t, errorEvent.Error.Message, "before error")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "sk-testsecret")
 }
 
 func TestModelCallbacks_BeforeSetsContext_AfterSeesValue(t *testing.T) {
@@ -2460,26 +2463,29 @@ func TestModelCallbacks_AfterError(t *testing.T) {
 	eventChan, err := llmFlow.Run(ctx, invocation)
 	require.NoError(t, err)
 	var events []*event.Event
+	var errorEvent *event.Event
 	for evt := range eventChan {
 		if evt.RequiresCompletion {
 			key := agent.AppendEventNoticeKeyPrefix + evt.ID
 			invocation.NotifyCompletion(ctx, key)
 		}
 		events = append(events, evt)
-		if len(events) >= 2 {
-			break
-		}
 		// Receive the first error event and cancel ctx to prevent deadlock.
 		if evt.Error != nil {
+			errorEvent = evt
 			cancel()
+			break
+		}
+		if len(events) >= 2 {
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Contains(t, events[1].Error.Message, "after error")
-	require.Contains(t, events[1].Error.Message, "****")
-	require.NotContains(t, events[1].Error.Message, "raw-token")
-	require.NotContains(t, events[1].Error.Message, "raw-password")
+	require.NotNil(t, errorEvent)
+	require.Contains(t, errorEvent.Error.Message, "after error")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "raw-password")
 }
 
 func TestFlow_RunBeforeModelCallbacks_NoModelCallbacks(t *testing.T) {
