@@ -5187,7 +5187,7 @@ func TestContentRequestProcessor_getCurrentInvocationMessages(t *testing.T) {
 			expectedCount: 2,
 			expectedContent: []string{
 				"",
-				"type: flow_error, message: call err Authorization: ****",
+				"type: flow_error, message: call err Authorization: **** api_key=****",
 			},
 		},
 	}

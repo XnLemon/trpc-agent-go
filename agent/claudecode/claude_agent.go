@@ -189,9 +189,49 @@ func (a *claudeCodeAgent) handleRawOutputHook(
 		CLISessionID: cliSessionID,
 		Prompt:       invocation.Message.Content,
 		Stdout:       stdout,
-		Stderr:       stderr,
+		Stderr:       sanitizeRawOutputHookStderr(stderr),
 		Error:        runErr,
 	})
+}
+
+func sanitizeRawOutputHookStderr(stderr []byte) []byte {
+	lines := bytes.SplitAfter(stderr, []byte("\n"))
+	filtered := make([]byte, 0, len(stderr))
+	for _, line := range lines {
+		sensitiveAt := sensitiveCLIOutputIndex(line)
+		if sensitiveAt == 0 {
+			continue
+		}
+		if sensitiveAt > 0 {
+			line = bytes.TrimRight(line[:sensitiveAt], " \t\r\n")
+			if len(line) == 0 {
+				continue
+			}
+			line = append(line, '\n')
+		}
+		filtered = append(filtered, line...)
+	}
+	return filtered
+}
+
+func sensitiveCLIOutputIndex(line []byte) int {
+	lower := bytes.ToLower(line)
+	sensitiveMarkers := [][]byte{
+		[]byte("authorization:"),
+		[]byte("authorization="),
+		[]byte("api_key"),
+		[]byte("apikey"),
+		[]byte("cookie:"),
+		[]byte("cookie="),
+	}
+	first := -1
+	for _, marker := range sensitiveMarkers {
+		idx := bytes.Index(lower, marker)
+		if idx >= 0 && (first < 0 || idx < first) {
+			first = idx
+		}
+	}
+	return first
 }
 
 // emitFlowError emits an error response event and stops further invocation processing.
