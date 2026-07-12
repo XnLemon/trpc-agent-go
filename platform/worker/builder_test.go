@@ -10,6 +10,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -495,6 +496,158 @@ func TestRuntimeBuilderRejectsInvalidAgent(t *testing.T) {
 	})
 }
 
+func TestRuntimeBuilderRejectsNilStorageDependencies(t *testing.T) {
+	ctx := context.Background()
+	tenant := platform.Tenant{
+		TenantID: "tenant-a",
+		Status:   platform.TenantStatusActive,
+	}
+	app := platform.AgentApp{
+		TenantID:         tenant.TenantID,
+		AppID:            "app-a",
+		AppName:          "app",
+		AgentName:        "agent",
+		StorageProfileID: "profile-a",
+		Status:           platform.AppStatusActive,
+	}
+	binding := platform.ChannelBinding{
+		TenantID:    tenant.TenantID,
+		AppID:       app.AppID,
+		BindingID:   "binding-a",
+		Channel:     "wecom",
+		AccountID:   "account-a",
+		WebhookPath: "/callback",
+		TokenRef:    "secret://token",
+		SecretRef:   "secret://secret",
+		Status:      platform.BindingStatusActive,
+	}
+
+	tests := []struct {
+		name          string
+		adapter       storagerouter.StorageAdapter
+		wantErr       error
+		wantFactory   bool
+		mutateAdapter func(*nilStorageAdapter)
+	}{
+		{
+			name:    "nil adapter",
+			adapter: nil,
+			wantErr: ErrStorageAdapterRequired,
+		},
+		{
+			name:    "typed nil adapter",
+			adapter: (*nilStorageAdapter)(nil),
+			wantErr: ErrStorageAdapterRequired,
+		},
+		{
+			name: "nil session",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				a.session = nil
+			},
+			wantErr: ErrSessionServiceRequired,
+		},
+		{
+			name: "typed nil session",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				var sessionService *sessioninmemory.SessionService
+				a.session = sessionService
+			},
+			wantErr: ErrSessionServiceRequired,
+		},
+		{
+			name: "nil memory",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				a.memory = nil
+			},
+			wantErr: ErrMemoryServiceRequired,
+		},
+		{
+			name: "typed nil memory",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				var memoryService *memoryinmemory.MemoryService
+				a.memory = memoryService
+			},
+			wantErr: ErrMemoryServiceRequired,
+		},
+		{
+			name: "nil artifact",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				a.artifact = nil
+			},
+			wantErr: ErrArtifactServiceRequired,
+		},
+		{
+			name: "typed nil artifact",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				var artifactService *artifactstore.Service
+				a.artifact = artifactService
+			},
+			wantErr: ErrArtifactServiceRequired,
+		},
+		{
+			name: "nil knowledge",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				a.knowledge = nil
+			},
+			wantErr: ErrKnowledgeServiceRequired,
+		},
+		{
+			name: "typed nil knowledge",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				var knowledgeService *stubKnowledge
+				a.knowledge = knowledgeService
+			},
+			wantErr: ErrKnowledgeServiceRequired,
+		},
+		{
+			name: "nil audit",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				a.audit = nil
+			},
+			wantErr: ErrAuditSinkRequired,
+		},
+		{
+			name: "typed nil audit",
+			mutateAdapter: func(a *nilStorageAdapter) {
+				var auditSink *platform.InMemoryAuditSink
+				a.audit = auditSink
+			},
+			wantErr: ErrAuditSinkRequired,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := tt.adapter
+			if adapter == nil && tt.name != "nil adapter" {
+				baseAdapter, cleanup := newNilStorageAdapter(t)
+				defer cleanup()
+				if tt.mutateAdapter != nil {
+					tt.mutateAdapter(baseAdapter)
+				}
+				adapter = baseAdapter
+			}
+			factoryCalled := false
+			builder, err := NewRuntimeBuilder(
+				stubAdapterRouter{adapter: adapter},
+				AgentFactoryFunc(func(
+					context.Context,
+					AgentDependencies,
+				) (agent.Agent, error) {
+					factoryCalled = true
+					return &storageProbeAgent{name: app.AgentName}, nil
+				}),
+			)
+			require.NoError(t, err)
+
+			_, err = builder.Build(ctx, tenant, app, binding)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.wantErr)
+			assert.False(t, factoryCalled)
+		})
+	}
+}
+
 type storageProbeAgent struct {
 	name string
 }
@@ -601,4 +754,143 @@ func (r *countingRouter) Adapter(
 ) (storagerouter.StorageAdapter, error) {
 	r.adapterCalls++
 	return r.Router.Adapter(ctx, tenantID, profileID)
+}
+
+type stubAdapterRouter struct {
+	adapter storagerouter.StorageAdapter
+	err     error
+}
+
+func (r stubAdapterRouter) Profile(
+	context.Context,
+	string,
+	string,
+) (platform.StorageProfile, error) {
+	return platform.StorageProfile{}, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Adapter(
+	ctx context.Context,
+	tenantID string,
+	profileID string,
+) (storagerouter.StorageAdapter, error) {
+	_, _ = tenantID, profileID
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return r.adapter, r.err
+}
+
+func (r stubAdapterRouter) Route(
+	context.Context,
+	string,
+	string,
+	platform.BackendMigrationResource,
+) (storagerouter.RouteBinding, error) {
+	return storagerouter.RouteBinding{}, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Status(
+	context.Context,
+	string,
+	string,
+) (storagerouter.StatusSummary, error) {
+	return storagerouter.StatusSummary{}, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Session(context.Context, string, string) (session.Service, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Summary(context.Context, string, string) (storagerouter.SummaryStore, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Memory(context.Context, string, string) (memory.Service, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Artifact(context.Context, string, string) (artifact.Service, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Knowledge(context.Context, string, string) (knowledge.Knowledge, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r stubAdapterRouter) Audit(context.Context, string, string) (platform.AuditSink, error) {
+	return nil, errors.New("not implemented")
+}
+
+type nilStorageAdapter struct {
+	scope     storagerouter.StorageScope
+	session   session.Service
+	memory    memory.Service
+	artifact  artifact.Service
+	knowledge knowledge.Knowledge
+	audit     platform.AuditSink
+}
+
+func newNilStorageAdapter(t *testing.T) (*nilStorageAdapter, func()) {
+	t.Helper()
+	sessionService := sessioninmemory.NewSessionService()
+	memoryService := memoryinmemory.NewMemoryService()
+	artifactService, err := artifactstore.New(artifactstore.ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: artifactstore.NewInMemoryMetadataStore(),
+		ObjectStore:   artifactstore.NewInMemoryObjectStore(),
+		MaxAttempts:   2,
+	})
+	require.NoError(t, err)
+	return &nilStorageAdapter{
+			scope: storagerouter.StorageScope{
+				TenantID:  "tenant-a",
+				ProfileID: "profile-a",
+				Namespace: "tenant/tenant-a",
+			},
+			session:   sessionService,
+			memory:    memoryService,
+			artifact:  artifactService,
+			knowledge: &stubKnowledge{},
+			audit:     platform.NewInMemoryAuditSink(),
+		}, func() {
+			require.NoError(t, sessionService.Close())
+			require.NoError(t, memoryService.Close())
+		}
+}
+
+func (a *nilStorageAdapter) Scope() storagerouter.StorageScope {
+	return a.scope
+}
+
+func (a *nilStorageAdapter) Route(
+	context.Context,
+	platform.BackendMigrationResource,
+) (storagerouter.RouteBinding, error) {
+	return storagerouter.RouteBinding{}, errors.New("not implemented")
+}
+
+func (a *nilStorageAdapter) Session(context.Context) (session.Service, error) {
+	return a.session, nil
+}
+
+func (a *nilStorageAdapter) Summary(context.Context) (storagerouter.SummaryStore, error) {
+	return a.session.(storagerouter.SummaryStore), nil
+}
+
+func (a *nilStorageAdapter) Memory(context.Context) (memory.Service, error) {
+	return a.memory, nil
+}
+
+func (a *nilStorageAdapter) Artifact(context.Context) (artifact.Service, error) {
+	return a.artifact, nil
+}
+
+func (a *nilStorageAdapter) Knowledge(context.Context) (knowledge.Knowledge, error) {
+	return a.knowledge, nil
+}
+
+func (a *nilStorageAdapter) Audit(context.Context) (platform.AuditSink, error) {
+	return a.audit, nil
 }
