@@ -90,6 +90,63 @@ func TestServiceStoresMetadataSeparatelyFromObjectContent(t *testing.T) {
 	assert.Equal(t, record.ArtifactID, records[0].ArtifactID)
 }
 
+func TestServiceRejectsSessionIDReservedForUserArtifacts(t *testing.T) {
+	ctx := context.Background()
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: NewInMemoryMetadataStore(),
+		ObjectStore:   NewInMemoryObjectStore(),
+	})
+	require.NoError(t, err)
+
+	_, err = service.SaveArtifact(ctx, artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: userArtifactSessionID,
+	}, "notes.txt", &artifact.Artifact{Data: []byte("notes")})
+
+	require.ErrorIs(t, err, ErrEmptySessionInfo)
+}
+
+func TestServiceUserArtifactsDoNotShareSessionBucket(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewInMemoryMetadataStore()
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   NewInMemoryObjectStore(),
+	})
+	require.NoError(t, err)
+	sessionInfo := artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}
+
+	_, err = service.SaveArtifact(ctx, sessionInfo, "user:profile.txt", &artifact.Artifact{
+		Data:     []byte("profile"),
+		MimeType: "text/plain",
+		Name:     "user:profile.txt",
+	})
+	require.NoError(t, err)
+	record, err := service.Metadata(ctx, sessionInfo, "user:profile.txt", nil)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	assert.Equal(t, userArtifactSessionID, record.SessionID)
+
+	sessionRecords, err := metadata.Query(ctx, MetadataQuery{
+		TenantID:  "tenant-a",
+		AppName:   sessionInfo.AppName,
+		UserID:    sessionInfo.UserID,
+		SessionID: sessionInfo.SessionID,
+		Filename:  "user:profile.txt",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, sessionRecords)
+}
+
 func TestServiceRejectsCrossTenantAndCrossUserAccess(t *testing.T) {
 	ctx := context.Background()
 	metadata := NewInMemoryMetadataStore()

@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"unicode"
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
@@ -38,7 +37,6 @@ type Service struct {
 	metadataStore MetadataStore
 	objectStore   ObjectStore
 	maxAttempts   int
-	mu            sync.Mutex
 }
 
 // New creates a tenant-scoped artifact service.
@@ -95,9 +93,6 @@ func (s *Service) SaveArtifact(
 	if art == nil {
 		return 0, ErrNilArtifact
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	data := append([]byte(nil), art.Data...)
 	digest := sha256.Sum256(data)
@@ -279,9 +274,6 @@ func (s *Service) DeleteArtifact(
 	if err := validateFilename(filename); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	query := s.metadataQuery(sessionInfo, filename)
 	records, err := s.metadataStore.MarkDeleting(ctx, query)
 	if err != nil {
@@ -423,6 +415,9 @@ func (s *Service) validateSessionInfo(info artifact.SessionInfo) error {
 	if containsControl(info.AppName) ||
 		containsControl(info.UserID) ||
 		containsControl(info.SessionID) {
+		return ErrEmptySessionInfo
+	}
+	if info.SessionID == userArtifactSessionID {
 		return ErrEmptySessionInfo
 	}
 	prefix := s.namespace + "/"
