@@ -93,7 +93,11 @@ func (b *RuntimeBuilder) Build(
 		return gateway.Runtime{}, err
 	}
 
-	storage, err := b.router.Adapter(ctx, tenant.TenantID, app.StorageProfileID)
+	adapterRouter, ok := b.router.(storagerouter.AdapterRouter)
+	if !ok {
+		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
+	}
+	storage, err := adapterRouter.Adapter(ctx, tenant.TenantID, app.StorageProfileID)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", err)
 	}

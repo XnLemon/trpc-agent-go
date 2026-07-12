@@ -38,7 +38,7 @@ func TestRuntimeBuilderClosesGatewayStorageLoop(t *testing.T) {
 	tenantID := "tenant-a"
 	appID := "support-app"
 	profileID := "storage-a"
-	namespace := "tenant/" + tenantID
+	namespace := "tenant/" + tenantID + "/profile/" + profileID
 	backendID := "backend-a"
 
 	sessionService := sessioninmemory.NewSessionService()
@@ -395,7 +395,7 @@ func TestRuntimeBuilderRejectsInvalidAgent(t *testing.T) {
 	tenantID := "tenant-a"
 	profileID := "profile-a"
 	backendID := "backend-a"
-	namespace := "tenant/" + tenantID
+	namespace := "tenant/" + tenantID + "/profile/" + profileID
 
 	sessionService := sessioninmemory.NewSessionService()
 	t.Cleanup(func() {
@@ -753,7 +753,11 @@ func (r *countingRouter) Adapter(
 	profileID string,
 ) (storagerouter.StorageAdapter, error) {
 	r.adapterCalls++
-	return r.Router.Adapter(ctx, tenantID, profileID)
+	adapterRouter, ok := r.Router.(storagerouter.AdapterRouter)
+	if !ok {
+		return nil, errors.New("adapter router not implemented")
+	}
+	return adapterRouter.Adapter(ctx, tenantID, profileID)
 }
 
 type stubAdapterRouter struct {
@@ -837,7 +841,7 @@ func newNilStorageAdapter(t *testing.T) (*nilStorageAdapter, func()) {
 	memoryService := memoryinmemory.NewMemoryService()
 	artifactService, err := artifactstore.New(artifactstore.ServiceConfig{
 		TenantID:      "tenant-a",
-		Namespace:     "tenant/tenant-a",
+		Namespace:     "tenant/tenant-a/profile/profile-a",
 		MetadataStore: artifactstore.NewInMemoryMetadataStore(),
 		ObjectStore:   artifactstore.NewInMemoryObjectStore(),
 		MaxAttempts:   2,
@@ -847,7 +851,7 @@ func newNilStorageAdapter(t *testing.T) (*nilStorageAdapter, func()) {
 			scope: storagerouter.StorageScope{
 				TenantID:  "tenant-a",
 				ProfileID: "profile-a",
-				Namespace: "tenant/tenant-a",
+				Namespace: "tenant/tenant-a/profile/profile-a",
 			},
 			session:   sessionService,
 			memory:    memoryService,
