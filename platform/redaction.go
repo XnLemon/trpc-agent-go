@@ -17,7 +17,8 @@ var defaultRedactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9._~+/\-]+=*`),
 	regexp.MustCompile(`(?i)(Authorization\s*=\s*Bearer\s+)[^\r\n\s]+`),
 	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
-	regexp.MustCompile(`(?im)(authorization\s*:\s*(?:token|digest)\s+)[^\r\n]+`),
+	regexp.MustCompile(`(?im)(authorization\s*:\s*(?:token|apikey)\s+)[^\r\n\s]+`),
+	regexp.MustCompile(`(?im)(authorization\s*:\s*digest\s+)[^\r\n]+`),
 	regexp.MustCompile(`(?im)(authorization\s*=\s*(?:token|digest)\s+)[^\r\n]+`),
 	regexp.MustCompile(`(?im)(authorization\s*[:=]\s*)[^\r\n]+`),
 	regexp.MustCompile(`(?im)(cookie\s*[:=]\s*)[^\r\n]+`),
@@ -65,13 +66,16 @@ func (r *Redactor) Redact(text string) string {
 
 func redactMatch(match string) string {
 	lower := strings.ToLower(match)
-	if strings.Contains(lower, "authorization:") {
-		if idx := strings.Index(match, ":"); idx >= 0 {
-			return match[:idx+1] + " ****"
-		}
-	}
-	if strings.Contains(lower, "authorization=") {
-		if idx := strings.Index(match, "="); idx >= 0 {
+	if strings.HasPrefix(strings.TrimSpace(lower), "authorization") {
+		if idx := strings.IndexAny(match, ":="); idx >= 0 {
+			// Specialized patterns redact known schemes first. Preserve the
+			// remaining line so adjacent sensitive fields are handled separately.
+			if strings.HasPrefix(strings.TrimSpace(match[idx+1:]), "****") {
+				return match
+			}
+			if match[idx] == ':' {
+				return match[:idx+1] + " ****"
+			}
 			return match[:idx+1] + "****"
 		}
 	}

@@ -2092,7 +2092,7 @@ func (p *injectToolsRequestProcessor) ProcessRequest(
 	}
 }
 
-const flowRunPanicTestMsg = "boom"
+const flowRunPanicTestMsg = "boom Authorization: Bearer raw-token api_key=sk-testsecret"
 
 type panicRequestProcessor struct{}
 
@@ -2194,7 +2194,10 @@ func TestFlow_Run_RecoversPanic(t *testing.T) {
 
 	require.NotNil(t, errorEvent)
 	require.Equal(t, model.ErrorTypeFlowError, errorEvent.Error.Type)
-	require.Contains(t, errorEvent.Error.Message, flowRunPanicTestMsg)
+	require.Contains(t, errorEvent.Error.Message, "boom")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "sk-testsecret")
 }
 
 const flowRunPanicTestUnknownValue = 123
@@ -2312,7 +2315,7 @@ func TestModelCallbacks_BeforeError(t *testing.T) {
 
 	modelCallbacks := model.NewCallbacks()
 	modelCallbacks.RegisterBeforeModel(func(ctx context.Context, req *model.Request) (*model.Response, error) {
-		return nil, errors.New("before error")
+		return nil, errors.New("before error Authorization: Bearer raw-token api_key=sk-testsecret")
 	})
 
 	llmFlow := New(nil, nil, Options{ModelCallbacks: modelCallbacks})
@@ -2325,23 +2328,29 @@ func TestModelCallbacks_BeforeError(t *testing.T) {
 	eventChan, err := llmFlow.Run(ctx, invocation)
 	require.NoError(t, err)
 	var events []*event.Event
+	var errorEvent *event.Event
 	for evt := range eventChan {
 		if evt.RequiresCompletion {
 			key := agent.AppendEventNoticeKeyPrefix + evt.ID
 			invocation.NotifyCompletion(ctx, key)
 		}
 		events = append(events, evt)
-		if len(events) >= 2 {
+		// Receive the first error event and cancel ctx to prevent deadlock.
+		if evt.Error != nil {
+			errorEvent = evt
+			cancel()
 			break
 		}
-		// Receive the first error event and cancel ctx to prevent deadlock.
-		if evt.Error != nil && evt.Error.Message == "before error" {
-			cancel()
+		if len(events) >= 2 {
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Equal(t, "before error", events[1].Error.Message)
+	require.NotNil(t, errorEvent)
+	require.Contains(t, errorEvent.Error.Message, "before error")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "sk-testsecret")
 }
 
 func TestModelCallbacks_BeforeSetsContext_AfterSeesValue(t *testing.T) {
@@ -2443,7 +2452,7 @@ func TestModelCallbacks_AfterError(t *testing.T) {
 	modelCallbacks := model.NewCallbacks()
 	modelCallbacks.RegisterAfterModel(
 		func(ctx context.Context, req *model.Request, rsp *model.Response, modelErr error) (*model.Response, error) {
-			return nil, errors.New("after error")
+			return nil, errors.New("after error token=raw-token password=raw-password")
 		},
 	)
 
@@ -2454,23 +2463,29 @@ func TestModelCallbacks_AfterError(t *testing.T) {
 	eventChan, err := llmFlow.Run(ctx, invocation)
 	require.NoError(t, err)
 	var events []*event.Event
+	var errorEvent *event.Event
 	for evt := range eventChan {
 		if evt.RequiresCompletion {
 			key := agent.AppendEventNoticeKeyPrefix + evt.ID
 			invocation.NotifyCompletion(ctx, key)
 		}
 		events = append(events, evt)
-		if len(events) >= 2 {
+		// Receive the first error event and cancel ctx to prevent deadlock.
+		if evt.Error != nil {
+			errorEvent = evt
+			cancel()
 			break
 		}
-		// Receive the first error event and cancel ctx to prevent deadlock.
-		if evt.Error != nil && evt.Error.Message == "after error" {
-			cancel()
+		if len(events) >= 2 {
 			break
 		}
 	}
 	require.Equal(t, 2, len(events))
-	require.Equal(t, "after error", events[1].Error.Message)
+	require.NotNil(t, errorEvent)
+	require.Contains(t, errorEvent.Error.Message, "after error")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "raw-password")
 }
 
 func TestFlow_RunBeforeModelCallbacks_NoModelCallbacks(t *testing.T) {

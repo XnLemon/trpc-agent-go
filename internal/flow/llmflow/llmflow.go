@@ -248,7 +248,7 @@ func (f *Flow) Run(ctx context.Context, invocation *agent.Invocation) (<-chan *e
 						invocation.InvocationID,
 						invocation.AgentName,
 						agent.ErrorTypeStopAgentError,
-						err.Error(),
+						flow.RedactError(err),
 					)
 					log.ErrorfContext(
 						ctx,
@@ -262,7 +262,7 @@ func (f *Flow) Run(ctx context.Context, invocation *agent.Invocation) (<-chan *e
 						invocation.InvocationID,
 						invocation.AgentName,
 						model.ErrorTypeFlowError,
-						err.Error(),
+						flow.RedactError(err),
 					)
 					log.ErrorfContext(
 						ctx,
@@ -313,7 +313,7 @@ func recoverFlowRunPanic(
 		flowInvocationID(invocation),
 		flowAgentName(invocation),
 		model.ErrorTypeFlowError,
-		fmt.Sprintf(flowRunPanicErrFmt, recovered),
+		flow.RedactErrorText(fmt.Sprintf(flowRunPanicErrFmt, recovered)),
 	)
 	agent.EmitEvent(ctx, invocation, eventChan, errorEvent)
 }
@@ -1155,7 +1155,7 @@ func (f *Flow) handleAfterModelCallbackResult(
 			flowInvocationID(eventInvocation),
 			flowAgentName(eventInvocation),
 			model.ErrorTypeFlowError,
-			err.Error(),
+			flow.RedactError(err),
 		))
 		return ctx, nil, err
 	}

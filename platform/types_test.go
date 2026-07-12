@@ -884,6 +884,50 @@ func TestRedactorMasksNonBearerAuthorizationCredentials(t *testing.T) {
 	}
 }
 
+func TestRedactorPreservesAdjacentSensitiveFields(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	input := "failed Authorization: Bearer raw-token postgres://user:pass@example/db api_key=sk-1234567890abcdef password=plain Cookie: session=abc; sid=def"
+	got := redactor.Redact(input)
+	for _, leaked := range []string{
+		"raw-token",
+		":pass@",
+		"sk-1234567890abcdef",
+		"password=plain",
+		"session=abc",
+		"sid=def",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("redacted output leaked %q: %q", leaked, got)
+		}
+	}
+	for _, want := range []string{
+		"Authorization: ****",
+		"postgres://****@example/db",
+		"api_key=****",
+		"password=****",
+		"Cookie: ****",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in redacted output, got %q", want, got)
+		}
+	}
+}
+
+func TestRedactorMasksUnknownMultipartAuthorizationValue(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	input := "request failed Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE, SignedHeaders=host;x-amz-date, Signature=abcdef\nnext line"
+	got := redactor.Redact(input)
+	if got != "request failed Authorization: ****\nnext line" {
+		t.Fatalf("expected the full authorization value to be masked, got %q", got)
+	}
+}
+
 func TestRedactorMasksURLUserinfoWithMultipleAtSigns(t *testing.T) {
 	redactor, err := NewRedactor()
 	if err != nil {

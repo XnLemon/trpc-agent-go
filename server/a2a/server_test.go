@@ -3913,7 +3913,7 @@ func TestBuildTaskErrorMessage(t *testing.T) {
 				ID: responseID,
 				Error: &model.ResponseError{
 					Type:    model.ErrorTypeFlowError,
-					Message: "task failed",
+					Message: sensitiveA2AServerErrorMessage(),
 				},
 			},
 		}
@@ -3940,15 +3940,15 @@ func TestBuildTaskErrorMessage(t *testing.T) {
 				)
 			}
 			if assert.Len(t, msg.Parts, 1) {
-				var text string
-				switch part := msg.Parts[0].(type) {
-				case *protocol.TextPart:
-					text = part.Text
-				case protocol.TextPart:
-					text = part.Text
-				}
+				text := a2aServerTextPartText(msg.Parts[0])
 				if assert.NotEmpty(t, text) {
-					assert.Equal(t, "task failed", text)
+					assert.Contains(t, text, "task failed")
+					assertA2AServerErrorRedacted(t, text)
+					assert.Equal(
+						t,
+						msg.Metadata[ia2a.MessageMetadataErrorMessageKey],
+						text,
+					)
 				}
 			}
 
@@ -4010,7 +4010,7 @@ func TestMessageProcessor_ProcessMessage_StructuredTaskError(
 						Done: true,
 						Error: &model.ResponseError{
 							Type:    model.ErrorTypeFlowError,
-							Message: "task failed",
+							Message: sensitiveA2AServerErrorMessage(),
 							Code:    &code,
 						},
 					},
@@ -4044,6 +4044,9 @@ func TestMessageProcessor_ProcessMessage_StructuredTaskError(
 	assert.Equal(t, protocol.TaskStateFailed, task.Status.State)
 	assert.NotNil(t, task.Metadata)
 	assert.Equal(t, code, task.Metadata[ia2a.MessageMetadataErrorCodeKey])
+	if messageMeta, ok := task.Metadata[ia2a.MessageMetadataErrorMessageKey].(string); assert.True(t, ok) {
+		assertA2AServerErrorRedacted(t, messageMeta)
+	}
 	assert.NotNil(t, task.Status.Message)
 	assert.Equal(
 		t,
@@ -4053,7 +4056,45 @@ func TestMessageProcessor_ProcessMessage_StructuredTaskError(
 	task.Metadata["new_key"] = "task-only"
 	_, ok = task.Status.Message.Metadata["new_key"]
 	assert.False(t, ok)
-	assert.Len(t, task.Status.Message.Parts, 1)
+	if assert.Len(t, task.Status.Message.Parts, 1) {
+		assertA2AServerTextPartRedacted(t, task.Status.Message.Parts[0])
+	}
+}
+
+func sensitiveA2AServerErrorMessage() string {
+	return "task failed Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie"
+}
+
+func assertA2AServerTextPartRedacted(t *testing.T, part protocol.Part) {
+	t.Helper()
+	text := a2aServerTextPartText(part)
+	assert.Contains(t, text, "task failed")
+	assertA2AServerErrorRedacted(t, text)
+}
+
+func a2aServerTextPartText(part protocol.Part) string {
+	switch typed := part.(type) {
+	case *protocol.TextPart:
+		return typed.Text
+	case protocol.TextPart:
+		return typed.Text
+	default:
+		return ""
+	}
+}
+
+func assertA2AServerErrorRedacted(t *testing.T, message string) {
+	t.Helper()
+	for _, leaked := range []string{
+		"raw-token",
+		"sk-testsecret",
+		"raw-secret",
+		"raw-password",
+		"raw-cookie",
+	} {
+		assert.NotContains(t, message, leaked)
+	}
+	assert.Contains(t, message, "****")
 }
 
 func TestMessageProcessor_ProcessMessage_StructuredTaskError_ResponseRewriterDrop(

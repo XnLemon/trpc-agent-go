@@ -1286,7 +1286,7 @@ func (p *ContentRequestProcessor) getIncrementMessagesAfterCutoff(
 		// use error fill message content if message content is empty
 		if len(evt.Response.Choices) > 0 && evt.Response.Choices[0].Message.Content == "" && evt.Response.Error != nil {
 			rsp := evt.Response.Clone()
-			rsp.Choices[0].Message.Content = fmt.Sprintf("type: %s, message: %s", rsp.Error.Type, rsp.Error.Message)
+			rsp.Choices[0].Message.Content = responseErrorFallbackContent(rsp.Error)
 			evt.Response = rsp
 		}
 		events = append(events, evt)
@@ -1960,14 +1960,21 @@ func normalizeCurrentInvocationEvent(evt event.Event) event.Event {
 		evt.Response.Choices[0].Message.Content == "" &&
 		evt.Response.Error != nil {
 		rsp := evt.Response.Clone()
-		rsp.Choices[0].Message.Content = fmt.Sprintf(
-			"type: %s, message: %s",
-			rsp.Error.Type,
-			rsp.Error.Message,
-		)
+		rsp.Choices[0].Message.Content = responseErrorFallbackContent(rsp.Error)
 		evt.Response = rsp
 	}
 	return evt
+}
+
+func responseErrorFallbackContent(err *model.ResponseError) string {
+	if err == nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"type: %s, message: %s",
+		iflow.RedactErrorText(err.Type),
+		iflow.RedactErrorText(err.Message),
+	)
 }
 
 func containsInvocationMessage(
