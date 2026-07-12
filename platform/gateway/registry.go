@@ -22,6 +22,7 @@ type Runtime struct {
 	App     platform.AgentApp
 	Binding platform.ChannelBinding
 	Runner  runner.Runner
+	Audit   platform.AuditSink
 }
 
 // Validate checks that the runtime can process inbound messages.

@@ -351,6 +351,120 @@ func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 	assert.Equal(t, platform.IdempotencyStatusCompleted, groupResult.Status)
 }
 
+func TestServiceHandleInboundPrefersRuntimeAuditSink(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "runtime audit reply"},
+	)
+	runtime.Audit = runtimeAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	result, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-runtime-audit", "user-a", "hello"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "runtime audit reply", result.Outbound.Content)
+	require.Len(t, runtimeAudit.Records(), 1)
+	assert.Equal(t, "completed", runtimeAudit.Records()[0].Decision)
+	assert.Empty(t, fallbackAudit.Records())
+}
+
+func TestServiceHandleInboundUsesFallbackAuditForInvalidRuntime(t *testing.T) {
+	ctx := context.Background()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "unused"},
+	)
+	runtime.App.AppID = "other-app"
+	runtime.Binding.AppID = "other-app"
+	runtime.Audit = runtimeAudit
+	svc := NewService(
+		staticRegistry{runtime: runtime},
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	_, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-runtime-mismatch", "user-a", "hello"),
+	)
+	require.ErrorIs(t, err, ErrRuntimeMismatch)
+	assert.Empty(t, runtimeAudit.Records())
+	require.Len(t, fallbackAudit.Records(), 1)
+	assert.Equal(t, "reject", fallbackAudit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundFallsBackFromTypedNilRuntimeAudit(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "fallback audit reply"},
+	)
+	var typedNilAudit *platform.InMemoryAuditSink
+	runtime.Audit = typedNilAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	result, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-typed-nil-audit", "user-a", "hello"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "fallback audit reply", result.Outbound.Content)
+	require.Len(t, fallbackAudit.Records(), 1)
+	assert.Equal(t, "completed", fallbackAudit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundUsesRuntimeAuditForBindingRejection(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "unused"},
+	)
+	runtime.Binding.AllowedUsers = []string{"allowed-user"}
+	runtime.Audit = runtimeAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	_, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-binding-reject", "denied-user", "hello"),
+	)
+	require.ErrorIs(t, err, ErrBindingAccessDenied)
+	require.Len(t, runtimeAudit.Records(), 1)
+	assert.Equal(t, "reject", runtimeAudit.Records()[0].Decision)
+	assert.Empty(t, fallbackAudit.Records())
+}
+
 func TestServiceHandleInboundDuplicateReusesOutboxBackedResult(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
