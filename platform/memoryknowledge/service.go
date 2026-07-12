@@ -11,10 +11,12 @@ package memoryknowledge
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge/searchfilter"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 )
@@ -93,15 +95,10 @@ func (s Scope) Validate() error {
 
 // ScopedAppName returns the memory app key inside the tenant namespace.
 func (s Scope) ScopedAppName() string {
-	namespace := strings.TrimRight(strings.TrimSpace(s.Namespace), `/\|:`)
-	appID := strings.Trim(strings.TrimSpace(s.AppID), `/\|:`)
-	if namespace == "" {
-		return appID
-	}
-	if appID == "" {
-		return namespace
-	}
-	return namespace + "/" + appID
+	return "scope/v1/" +
+		encodeScopeComponent(MetadataTenantID, s.TenantID) + "/" +
+		encodeScopeComponent("namespace", strings.TrimSpace(s.Namespace)) + "/" +
+		encodeScopeComponent(MetadataAppID, s.AppID)
 }
 
 func (s Scope) memoryUserKey() memory.UserKey {
@@ -169,8 +166,8 @@ func (s *Service) AddMemory(
 		return MemoryWriteReceipt{}, err
 	}
 	opts := make([]memory.AddOption, 0, 1)
-	if req.Metadata != nil {
-		opts = append(opts, memory.WithMetadata(req.Metadata))
+	if metadata := cloneMemoryMetadata(req.Metadata); metadata != nil {
+		opts = append(opts, memory.WithMetadata(metadata))
 	}
 	topics := append([]string(nil), req.Topics...)
 	if err := s.memory.AddMemory(ctx, req.Scope.memoryUserKey(), req.Memory, topics, opts...); err != nil {
@@ -249,6 +246,9 @@ func (s *Service) SearchKnowledge(
 			return nil, err
 		}
 	}
+	if err := rejectReservedFilterCondition(scopedReq.SearchFilter.FilterCondition); err != nil {
+		return nil, err
+	}
 	if req.Scope.UserIDHash != "" {
 		if err := enforceMetadata(metadata, MetadataUserIDHash, req.Scope.UserIDHash); err != nil {
 			return nil, err
@@ -286,6 +286,58 @@ func enforceMetadata(metadata map[string]any, key string, value string) error {
 	}
 	metadata[key] = value
 	return nil
+}
+
+func encodeScopeComponent(name string, value string) string {
+	return name + ":" + strconv.Itoa(len(value)) + ":" + value
+}
+
+func cloneMemoryMetadata(metadata *memory.Metadata) *memory.Metadata {
+	if metadata == nil {
+		return nil
+	}
+	cloned := *metadata
+	if metadata.EventTime != nil {
+		eventTime := *metadata.EventTime
+		cloned.EventTime = &eventTime
+	}
+	if metadata.Participants != nil {
+		cloned.Participants = append([]string(nil), metadata.Participants...)
+	}
+	return &cloned
+}
+
+func rejectReservedFilterCondition(condition *searchfilter.UniversalFilterCondition) error {
+	if condition == nil {
+		return nil
+	}
+	if isReservedScopeField(condition.Field) {
+		return ErrFilterOutsideScope
+	}
+	switch condition.Operator {
+	case searchfilter.OperatorAnd, searchfilter.OperatorOr:
+		children, ok := condition.Value.([]*searchfilter.UniversalFilterCondition)
+		if !ok {
+			return nil
+		}
+		for _, child := range children {
+			if err := rejectReservedFilterCondition(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isReservedScopeField(field string) bool {
+	field = strings.TrimSpace(field)
+	field = strings.TrimPrefix(field, knowledge.MetadataFieldPrefix)
+	switch field {
+	case MetadataTenantID, MetadataAppID, MetadataInternalUserID, MetadataUserIDHash:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateIdentifier(field string, value string, requiredErr error) error {
