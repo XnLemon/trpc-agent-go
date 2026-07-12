@@ -97,25 +97,43 @@ func (b *RuntimeBuilder) Build(
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", err)
 	}
+	if isNilDependency(storage) {
+		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
+	}
 	sessionService, err := storage.Session(ctx)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve session service: %w", err)
+	}
+	if isNilDependency(sessionService) {
+		return gateway.Runtime{}, fmt.Errorf("resolve session service: %w", ErrSessionServiceRequired)
 	}
 	memoryService, err := storage.Memory(ctx)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve memory service: %w", err)
 	}
+	if isNilDependency(memoryService) {
+		return gateway.Runtime{}, fmt.Errorf("resolve memory service: %w", ErrMemoryServiceRequired)
+	}
 	artifactService, err := storage.Artifact(ctx)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve artifact service: %w", err)
+	}
+	if isNilDependency(artifactService) {
+		return gateway.Runtime{}, fmt.Errorf("resolve artifact service: %w", ErrArtifactServiceRequired)
 	}
 	knowledgeService, err := storage.Knowledge(ctx)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve knowledge service: %w", err)
 	}
+	if isNilDependency(knowledgeService) {
+		return gateway.Runtime{}, fmt.Errorf("resolve knowledge service: %w", ErrKnowledgeServiceRequired)
+	}
 	auditSink, err := storage.Audit(ctx)
 	if err != nil {
 		return gateway.Runtime{}, fmt.Errorf("resolve audit sink: %w", err)
+	}
+	if isNilDependency(auditSink) {
+		return gateway.Runtime{}, fmt.Errorf("resolve audit sink: %w", ErrAuditSinkRequired)
 	}
 
 	dependencies := AgentDependencies{
