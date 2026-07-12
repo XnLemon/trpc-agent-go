@@ -54,15 +54,29 @@ type RouteBinding struct {
 // Router resolves tenant/app storage services from platform storage profiles.
 type Router interface {
 	Profile(ctx context.Context, tenantID string, profileID string) (platform.StorageProfile, error)
-	Adapter(ctx context.Context, tenantID string, profileID string) (StorageAdapter, error)
-	Route(ctx context.Context, tenantID string, profileID string, resource platform.BackendMigrationResource) (RouteBinding, error)
 	Session(ctx context.Context, tenantID string, profileID string) (session.Service, error)
-	Summary(ctx context.Context, tenantID string, profileID string) (SummaryStore, error)
 	Memory(ctx context.Context, tenantID string, profileID string) (memory.Service, error)
 	Artifact(ctx context.Context, tenantID string, profileID string) (artifact.Service, error)
 	Knowledge(ctx context.Context, tenantID string, profileID string) (knowledge.Knowledge, error)
 	Audit(ctx context.Context, tenantID string, profileID string) (platform.AuditSink, error)
 	Status(ctx context.Context, tenantID string, profileID string) (StatusSummary, error)
+}
+
+// AdapterRouter is an optional Router capability for tenant/profile-bound
+// storage adapters.
+type AdapterRouter interface {
+	Adapter(ctx context.Context, tenantID string, profileID string) (StorageAdapter, error)
+}
+
+// RouteRouter is an optional Router capability for inspecting selected backend
+// routes.
+type RouteRouter interface {
+	Route(ctx context.Context, tenantID string, profileID string, resource platform.BackendMigrationResource) (RouteBinding, error)
+}
+
+// SummaryRouter is an optional Router capability for selecting summary stores.
+type SummaryRouter interface {
+	Summary(ctx context.Context, tenantID string, profileID string) (SummaryStore, error)
 }
 
 // InMemoryRouter is a concurrency-safe storage router for tests and demos.
