@@ -155,6 +155,12 @@ jobs:
         with:
           name: coverage-merged
           path: coverage.out
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
   golangci:
     name: lint
     runs-on: ubuntu-latest
