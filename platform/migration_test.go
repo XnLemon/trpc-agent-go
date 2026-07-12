@@ -69,6 +69,13 @@ func TestStorageProfileValidateRequiresTenantScopedNamespace(t *testing.T) {
 		t.Fatalf("expected tenant-scoped namespace to pass, got %v", err)
 	}
 
+	nestedTenant := valid
+	nestedTenant.TenantID = "tenant-a/profile"
+	nestedTenant.Namespace = "tenant/tenant-a/profile/x"
+	if err := nestedTenant.Validate(); err == nil {
+		t.Fatalf("expected namespace shared with shorter tenant ID to fail")
+	}
+
 	tests := []struct {
 		name      string
 		namespace string
