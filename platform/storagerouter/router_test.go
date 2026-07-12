@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,7 +143,7 @@ func TestRouterRouteReturnsTenantScopedMetadata(t *testing.T) {
 	assert.Equal(t, "profile-a", route.ProfileID)
 	assert.Equal(t, platform.BackendMigrationResourceSession, route.Resource)
 	assert.Equal(t, "session-hot", route.BackendID)
-	assert.Equal(t, "tenant/tenant-a", route.Namespace)
+	assert.Equal(t, "tenant/tenant-a/profile/profile-a", route.Namespace)
 	assert.Equal(t, platform.StorageMigrationModeDualWrite, route.MigrationMode)
 	assert.True(t, route.IsMigrating)
 }
@@ -172,13 +173,80 @@ func TestRouterAdapterReturnsScopedStores(t *testing.T) {
 		SessionID: "session-a",
 	}, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "tenant/tenant-a/app-a", created.AppName)
+	assert.Equal(t, "tenant/tenant-a/profile/profile-a/app-a", created.AppName)
 
 	route, err := adapter.Route(ctx, platform.BackendMigrationResourceSession)
 	require.NoError(t, err)
 	assert.Equal(t, "tenant-a", route.TenantID)
 	assert.Equal(t, "profile-a", route.ProfileID)
-	assert.Equal(t, "tenant/tenant-a", route.Namespace)
+	assert.Equal(t, "tenant/tenant-a/profile/profile-a", route.Namespace)
+}
+
+func TestRouterAdapterPreservesSessionOptionalCapabilities(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	sessionSvc := &capabilitySessionService{
+		Service: sessioninmemory.NewSessionService(),
+	}
+	p := profile("tenant-a", "profile-a", "hot")
+	require.NoError(t, router.RegisterProfile(p))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "hot",
+		Session:   sessionSvc,
+	}))
+
+	adapter, err := router.Adapter(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	sessionStore, err := adapter.Session(ctx)
+	require.NoError(t, err)
+	scopedApp := adapter.Scope().ScopedAppName("app-a")
+
+	windowStore, ok := sessionStore.(session.WindowService)
+	require.True(t, ok)
+	searchStore, ok := sessionStore.(session.SearchableService)
+	require.True(t, ok)
+	trackStore, ok := sessionStore.(session.TrackService)
+	require.True(t, ok)
+
+	_, err = windowStore.GetEventWindow(ctx, session.EventWindowRequest{
+		Key: session.Key{AppName: "app-a", UserID: "user-a", SessionID: "session-a"},
+	})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+	_, err = searchStore.SearchEvents(ctx, session.EventSearchRequest{
+		UserKey: session.UserKey{AppName: "app-a", UserID: "user-a"},
+	})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+	err = trackStore.AppendTrackEvent(ctx, &session.Session{
+		AppName:   "app-a",
+		UserID:    "user-a",
+		ID:        "session-a",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		State:     session.StateMap{},
+	}, &session.TrackEvent{})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+
+	_, err = windowStore.GetEventWindow(ctx, session.EventWindowRequest{
+		Key: session.Key{AppName: scopedApp, UserID: "user-a", SessionID: "session-a"},
+	})
+	require.NoError(t, err)
+	_, err = searchStore.SearchEvents(ctx, session.EventSearchRequest{
+		UserKey: session.UserKey{AppName: scopedApp, UserID: "user-a"},
+	})
+	require.NoError(t, err)
+	err = trackStore.AppendTrackEvent(ctx, &session.Session{
+		AppName:   scopedApp,
+		UserID:    "user-a",
+		ID:        "session-a",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		State:     session.StateMap{},
+	}, &session.TrackEvent{})
+	require.NoError(t, err)
+	assert.True(t, sessionSvc.windowCalled)
+	assert.True(t, sessionSvc.searchCalled)
+	assert.True(t, sessionSvc.trackCalled)
 }
 
 func TestRouterAdapterRejectsUnscopedKeys(t *testing.T) {
@@ -212,6 +280,39 @@ func TestRouterAdapterRejectsUnscopedKeys(t *testing.T) {
 		UserID:  "user-a",
 	}, "prefers tea", []string{"preference"})
 	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+}
+
+type capabilitySessionService struct {
+	session.Service
+	windowCalled bool
+	searchCalled bool
+	trackCalled  bool
+}
+
+func (s *capabilitySessionService) GetEventWindow(
+	ctx context.Context,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	s.windowCalled = true
+	return &session.EventWindow{SessionKey: req.Key}, nil
+}
+
+func (s *capabilitySessionService) SearchEvents(
+	ctx context.Context,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	s.searchCalled = true
+	return []session.EventSearchResult{}, nil
+}
+
+func (s *capabilitySessionService) AppendTrackEvent(
+	ctx context.Context,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	s.trackCalled = true
+	return nil
 }
 
 func TestRouterAdapterScopesKnowledgeQueries(t *testing.T) {
@@ -292,7 +393,7 @@ func profile(tenantID string, profileID string, backendID string) platform.Stora
 		KnowledgeBackend: backendID,
 		AuditBackend:     backendID,
 		DSNRef:           "secret://storage",
-		Namespace:        "tenant/" + tenantID,
+		Namespace:        "tenant/" + tenantID + "/profile/" + profileID,
 	}
 }
 

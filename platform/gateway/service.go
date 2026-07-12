@@ -182,7 +182,7 @@ func (s *Service) HandleInbound(
 			InternalUserID: internalUserID,
 			RequestID:      requestID,
 			Key:            key,
-			FencingToken:   record.SessionLease.FencingToken(),
+			FencingToken:   sessionLeaseFencingToken(record.SessionLease),
 			Start:          start,
 		},
 	)
@@ -377,6 +377,14 @@ func (s *Service) releaseSessionLease(ctx context.Context, lease SessionLease) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_ = lease.Release(cleanupCtx)
+}
+
+func sessionLeaseFencingToken(lease SessionLease) int64 {
+	fenced, ok := lease.(SessionLeaseFencingToken)
+	if !ok {
+		return 0
+	}
+	return fenced.FencingToken()
 }
 
 func (s *Service) runAndReply(

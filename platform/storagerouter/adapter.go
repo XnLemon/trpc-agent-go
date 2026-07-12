@@ -140,7 +140,7 @@ func (a *tenantStorageAdapter) Session(ctx context.Context) (session.Service, er
 	if err != nil {
 		return nil, err
 	}
-	return &scopedSessionService{Service: service, scope: a.scope}, nil
+	return newScopedSessionService(service, a.scope), nil
 }
 
 func (a *tenantStorageAdapter) Summary(ctx context.Context) (SummaryStore, error) {
@@ -186,6 +186,97 @@ func (a *tenantStorageAdapter) Audit(ctx context.Context) (platform.AuditSink, e
 type scopedSessionService struct {
 	session.Service
 	scope StorageScope
+}
+
+type scopedSessionWindowService struct {
+	*scopedSessionService
+	window session.WindowService
+}
+
+type scopedSessionSearchableService struct {
+	*scopedSessionService
+	searchable session.SearchableService
+}
+
+type scopedSessionTrackService struct {
+	*scopedSessionService
+	track session.TrackService
+}
+
+type scopedSessionWindowSearchableService struct {
+	*scopedSessionService
+	window     session.WindowService
+	searchable session.SearchableService
+}
+
+type scopedSessionWindowTrackService struct {
+	*scopedSessionService
+	window session.WindowService
+	track  session.TrackService
+}
+
+type scopedSessionSearchableTrackService struct {
+	*scopedSessionService
+	searchable session.SearchableService
+	track      session.TrackService
+}
+
+type scopedSessionAllCapabilitiesService struct {
+	*scopedSessionService
+	window     session.WindowService
+	searchable session.SearchableService
+	track      session.TrackService
+}
+
+func newScopedSessionService(service session.Service, scope StorageScope) session.Service {
+	scoped := &scopedSessionService{Service: service, scope: scope}
+	window, hasWindow := service.(session.WindowService)
+	searchable, hasSearchable := service.(session.SearchableService)
+	track, hasTrack := service.(session.TrackService)
+	switch {
+	case hasWindow && hasSearchable && hasTrack:
+		return &scopedSessionAllCapabilitiesService{
+			scopedSessionService: scoped,
+			window:               window,
+			searchable:           searchable,
+			track:                track,
+		}
+	case hasWindow && hasSearchable:
+		return &scopedSessionWindowSearchableService{
+			scopedSessionService: scoped,
+			window:               window,
+			searchable:           searchable,
+		}
+	case hasWindow && hasTrack:
+		return &scopedSessionWindowTrackService{
+			scopedSessionService: scoped,
+			window:               window,
+			track:                track,
+		}
+	case hasSearchable && hasTrack:
+		return &scopedSessionSearchableTrackService{
+			scopedSessionService: scoped,
+			searchable:           searchable,
+			track:                track,
+		}
+	case hasWindow:
+		return &scopedSessionWindowService{
+			scopedSessionService: scoped,
+			window:               window,
+		}
+	case hasSearchable:
+		return &scopedSessionSearchableService{
+			scopedSessionService: scoped,
+			searchable:           searchable,
+		}
+	case hasTrack:
+		return &scopedSessionTrackService{
+			scopedSessionService: scoped,
+			track:                track,
+		}
+	default:
+		return scoped
+	}
 }
 
 func (s *scopedSessionService) CreateSession(
@@ -346,6 +437,136 @@ func (s *scopedSessionService) GetSessionSummaryText(
 		return "", false
 	}
 	return s.Service.GetSessionSummaryText(ctx, sess, opts...)
+}
+
+func scopedGetEventWindow(
+	ctx context.Context,
+	scope StorageScope,
+	window session.WindowService,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	if err := scope.validateSessionKey(req.Key); err != nil {
+		return nil, err
+	}
+	return window.GetEventWindow(ctx, req)
+}
+
+func scopedSearchEvents(
+	ctx context.Context,
+	scope StorageScope,
+	searchable session.SearchableService,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	if err := scope.validateSessionUserKey(req.UserKey); err != nil {
+		return nil, err
+	}
+	return searchable.SearchEvents(ctx, req)
+}
+
+func scopedAppendTrackEvent(
+	ctx context.Context,
+	scope StorageScope,
+	track session.TrackService,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	if err := scope.validateSession(sess); err != nil {
+		return err
+	}
+	return track.AppendTrackEvent(ctx, sess, event, opts...)
+}
+
+func (s *scopedSessionWindowService) GetEventWindow(
+	ctx context.Context,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	return scopedGetEventWindow(ctx, s.scope, s.window, req)
+}
+
+func (s *scopedSessionSearchableService) SearchEvents(
+	ctx context.Context,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	return scopedSearchEvents(ctx, s.scope, s.searchable, req)
+}
+
+func (s *scopedSessionTrackService) AppendTrackEvent(
+	ctx context.Context,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	return scopedAppendTrackEvent(ctx, s.scope, s.track, sess, event, opts...)
+}
+
+func (s *scopedSessionWindowSearchableService) GetEventWindow(
+	ctx context.Context,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	return scopedGetEventWindow(ctx, s.scope, s.window, req)
+}
+
+func (s *scopedSessionWindowSearchableService) SearchEvents(
+	ctx context.Context,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	return scopedSearchEvents(ctx, s.scope, s.searchable, req)
+}
+
+func (s *scopedSessionWindowTrackService) GetEventWindow(
+	ctx context.Context,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	return scopedGetEventWindow(ctx, s.scope, s.window, req)
+}
+
+func (s *scopedSessionWindowTrackService) AppendTrackEvent(
+	ctx context.Context,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	return scopedAppendTrackEvent(ctx, s.scope, s.track, sess, event, opts...)
+}
+
+func (s *scopedSessionSearchableTrackService) SearchEvents(
+	ctx context.Context,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	return scopedSearchEvents(ctx, s.scope, s.searchable, req)
+}
+
+func (s *scopedSessionSearchableTrackService) AppendTrackEvent(
+	ctx context.Context,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	return scopedAppendTrackEvent(ctx, s.scope, s.track, sess, event, opts...)
+}
+
+func (s *scopedSessionAllCapabilitiesService) GetEventWindow(
+	ctx context.Context,
+	req session.EventWindowRequest,
+) (*session.EventWindow, error) {
+	return scopedGetEventWindow(ctx, s.scope, s.window, req)
+}
+
+func (s *scopedSessionAllCapabilitiesService) SearchEvents(
+	ctx context.Context,
+	req session.EventSearchRequest,
+) ([]session.EventSearchResult, error) {
+	return scopedSearchEvents(ctx, s.scope, s.searchable, req)
+}
+
+func (s *scopedSessionAllCapabilitiesService) AppendTrackEvent(
+	ctx context.Context,
+	sess *session.Session,
+	event *session.TrackEvent,
+	opts ...session.Option,
+) error {
+	return scopedAppendTrackEvent(ctx, s.scope, s.track, sess, event, opts...)
 }
 
 type scopedSummaryStore struct {

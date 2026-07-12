@@ -25,7 +25,11 @@ func TestInMemorySessionLeaseStoreIssuesMonotonicFencingTokens(t *testing.T) {
 	if !acquired {
 		t.Fatalf("first acquire should succeed")
 	}
-	if got := first.FencingToken(); got != 1 {
+	firstFenced, ok := first.(SessionLeaseFencingToken)
+	if !ok {
+		t.Fatalf("first lease should expose fencing token capability")
+	}
+	if got := firstFenced.FencingToken(); got != 1 {
 		t.Fatalf("expected first fencing token 1, got %d", got)
 	}
 
@@ -47,7 +51,11 @@ func TestInMemorySessionLeaseStoreIssuesMonotonicFencingTokens(t *testing.T) {
 	if !acquired {
 		t.Fatalf("second acquire should succeed after release")
 	}
-	if got := second.FencingToken(); got != 2 {
+	secondFenced, ok := second.(SessionLeaseFencingToken)
+	if !ok {
+		t.Fatalf("second lease should expose fencing token capability")
+	}
+	if got := secondFenced.FencingToken(); got != 2 {
 		t.Fatalf("expected second fencing token 2, got %d", got)
 	}
 }

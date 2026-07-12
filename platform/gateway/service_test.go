@@ -717,6 +717,25 @@ func TestServiceHandleInboundPropagatesLeaseFencingToken(t *testing.T) {
 	assert.Equal(t, int64(42), r.calls[0].fencingToken)
 }
 
+func TestServiceHandleInboundAllowsLeaseWithoutFencingToken(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithSessionLeaseStore(&legacyLeaseStore{lease: &legacyLease{}}),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, int64(0), r.calls[0].fencingToken)
+}
+
 func TestServiceHandleInboundCancellationDuringEventCollectionReleasesSessionLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	registry := NewInMemoryRegistry()
@@ -1590,6 +1609,29 @@ func (l *recordingLease) Release(ctx context.Context) error {
 	l.released = true
 	l.ctxErr = ctx.Err()
 	return nil
+}
+
+type legacyLeaseStore struct {
+	lease *legacyLease
+}
+
+func (s *legacyLeaseStore) Acquire(
+	ctx context.Context,
+	key SessionLeaseKey,
+) (SessionLease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return s.lease, true, nil
+}
+
+type legacyLease struct {
+	released bool
+}
+
+func (l *legacyLease) Release(ctx context.Context) error {
+	l.released = true
+	return ctx.Err()
 }
 
 func responseEvent(content string, done bool) *event.Event {

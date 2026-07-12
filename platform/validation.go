@@ -317,26 +317,10 @@ func validateStorageNamespace(tenantID, namespace string) error {
 	if err := validateAuditRedactedText("namespace", namespace); err != nil {
 		return err
 	}
-	if !namespaceContainsSegment(namespace, tenantID) {
-		return fmt.Errorf("namespace must include tenant_id")
+	if !strings.HasPrefix(namespace, "tenant/"+tenantID+"/") {
+		return fmt.Errorf("namespace must start with tenant/<tenant_id>/")
 	}
 	return nil
-}
-
-func namespaceContainsSegment(namespace, tenantID string) bool {
-	for _, segment := range strings.FieldsFunc(namespace, func(r rune) bool {
-		switch r {
-		case '/', '\\', ':', '|':
-			return true
-		default:
-			return false
-		}
-	}) {
-		if segment == tenantID {
-			return true
-		}
-	}
-	return false
 }
 
 // Validate checks that audit retention and sampling policy is safe to use.

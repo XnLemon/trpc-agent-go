@@ -75,6 +75,7 @@ func TestStorageProfileValidateRequiresTenantScopedNamespace(t *testing.T) {
 	}{
 		{name: "missing", namespace: ""},
 		{name: "other_tenant", namespace: "tenant/tenant-b/profile/profile"},
+		{name: "nested_other_tenant", namespace: "tenant/tenant-b/tenant-a/profile/profile"},
 		{name: "shared", namespace: "shared/profile"},
 		{name: "whitespace", namespace: " tenant/tenant-a/profile/profile "},
 	}

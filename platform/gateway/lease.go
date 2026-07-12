@@ -27,8 +27,13 @@ type SessionLeaseKey struct {
 
 // SessionLease releases one acquired session execution slot.
 type SessionLease interface {
-	FencingToken() int64
 	Release(ctx context.Context) error
+}
+
+// SessionLeaseFencingToken is an optional lease capability that provides a
+// storage fencing token for backends that enforce monotonic writes.
+type SessionLeaseFencingToken interface {
+	FencingToken() int64
 }
 
 // InMemorySessionLeaseStore is a process-local lease store for tests and demos.
