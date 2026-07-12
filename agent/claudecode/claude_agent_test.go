@@ -235,7 +235,7 @@ func TestClaudeCodeAgent_Run_RawOutputHook(t *testing.T) {
 	transcript := `[{"type":"result","result":"hello"}]`
 	runner := &scriptedRunner{
 		run: func(cmd command) ([]byte, []byte, error) {
-			return []byte(transcript), []byte("warn Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), nil
+			return []byte(transcript), []byte("warn Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nX-Api-Key: header-secret\nCookie: session=abc; sid=def"), nil
 		},
 	}
 
@@ -264,7 +264,7 @@ func TestClaudeCodeAgent_Run_RawOutputHook(t *testing.T) {
 	require.Equal(t, cliSessionID(sess), got.CLISessionID)
 	require.Equal(t, "Hi.", got.Prompt)
 	require.Equal(t, transcript, string(got.Stdout))
-	require.Equal(t, "warn\n", string(got.Stderr))
+	require.Equal(t, "warn\nX-\n", string(got.Stderr))
 	require.NoError(t, got.Error)
 }
 

@@ -221,6 +221,7 @@ func sensitiveCLIOutputIndex(line []byte) int {
 		[]byte("authorization="),
 		[]byte("api_key"),
 		[]byte("apikey"),
+		[]byte("api-key"),
 		[]byte("cookie:"),
 		[]byte("cookie="),
 	}

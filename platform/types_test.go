@@ -916,6 +916,18 @@ func TestRedactorPreservesAdjacentSensitiveFields(t *testing.T) {
 	}
 }
 
+func TestRedactorMasksUnknownMultipartAuthorizationValue(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	input := "request failed Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE, SignedHeaders=host;x-amz-date, Signature=abcdef\nnext line"
+	got := redactor.Redact(input)
+	if got != "request failed Authorization: ****\nnext line" {
+		t.Fatalf("expected the full authorization value to be masked, got %q", got)
+	}
+}
+
 func TestRedactorMasksURLUserinfoWithMultipleAtSigns(t *testing.T) {
 	redactor, err := NewRedactor()
 	if err != nil {
