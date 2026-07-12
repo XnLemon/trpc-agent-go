@@ -189,6 +189,16 @@ func (rejectTransferController) OnTransfer(
 	return 0, errors.New(testControllerRejectErr)
 }
 
+type sensitiveRejectTransferController struct{}
+
+func (sensitiveRejectTransferController) OnTransfer(
+	context.Context,
+	string,
+	string,
+) (time.Duration, error) {
+	return 0, errors.New("blocked Authorization: Bearer raw-token api_key=sk-testsecret")
+}
+
 func TestTransferResponseProc_ControllerRejects(t *testing.T) {
 	target := &mockAgent{name: "child", emit: true}
 	parent := &parentAgent{child: target}
@@ -223,6 +233,46 @@ func TestTransferResponseProc_ControllerRejects(t *testing.T) {
 	}
 	require.Len(t, evts, 1)
 	require.NotNil(t, evts[0].Error)
+	require.Nil(t, inv.TransferInfo)
+}
+
+func TestTransferResponseProc_ControllerRejectRedactsSensitiveDetails(t *testing.T) {
+	target := &mockAgent{name: "child", emit: true}
+	parent := &parentAgent{child: target}
+
+	inv := &agent.Invocation{
+		Agent:        parent,
+		AgentName:    "parent",
+		InvocationID: "inv-ctrl-redact",
+		RunOptions: agent.RunOptions{
+			RuntimeState: map[string]any{
+				agent.RuntimeStateKeyTransferController: sensitiveRejectTransferController{},
+			},
+		},
+		TransferInfo: &agent.TransferInfo{TargetAgentName: "child"},
+	}
+
+	out := make(chan *event.Event, 10)
+	NewTransferResponseProcessor(true).ProcessResponse(
+		context.Background(),
+		inv,
+		&model.Request{},
+		&model.Response{ID: "r-ctrl-redact"},
+		out,
+	)
+	close(out)
+
+	var errorEvent *event.Event
+	for evt := range out {
+		if evt != nil && evt.Error != nil {
+			errorEvent = evt
+		}
+	}
+	require.NotNil(t, errorEvent)
+	require.Contains(t, errorEvent.Error.Message, "Transfer rejected")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "sk-testsecret")
 	require.Nil(t, inv.TransferInfo)
 }
 
@@ -538,7 +588,7 @@ func TestTransferResponseProc_CustomizerRejects(t *testing.T) {
 		RunOptions: agent.RunOptions{
 			RuntimeState: map[string]any{
 				agent.RuntimeStateKeyTransferController: customizeTransferController{
-					err: errors.New("custom rejected"),
+					err: errors.New("custom rejected token=raw-token password=raw-password"),
 				},
 			},
 		},
@@ -566,6 +616,9 @@ func TestTransferResponseProc_CustomizerRejects(t *testing.T) {
 	}
 	require.NotNil(t, errorEvent)
 	require.Contains(t, errorEvent.Error.Message, "custom rejected")
+	require.Contains(t, errorEvent.Error.Message, "****")
+	require.NotContains(t, errorEvent.Error.Message, "raw-token")
+	require.NotContains(t, errorEvent.Error.Message, "raw-password")
 	require.Zero(t, transferEvents)
 	require.Nil(t, inv.TransferInfo)
 	require.False(t, target.invoked)
