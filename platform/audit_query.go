@@ -16,21 +16,25 @@ import (
 
 // AuditQueryFilter scopes audit retrieval to one tenant and optional safe dimensions.
 type AuditQueryFilter struct {
-	TenantID    string
-	AppID       string
-	AuditID     string
-	Channel     string
-	BindingID   string
-	UserIDHash  string
-	SessionID   string
-	RequestID   string
-	MessageID   string
-	ToolName    string
-	Decision    string
-	TraceID     string
-	CreatedFrom time.Time
-	CreatedTo   time.Time
-	Limit       int
+	TenantID         string
+	AppID            string
+	AuditID          string
+	Channel          string
+	BindingID        string
+	UserIDHash       string
+	SessionID        string
+	RequestID        string
+	MessageID        string
+	AgentName        string
+	ModelName        string
+	ToolName         string
+	Decision         string
+	ErrorType        string
+	TraceID          string
+	RedactionVersion string
+	CreatedFrom      time.Time
+	CreatedTo        time.Time
+	Limit            int
 }
 
 // QueryAudit returns audit records matching one tenant-scoped filter.
@@ -76,9 +80,13 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 		safeTextField{"session_id", f.SessionID},
 		safeTextField{"request_id", f.RequestID},
 		safeTextField{"message_id", f.MessageID},
+		safeTextField{"agent_name", f.AgentName},
+		safeTextField{"model_name", f.ModelName},
 		safeTextField{"tool_name", f.ToolName},
 		safeTextField{"decision", f.Decision},
+		safeTextField{"error_type", f.ErrorType},
 		safeTextField{"trace_id", f.TraceID},
+		safeTextField{"redaction_version", f.RedactionVersion},
 	); err != nil {
 		return AuditQueryFilter{}, err
 	}
@@ -96,9 +104,13 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 	f.SessionID = strings.TrimSpace(f.SessionID)
 	f.RequestID = strings.TrimSpace(f.RequestID)
 	f.MessageID = strings.TrimSpace(f.MessageID)
+	f.AgentName = strings.TrimSpace(f.AgentName)
+	f.ModelName = strings.TrimSpace(f.ModelName)
 	f.ToolName = strings.TrimSpace(f.ToolName)
 	f.Decision = strings.TrimSpace(f.Decision)
+	f.ErrorType = strings.TrimSpace(f.ErrorType)
 	f.TraceID = strings.TrimSpace(f.TraceID)
+	f.RedactionVersion = strings.TrimSpace(f.RedactionVersion)
 	return f, nil
 }
 
@@ -107,23 +119,42 @@ func (f AuditQueryFilter) matchesScope(record AuditRecord) bool {
 }
 
 func (f AuditQueryFilter) matches(record AuditRecord) bool {
-	if !matchOptional(f.AppID, record.AppID) ||
-		!matchOptional(f.AuditID, record.AuditID) ||
-		!matchOptional(f.Channel, record.Channel) ||
-		!matchOptional(f.BindingID, record.BindingID) ||
-		!matchOptional(f.UserIDHash, record.UserIDHash) ||
-		!matchOptional(f.SessionID, record.SessionID) ||
-		!matchOptional(f.RequestID, record.RequestID) ||
-		!matchOptional(f.MessageID, record.MessageID) ||
-		!matchOptional(f.ToolName, record.ToolName) ||
-		!matchOptional(f.Decision, record.Decision) ||
-		!matchOptional(f.TraceID, record.TraceID) {
+	return f.matchesOptionalFields(record) && f.matchesCreatedAt(record.CreatedAt)
+}
+
+func (f AuditQueryFilter) matchesOptionalFields(record AuditRecord) bool {
+	for _, field := range []struct {
+		want string
+		got  string
+	}{
+		{f.AppID, record.AppID},
+		{f.AuditID, record.AuditID},
+		{f.Channel, record.Channel},
+		{f.BindingID, record.BindingID},
+		{f.UserIDHash, record.UserIDHash},
+		{f.SessionID, record.SessionID},
+		{f.RequestID, record.RequestID},
+		{f.MessageID, record.MessageID},
+		{f.AgentName, record.AgentName},
+		{f.ModelName, record.ModelName},
+		{f.ToolName, record.ToolName},
+		{f.Decision, record.Decision},
+		{f.ErrorType, record.ErrorType},
+		{f.RedactionVersion, record.RedactionVersion},
+		{f.TraceID, record.TraceID},
+	} {
+		if !matchOptional(field.want, field.got) {
+			return false
+		}
+	}
+	return true
+}
+
+func (f AuditQueryFilter) matchesCreatedAt(createdAt time.Time) bool {
+	if !f.CreatedFrom.IsZero() && createdAt.Before(f.CreatedFrom) {
 		return false
 	}
-	if !f.CreatedFrom.IsZero() && record.CreatedAt.Before(f.CreatedFrom) {
-		return false
-	}
-	if !f.CreatedTo.IsZero() && record.CreatedAt.After(f.CreatedTo) {
+	if !f.CreatedTo.IsZero() && createdAt.After(f.CreatedTo) {
 		return false
 	}
 	return true
