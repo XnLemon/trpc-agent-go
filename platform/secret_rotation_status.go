@@ -100,6 +100,9 @@ func (r SecretRotationStatusReport) Validate() error {
 	if strings.TrimSpace(r.TenantID) == "" {
 		return ErrTenantIDRequired
 	}
+	if err := validateAuditRedactedText("tenant_id", r.TenantID); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.RotationID) == "" {
 		return fmt.Errorf("rotation_id is required")
 	}
@@ -158,6 +161,9 @@ func (i SecretRotationStatusInput) normalize() (SecretRotationStatusInput, error
 	i.TenantID = strings.TrimSpace(i.TenantID)
 	if i.TenantID == "" {
 		return SecretRotationStatusInput{}, ErrTenantIDRequired
+	}
+	if err := validateAuditRedactedText("tenant_id", i.TenantID); err != nil {
+		return SecretRotationStatusInput{}, err
 	}
 	i.AppID = strings.TrimSpace(i.AppID)
 	i.ResourceType = strings.TrimSpace(i.ResourceType)
