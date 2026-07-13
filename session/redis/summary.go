@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	isummary "trpc.group/trpc-go/trpc-agent-go/session/internal/summary"
@@ -33,12 +34,13 @@ func (s *Service) CreateSessionSummary(ctx context.Context, sess *session.Sessio
 	}
 
 	key := session.Key{AppName: sess.AppName, UserID: sess.UserID, SessionID: sess.ID}
-	ctx, span := s.startSpan(ctx, "create_session_summary", key)
-	defer span.End()
-
 	if err := key.CheckSessionKey(); err != nil {
 		return fmt.Errorf("check session key failed: %w", err)
 	}
+	ctx, span := s.startSpan(ctx, "create_session_summary", key)
+	itelemetry.MarkSummaryCreateSpan(span)
+	defer span.End()
+
 	if !isummary.NewSummaryDispatchPolicy(
 		s.opts.summaryFilterAllowlist,
 		s.opts.shouldCascadeFullSessionSummary(),

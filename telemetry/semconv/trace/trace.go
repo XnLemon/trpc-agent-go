@@ -46,6 +46,18 @@ const (
 	KeyTRPCAgentGoUserID = "trpc_go_agent.user.id"
 	// KeyTRPCAgentGoClientTimeToFirstToken is the attribute key for time to first token metric.
 	KeyTRPCAgentGoClientTimeToFirstToken = "trpc_agent_go.client.time_to_first_token" // #nosec G101 - this is a metric key name, not a credential.
+	// KeyTRPCAgentGoTraceSpan is the stable platform trace span contract name.
+	KeyTRPCAgentGoTraceSpan = "trpc.go.agent.trace.span"
+	// KeyTRPCAgentGoMemorySearchMaxResults is the configured memory search result cap.
+	KeyTRPCAgentGoMemorySearchMaxResults = "trpc.go.agent.memory.search.max_results"
+	// KeyTRPCAgentGoMemorySearchResultCount is the number of returned memory search results.
+	KeyTRPCAgentGoMemorySearchResultCount = "trpc.go.agent.memory.search.result_count"
+	// KeyTRPCAgentGoMemorySearchHybrid is whether hybrid memory search was requested.
+	KeyTRPCAgentGoMemorySearchHybrid = "trpc.go.agent.memory.search.hybrid"
+	// KeyTRPCAgentGoMemorySearchDeduplicate is whether memory search deduplication was requested.
+	KeyTRPCAgentGoMemorySearchDeduplicate = "trpc.go.agent.memory.search.deduplicate"
+	// KeyTRPCAgentGoMemoryWriteOperation is the memory write operation type.
+	KeyTRPCAgentGoMemoryWriteOperation = "trpc.go.agent.memory.write.operation"
 
 	// KeyGenAIAppName is the attribute key for GenAI application name.
 	KeyGenAIAppName = "gen_ai.app.name"
@@ -137,6 +149,10 @@ const (
 	KeyGenAIToolCallArguments = "gen_ai.tool.call.arguments"
 	// KeyGenAIToolCallResult is the attribute key for tool call result.
 	KeyGenAIToolCallResult = "gen_ai.tool.call.result"
+	// KeyGenAIToolCallArgumentsPresent is the attribute key for whether tool call arguments were provided.
+	KeyGenAIToolCallArgumentsPresent = "trpc.go.agent.tool.call.arguments_present"
+	// KeyGenAIToolCallResultPresent is the attribute key for whether a tool call result was provided.
+	KeyGenAIToolCallResultPresent = "trpc.go.agent.tool.call.result_present"
 	// KeyGenAIRequestToolDefinitions is the attribute key for tool definitions.
 	KeyGenAIRequestToolDefinitions = "gen_ai.request.tool.definitions"
 

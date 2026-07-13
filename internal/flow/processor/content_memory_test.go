@@ -17,12 +17,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	itelemetry "trpc.group/trpc-go/trpc-agent-go/internal/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/session/inmemory"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -371,6 +375,49 @@ func (m *mockMemoryService) Close() error {
 	return nil
 }
 
+func requireMemorySearchSpan(t *testing.T, recorder interface {
+	Ended() []sdktrace.ReadOnlySpan
+}) sdktrace.ReadOnlySpan {
+	t.Helper()
+	for _, span := range recorder.Ended() {
+		if span.Name() == itelemetry.NewMemorySearchSpanName() {
+			return span
+		}
+	}
+	t.Fatalf("span %q not recorded; ended spans=%v", itelemetry.NewMemorySearchSpanName(), recorder.Ended())
+	return nil
+}
+
+func requireMemorySearchSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, key string, want any) {
+	t.Helper()
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) != key {
+			continue
+		}
+		switch v := want.(type) {
+		case string:
+			require.Equal(t, v, attr.Value.AsString())
+		case int64:
+			require.Equal(t, v, attr.Value.AsInt64())
+		case bool:
+			require.Equal(t, v, attr.Value.AsBool())
+		default:
+			t.Fatalf("unsupported expected attribute type %T", want)
+		}
+		return
+	}
+	t.Fatalf("missing attribute %s=%v; attributes=%v", key, want, span.Attributes())
+}
+
+func requireNoMemorySearchSpanAttribute(t *testing.T, span sdktrace.ReadOnlySpan, key string) {
+	t.Helper()
+	for _, attr := range span.Attributes() {
+		if string(attr.Key) == key {
+			t.Fatalf("unexpected attribute %s present; attributes=%v", key, span.Attributes())
+		}
+	}
+}
+
 type mockSearchableSessionService struct {
 	session.Service
 	searchResults []session.EventSearchResult
@@ -666,6 +713,34 @@ func TestGetPreloadMemoryMessage(t *testing.T) {
 		assert.Contains(t, msg.Content, "Relevant memory")
 	})
 
+	t.Run("positive preload records memory search trace contract", func(t *testing.T) {
+		recorder := useSpanRecorder(t)
+		p := NewContentRequestProcessor(WithPreloadMemory(2))
+		mockSvc := &mockMemoryService{
+			memories: []*memory.Entry{
+				newTestMemoryEntry("mem-1", "first"),
+				newTestMemoryEntry("mem-2", "second"),
+				newTestMemoryEntry("mem-3", "third"),
+			},
+			searchResults: []*memory.Entry{
+				newTestMemoryEntry("mem-search", "Relevant memory"),
+			},
+		}
+		inv := newTestInvocation(model.NewUserMessage("find relevant"), mockSvc)
+
+		msg := p.getPreloadMemoryMessage(context.Background(), inv)
+
+		require.NotNil(t, msg)
+		span := requireMemorySearchSpan(t, recorder)
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemorySearch)
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchMaxResults, int64(2))
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(1))
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, true)
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, true)
+		requireNoMemorySearchSpanAttribute(t, span, "trpc.go.agent.memory.search.query")
+		require.NotEqual(t, codes.Error, span.Status().Code)
+	})
+
 	t.Run("positive preload falls back to recent load when query is empty", func(t *testing.T) {
 		p := NewContentRequestProcessor(WithPreloadMemory(2))
 		mockSvc := &mockMemoryService{
@@ -703,6 +778,28 @@ func TestGetPreloadMemoryMessage(t *testing.T) {
 		assert.Contains(t, msg.Content, "first")
 		assert.Contains(t, msg.Content, "second")
 		assert.NotContains(t, msg.Content, "third")
+	})
+
+	t.Run("positive preload records memory search trace contract on search error", func(t *testing.T) {
+		recorder := useSpanRecorder(t)
+		p := NewContentRequestProcessor(WithPreloadMemory(2))
+		mockSvc := &mockMemoryService{
+			memories: []*memory.Entry{
+				newTestMemoryEntry("mem-1", "first"),
+				newTestMemoryEntry("mem-2", "second"),
+				newTestMemoryEntry("mem-3", "third"),
+			},
+			searchErr: assert.AnError,
+		}
+		inv := newTestInvocation(model.NewUserMessage("hello"), mockSvc)
+
+		msg := p.getPreloadMemoryMessage(context.Background(), inv)
+
+		require.NotNil(t, msg)
+		span := requireMemorySearchSpan(t, recorder)
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoTraceSpan, itelemetry.OperationMemorySearch)
+		requireMemorySearchSpanAttribute(t, span, semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, int64(0))
+		require.Equal(t, codes.Error, span.Status().Code)
 	})
 
 	t.Run("positive preload falls back to recent load when search is empty", func(t *testing.T) {

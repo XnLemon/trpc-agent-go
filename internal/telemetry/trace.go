@@ -12,8 +12,14 @@
 package telemetry
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -31,6 +37,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+const traceSafeHashEnvKey = "TRPC_AGENT_TRACE_HASH_KEY"
+
+var traceSafeHashDefaultKey = []byte("trpc-agent-go-trace-safe-hash-v1")
+
 // grpcDial is a package-level variable to allow test injection of a custom dialer.
 // In production, this points to grpc.Dial.
 var grpcDial = grpc.Dial
@@ -45,12 +55,24 @@ const (
 	SpanNamePrefixExecuteTool = "execute_tool"
 
 	OperationExecuteTool     = "execute_tool"
+	OperationToolCall        = "tool.call"
+	OperationMemorySearch    = "memory.search"
+	OperationMemoryWrite     = "memory.write"
+	OperationSummaryCreate   = "summary.create"
 	OperationChat            = "chat"
 	OperationGenerateContent = "generate_content"
 	OperationInvokeAgent     = "invoke_agent"
 	OperationCreateAgent     = "create_agent"
 	OperationEmbeddings      = "embeddings"
 	OperationWorkflow        = "workflow"
+)
+
+// Memory write operation values.
+const (
+	MemoryWriteOperationAdd    = "add"
+	MemoryWriteOperationUpdate = "update"
+	MemoryWriteOperationDelete = "delete"
+	MemoryWriteOperationClear  = "clear"
 )
 
 // NewChatSpanName creates a new chat span name.
@@ -61,6 +83,104 @@ func NewChatSpanName(requestModel string) string {
 // NewExecuteToolSpanName creates a new execute tool span name.
 func NewExecuteToolSpanName(toolName string) string {
 	return OperationExecuteTool + " " + toolName
+}
+
+// NewToolCallSpanName creates the stable platform tool-call span contract name.
+func NewToolCallSpanName() string {
+	return OperationToolCall
+}
+
+// NewMemorySearchSpanName creates the stable platform memory-search span contract name.
+func NewMemorySearchSpanName() string {
+	return OperationMemorySearch
+}
+
+// NewMemoryWriteSpanName creates the stable platform memory-write span contract name.
+func NewMemoryWriteSpanName() string {
+	return OperationMemoryWrite
+}
+
+// NewSummaryCreateSpanName creates the stable platform summary-create span contract name.
+func NewSummaryCreateSpanName() string {
+	return OperationSummaryCreate
+}
+
+// MarkToolCallSpan marks a span with the stable platform tool-call contract.
+func MarkToolCallSpan(span trace.Span) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewToolCallSpanName()))
+}
+
+// TraceMemorySearch marks a memory search span with stable low-cardinality attributes.
+func TraceMemorySearch(span trace.Span, maxResults int, resultCount int, hybridSearch bool, deduplicate bool, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewMemorySearchSpanName()),
+		attribute.Int(semconvtrace.KeyTRPCAgentGoMemorySearchMaxResults, maxResults),
+		attribute.Int(semconvtrace.KeyTRPCAgentGoMemorySearchResultCount, resultCount),
+		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchHybrid, hybridSearch),
+		attribute.Bool(semconvtrace.KeyTRPCAgentGoMemorySearchDeduplicate, deduplicate),
+	)
+	if err != nil {
+		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
+	}
+}
+
+// TraceMemoryWrite marks a memory write span with stable low-cardinality attributes.
+func TraceMemoryWrite(span trace.Span, operation string, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewMemoryWriteSpanName()),
+		attribute.String(semconvtrace.KeyTRPCAgentGoMemoryWriteOperation, operation),
+	)
+	if err != nil {
+		recordSafeSpanError(span, err, semconvtrace.ValueDefaultErrorType)
+	}
+}
+
+// MarkSummaryCreateSpan marks a span with the stable platform summary-create contract.
+func MarkSummaryCreateSpan(span trace.Span) {
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.String(semconvtrace.KeyTRPCAgentGoTraceSpan, NewSummaryCreateSpanName()))
+}
+
+func recordSafeSpanError(span trace.Span, err error, fallback string) {
+	if err == nil {
+		return
+	}
+	errorType := ToErrorType(err, fallback)
+	span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
+	span.SetStatus(codes.Error, errorType)
+	span.RecordError(errors.New(errorType))
+}
+
+// TraceSafeHash returns a stable low-cardinality HMAC digest for trace attributes.
+func TraceSafeHash(scope string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, traceSafeHashKey())
+	_, _ = mac.Write([]byte(scope))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(value))
+	return scope + "_hash_" + hex.EncodeToString(mac.Sum(nil))[:24]
+}
+
+func traceSafeHashKey() []byte {
+	key := strings.TrimSpace(os.Getenv(traceSafeHashEnvKey))
+	if key == "" {
+		return traceSafeHashDefaultKey
+	}
+	return []byte(key)
 }
 
 // WorkflowType is the normalized type vocabulary used by workflow spans.
@@ -201,7 +321,9 @@ func TraceToolCall(span trace.Span, sess *session.Session, declaration *tool.Dec
 		attribute.String(semconvtrace.KeyGenAIOperationName, OperationExecuteTool),
 		attribute.String(semconvtrace.KeyGenAIToolName, declaration.Name),
 		attribute.String(semconvtrace.KeyGenAIToolDescription, declaration.Description),
+		attribute.Bool(semconvtrace.KeyGenAIToolCallArgumentsPresent, len(args) > 0),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil {
 		span.SetAttributes(attribute.String(semconvtrace.KeyEventID, rspEvent.ID))
 	}
@@ -212,23 +334,24 @@ func TraceToolCall(span trace.Span, sess *session.Session, declaration *tool.Dec
 		)
 	}
 
-	// args is json-encoded.
-	setBytesAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallArguments, args)
 	if rspEvent != nil && rspEvent.Response != nil {
 		if e := rspEvent.Response.Error; e != nil {
-			span.SetStatus(codes.Error, e.Message)
-			span.SetAttributes(responseErrorAttributes(e, semconvtrace.ValueDefaultErrorType)...)
+			errorType := FormatResponseErrorLabel(e, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		} else if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, ToErrorType(err, semconvtrace.ValueDefaultErrorType)), attribute.String(semconvtrace.KeyErrorMessage, err.Error()))
+			errorType := ToErrorType(err, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		}
 
 		if callIDs := rspEvent.Response.GetToolCallIDs(); len(callIDs) > 0 {
 			span.SetAttributes(attribute.String(semconvtrace.KeyGenAIToolCallID, callIDs[0]))
 		}
-		setStringAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallResult, "<not json serializable>", func() ([]byte, error) {
-			return json.Marshal(rspEvent.Response)
-		})
+		span.SetAttributes(attribute.Bool(
+			semconvtrace.KeyGenAIToolCallResultPresent,
+			toolCallResultPresent(rspEvent.Response),
+		))
 	}
 
 	// Setting empty llm request and response (as UI expect these) while not
@@ -251,21 +374,23 @@ func TraceMergedToolCalls(span trace.Span, rspEvent *event.Event) {
 		attribute.String(semconvtrace.KeyGenAIOperationName, OperationExecuteTool),
 		attribute.String(semconvtrace.KeyGenAIToolName, ToolNameMergedTools),
 		attribute.String(semconvtrace.KeyGenAIToolDescription, "(merged tools)"),
-		attribute.String(semconvtrace.KeyGenAIToolCallArguments, "N/A"),
+		attribute.Bool(semconvtrace.KeyGenAIToolCallArgumentsPresent, false),
 	)
+	MarkToolCallSpan(span)
 	if rspEvent != nil && rspEvent.Response != nil {
 		if callIDs := rspEvent.Response.GetToolCallIDs(); len(callIDs) > 0 {
 			span.SetAttributes(attribute.String(semconvtrace.KeyGenAIToolCallID, callIDs[0]))
 		}
 		if e := rspEvent.Response.Error; e != nil {
-			span.SetStatus(codes.Error, e.Message)
-			span.SetAttributes(responseErrorAttributes(e, semconvtrace.ValueDefaultErrorType)...)
+			errorType := FormatResponseErrorLabel(e, semconvtrace.ValueDefaultErrorType)
+			span.SetStatus(codes.Error, errorType)
+			span.SetAttributes(attribute.String(semconvtrace.KeyErrorType, errorType))
 		}
 		span.SetAttributes(attribute.String(semconvtrace.KeyEventID, rspEvent.ID))
-
-		setStringAttribute(span, OperationExecuteTool, semconvtrace.KeyGenAIToolCallResult, "<not json serializable>", func() ([]byte, error) {
-			return json.Marshal(rspEvent.Response)
-		})
+		span.SetAttributes(attribute.Bool(
+			semconvtrace.KeyGenAIToolCallResultPresent,
+			toolCallResultPresent(rspEvent.Response),
+		))
 	}
 
 	// Setting empty llm request and response (as UI expect these) while not
@@ -274,6 +399,16 @@ func TraceMergedToolCalls(span trace.Span, rspEvent *event.Event) {
 		attribute.String(semconvtrace.KeyLLMRequest, "{}"),
 		attribute.String(semconvtrace.KeyLLMResponse, "{}"),
 	)
+}
+
+func toolCallResultPresent(rsp *model.Response) bool {
+	if rsp == nil {
+		return false
+	}
+	if rsp.Error != nil {
+		return true
+	}
+	return len(rsp.Choices) > 0
 }
 
 func resolveInvocationAgentIdentity(invoke *agent.Invocation) (string, string) {
