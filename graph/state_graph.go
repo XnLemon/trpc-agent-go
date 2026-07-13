@@ -2120,12 +2120,13 @@ func processModelResponse(ctx context.Context, config modelResponseConfig) (cont
 		jsonrepair.IsToolCallArgumentsJSONRepairEnabled(currentInvocation) {
 		jsonrepair.RepairResponseToolCallArgumentsInPlace(ctx, config.Response)
 	}
+	eventResponse := redactedResponse(config.Response)
 	llmEvent := event.NewResponseEvent(
 		config.InvocationID,
 		modelResponseAuthor(config),
-		config.Response,
+		eventResponse,
 	)
-	applyPartialEventMetadataOverrides(llmEvent, config.Response, currentInvocation)
+	applyPartialEventMetadataOverrides(llmEvent, eventResponse, currentInvocation)
 	agent.InjectIntoEvent(eventInvocation, llmEvent)
 
 	if err := emitModelResponseEvent(
@@ -2139,15 +2140,16 @@ func processModelResponse(ctx context.Context, config modelResponseConfig) (cont
 	}
 
 	if config.Response.Error != nil {
+		respErr := redactResponseError(config.Response.Error)
 		config.Span.SetAttributes(
 			attribute.String(
 				"trpc.go.agent.error",
-				config.Response.Error.Message,
+				respErr.Message,
 			),
 		)
 		return ctx, nil, fmt.Errorf(
 			"model API error: %s",
-			config.Response.Error.Message,
+			respErr.Message,
 		)
 	}
 	return ctx, llmEvent, nil
@@ -4999,7 +5001,8 @@ func emitFastModelResponseEvent(
 		eventTimestamp = response.Timestamp
 	}
 
-	llmEvent.Response = response
+	eventResponse := redactedResponse(response)
+	llmEvent.Response = eventResponse
 	llmEvent.ID = eventID
 	llmEvent.Timestamp = eventTimestamp
 	llmEvent.InvocationID = config.InvocationID
@@ -5012,8 +5015,9 @@ func emitFastModelResponseEvent(
 		}
 	}
 	if response.Error != nil {
-		config.Span.SetAttributes(attribute.String("trpc.go.agent.error", response.Error.Message))
-		return llmEvent, fmt.Errorf("model API error: %s", response.Error.Message)
+		respErr := redactResponseError(response.Error)
+		config.Span.SetAttributes(attribute.String("trpc.go.agent.error", respErr.Message))
+		return llmEvent, fmt.Errorf("model API error: %s", respErr.Message)
 	}
 	return llmEvent, nil
 }
@@ -6173,7 +6177,7 @@ func emitAgentErrorEvent(
 		WithNodeEventEmitter(NodeEventEmitterAgentHelper),
 		WithNodeEventStartTime(startTime),
 		WithNodeEventEndTime(endTime),
-		WithNodeEventError(err.Error()),
+		WithNodeEventError(redactErrorMessage(err)),
 	)
 	agent.EmitEvent(ctx, invocation, eventChan, agentErrorEvent)
 }

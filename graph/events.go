@@ -1273,7 +1273,7 @@ func NewNodeErrorEvent(opts ...NodeEventOption) *event.Event {
 		StartTime:   options.StartTime,
 		EndTime:     options.EndTime,
 		Duration:    options.EndTime.Sub(options.StartTime),
-		Error:       options.Error,
+		Error:       redactErrorText(options.Error),
 		StepNumber:  options.StepNumber,
 		Attempt:     options.Attempt,
 		MaxAttempts: options.MaxAttempts,
@@ -1286,21 +1286,16 @@ func NewNodeErrorEvent(opts ...NodeEventOption) *event.Event {
 		WithNodeMetadata(metadata))
 	SetNodeEventEmitterInStateDelta(graphEvent.StateDelta, options.Emitter)
 
-	respErr := options.ResponseError
+	respErr := redactResponseError(options.ResponseError)
 	if respErr == nil && options.Error != "" {
 		respErr = &model.ResponseError{
 			Type:    model.ErrorTypeFlowError,
-			Message: options.Error,
+			Message: redactErrorText(options.Error),
 		}
 	}
 	if respErr != nil {
-		if options.ResponseError != nil &&
-			(respErr.Message == "" || respErr.Type == "") {
-			clone := *respErr
-			respErr = &clone
-		}
 		if respErr.Message == "" {
-			respErr.Message = options.Error
+			respErr.Message = redactErrorText(options.Error)
 		}
 		if respErr.Type == "" {
 			respErr.Type = model.ErrorTypeFlowError
@@ -1319,7 +1314,7 @@ func NewToolExecutionEvent(opts ...ToolEventOption) *event.Event {
 
 	var errorMsg string
 	if options.Error != nil {
-		errorMsg = options.Error.Error()
+		errorMsg = redactErrorMessage(options.Error)
 	}
 
 	metadata := ToolExecutionMetadata{
@@ -1352,7 +1347,7 @@ func NewToolExecutionEvent(opts ...ToolEventOption) *event.Event {
 		if options.Error != nil {
 			resp.Error = &model.ResponseError{
 				Type:    model.ErrorTypeFlowError,
-				Message: options.Error.Error(),
+				Message: redactErrorMessage(options.Error),
 			}
 		}
 		if resp.Timestamp.IsZero() {
@@ -1374,7 +1369,7 @@ func NewModelExecutionEvent(opts ...ModelEventOption) *event.Event {
 
 	var errorMsg string
 	if options.Error != nil {
-		errorMsg = options.Error.Error()
+		errorMsg = redactErrorMessage(options.Error)
 	}
 
 	metadata := ModelExecutionMetadata{
@@ -1431,7 +1426,7 @@ func NewPregelErrorEvent(opts ...PregelEventOption) *event.Event {
 		StartTime:  options.StartTime,
 		EndTime:    options.EndTime,
 		Duration:   options.EndTime.Sub(options.StartTime),
-		Error:      options.Error,
+		Error:      redactErrorText(options.Error),
 	}
 	// Build base graph event with metadata.
 	ge := NewGraphEvent(options.InvocationID, AuthorGraphPregel, ObjectTypeGraphPregelStep,
@@ -1439,21 +1434,16 @@ func NewPregelErrorEvent(opts ...PregelEventOption) *event.Event {
 	// Mirror error to Event.Error for easier consumption by clients that
 	// only check event.Error, while keeping object as graph.pregel.step
 	// for compatibility with existing consumers.
-	respErr := options.ResponseError
+	respErr := redactResponseError(options.ResponseError)
 	if respErr == nil && options.Error != "" {
 		respErr = &model.ResponseError{
 			Type:    model.ErrorTypeFlowError,
-			Message: options.Error,
+			Message: redactErrorText(options.Error),
 		}
 	}
 	if respErr != nil {
-		if options.ResponseError != nil &&
-			(respErr.Message == "" || respErr.Type == "") {
-			clone := *respErr
-			respErr = &clone
-		}
 		if respErr.Message == "" {
-			respErr.Message = options.Error
+			respErr.Message = redactErrorText(options.Error)
 		}
 		if respErr.Type == "" {
 			respErr.Type = model.ErrorTypeFlowError
