@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/internal/profilecompiler"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	rootrunner "trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
@@ -210,7 +211,16 @@ func (r *runner) httpStatusError(operation string, response *http.Response) erro
 	if detail == "" {
 		return fmt.Errorf("trpcagent runner: %s returned %s", operation, response.Status)
 	}
+	detail = redactErrorDetail(detail)
 	return fmt.Errorf("trpcagent runner: %s returned %s: %s", operation, response.Status, detail)
+}
+
+func redactErrorDetail(detail string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(detail)
 }
 
 func errorMessageFromBody(body []byte) string {
