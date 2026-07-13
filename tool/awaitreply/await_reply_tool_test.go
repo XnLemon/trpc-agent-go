@@ -47,6 +47,23 @@ func TestTool_CallMarksInvocation(t *testing.T) {
 	require.Equal(t, "clarifier", route.AgentName)
 }
 
+func TestTool_CallRedactsModelVisibleResponseFields(t *testing.T) {
+	tl := New()
+	inv := &agent.Invocation{
+		AgentName: "clarifier Authorization: ApiKey raw-token",
+	}
+	ctx := agent.NewInvocationContext(context.Background(), inv)
+
+	got, err := tl.Call(ctx, []byte(`{}`))
+	require.NoError(t, err)
+
+	resp, ok := got.(Response)
+	require.True(t, ok)
+	require.True(t, resp.Success)
+	require.NotContains(t, resp.AgentName, "raw-token")
+	require.Contains(t, resp.AgentName, "Authorization: ****")
+}
+
 func TestTool_CallWithoutInvocationContext(t *testing.T) {
 	tl := New()
 
@@ -88,4 +105,25 @@ func TestTool_CallInvalidInvocation(t *testing.T) {
 	require.True(t, ok)
 	require.False(t, resp.Success)
 	require.Contains(t, resp.Message, "non-empty agent target")
+}
+
+func TestRedactResponseMessageMasksSecrets(t *testing.T) {
+	got := redactResponseMessage(
+		"failed Authorization: ApiKey raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+	)
+	for _, leaked := range []string{
+		"raw-token",
+		"sk-1234567890abcdef",
+		"session=abc",
+		"sid=def",
+	} {
+		require.NotContains(t, got, leaked)
+	}
+	for _, want := range []string{
+		"Authorization: ****",
+		"api_key=****",
+		"Cookie: ****",
+	} {
+		require.Contains(t, got, want)
+	}
 }
