@@ -20,6 +20,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -189,6 +190,7 @@ func (a *codexAgent) emitRunError(ctx context.Context, invocation *agent.Invocat
 	if len(combined) == 0 {
 		msg = runErr.Error()
 	}
+	msg = redactAgentErrorMessage(msg)
 	rsp := &model.Response{
 		Object: model.ObjectTypeError,
 		Done:   true,
@@ -211,6 +213,8 @@ func (a *codexAgent) emitRunError(ctx context.Context, invocation *agent.Invocat
 
 // emitFlowError emits an error response event and stops further invocation processing.
 func (a *codexAgent) emitFlowError(ctx context.Context, invocation *agent.Invocation, out chan<- *event.Event, combined []byte, flowErr error) {
+	content := redactAgentErrorMessage(string(combined))
+	message := redactAgentErrorMessage(flowErr.Error())
 	rsp := &model.Response{
 		Object: model.ObjectTypeError,
 		Done:   true,
@@ -219,16 +223,24 @@ func (a *codexAgent) emitFlowError(ctx context.Context, invocation *agent.Invoca
 				Index: 0,
 				Message: model.Message{
 					Role:    model.RoleAssistant,
-					Content: string(combined),
+					Content: content,
 				},
 			},
 		},
 		Error: &model.ResponseError{
 			Type:    model.ErrorTypeFlowError,
-			Message: flowErr.Error(),
+			Message: message,
 		},
 	}
 	a.emitEvent(ctx, invocation, out, event.NewResponseEvent(invocation.InvocationID, a.name, rsp))
+}
+
+func redactAgentErrorMessage(message string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return message
+	}
+	return redactor.Redact(message)
 }
 
 // runWithSession executes the CLI with resume-first semantics and returns stdout/stderr.
