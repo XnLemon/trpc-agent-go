@@ -129,8 +129,9 @@ type stubActivationSurfaceAgent struct {
 }
 
 type stubUntrackedActivationAgent struct {
-	tools       []tool.Tool
-	sawNilUsers bool
+	tools                []tool.Tool
+	returnEmptyUserNames bool
+	sawNilUsers          bool
 }
 
 func (s *stubActivationSurfaceAgent) ApplyInvocationToolActivation(
@@ -164,6 +165,9 @@ func (s *stubUntrackedActivationAgent) ApplyInvocationToolActivation(
 	externalToolNames map[string]bool,
 ) ([]tool.Tool, map[string]bool, map[string]bool) {
 	s.sawNilUsers = userToolNames == nil
+	if s.returnEmptyUserNames {
+		userToolNames = map[string]bool{}
+	}
 	return tools, userToolNames, externalToolNames
 }
 
@@ -398,6 +402,36 @@ func TestEffectiveWithExternal_ActivationPreservesMissingUserToolTracking(
 
 	require.True(t, agt.sawNilUsers)
 	require.Nil(t, userToolNames)
+	require.Nil(t, externalNames)
+	requireToolNames(t, tools, []string{"keep"})
+}
+
+func TestEffectiveWithExternal_ActivationPreservesExplicitMissingTracking(
+	t *testing.T,
+) {
+	agt := &stubUntrackedActivationAgent{
+		tools: []tool.Tool{
+			surfaceTool("keep"),
+			surfaceTool("drop"),
+		},
+		returnEmptyUserNames: true,
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(agt),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithToolFilter(
+				tool.NewIncludeToolNamesFilter("keep"),
+			),
+		)),
+	)
+
+	tools, userToolNames, externalNames := EffectiveWithExternal(
+		context.Background(),
+		inv,
+	)
+
+	require.True(t, agt.sawNilUsers)
+	require.Empty(t, userToolNames)
 	require.Nil(t, externalNames)
 	requireToolNames(t, tools, []string{"keep"})
 }

@@ -37,6 +37,7 @@ func TestPolicyToolFilterMatchesNameGovernance(t *testing.T) {
 	assert.False(t, filter(context.Background(), namedTool("shell")))
 	assert.False(t, filter(context.Background(), namedTool("unknown")))
 	assert.False(t, filter(context.Background(), nil))
+	assert.False(t, filter(context.Background(), nilDeclarationTool()))
 }
 
 func TestPolicyToolFilterAllowsNonDeniedToolsWithoutWhitelist(t *testing.T) {
@@ -73,6 +74,10 @@ func namedTool(name string) tool.Tool {
 	return &filterTestTool{
 		declaration: &tool.Declaration{Name: name},
 	}
+}
+
+func nilDeclarationTool() tool.Tool {
+	return &filterTestTool{declaration: nil}
 }
 
 func (t *filterTestTool) Declaration() *tool.Declaration {

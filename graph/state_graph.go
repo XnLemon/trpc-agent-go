@@ -43,6 +43,7 @@ import (
 	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
 	"trpc.group/trpc-go/trpc-agent-go/internal/toolcall"
 	"trpc.group/trpc-go/trpc-agent-go/internal/toolretry"
+	"trpc.group/trpc-go/trpc-agent-go/internal/toolsurface"
 	"trpc.group/trpc-go/trpc-agent-go/internal/util"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -2310,26 +2311,11 @@ func applyMandatoryRequestToolFilter(
 		len(request.Tools) == 0 {
 		return
 	}
-	for name, candidate := range request.Tools {
-		if graphToolName(candidate) == "" ||
-			!invocation.RunOptions.MandatoryToolFilter(
-				ctx,
-				itool.ResolveDeclaration(candidate),
-			) {
-			delete(request.Tools, name)
-		}
-	}
-}
-
-func graphToolName(tl tool.Tool) string {
-	if tl == nil {
-		return ""
-	}
-	decl := tl.Declaration()
-	if decl == nil {
-		return ""
-	}
-	return decl.Name
+	toolsurface.ApplyMandatoryRequestToolFilter(
+		ctx,
+		invocation.RunOptions.MandatoryToolFilter,
+		request,
+	)
 }
 
 // runModel preserves the pre-refactor test-facing helper signature by

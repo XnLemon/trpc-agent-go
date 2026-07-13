@@ -894,6 +894,38 @@ func TestGetFilteredTools_ToolActivationApplierReceivesCopies(
 	require.Equal(t, map[string]bool{externalToolName: true}, inv.RunOptions.ExternalToolNames)
 }
 
+func TestGetFilteredTools_ToolActivationApplierPreservesMissingUserToolTracking(
+	t *testing.T,
+) {
+	keepTool := &mockTool{name: "keep"}
+	dropTool := &mockTool{name: "drop"}
+	f := New(nil, nil, Options{
+		ToolActivationApplier: func(
+			_ context.Context,
+			_ *agent.Invocation,
+			tools []tool.Tool,
+			_ map[string]bool,
+			externalNames map[string]bool,
+		) ([]tool.Tool, map[string]bool, map[string]bool) {
+			return tools, map[string]bool{}, externalNames
+		},
+	})
+	mockAgent := &mockAgentWithoutUserTools{
+		name:     "test-agent",
+		allTools: []tool.Tool{keepTool, dropTool},
+	}
+	inv := agent.NewInvocation()
+	inv.Agent = mockAgent
+	inv.AgentName = "test-agent"
+	inv.RunOptions = agent.NewRunOptions(
+		agent.WithToolFilter(tool.NewIncludeToolNamesFilter("keep")),
+	)
+
+	filtered := f.getFilteredTools(context.Background(), inv)
+
+	require.Equal(t, []tool.Tool{keepTool}, filtered)
+}
+
 // TestGetFilteredTools_WithExcludeFilter tests tool filtering using exclude filter.
 func TestGetFilteredTools_WithExcludeFilter(t *testing.T) {
 	f := New(nil, nil, Options{})

@@ -19,10 +19,12 @@ package toolsurface
 
 import (
 	"context"
+	"maps"
 	"sort"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -305,7 +307,7 @@ func EffectiveWithExternal(
 		ctx,
 		allTools,
 		userToolNames,
-		userToolNames != nil,
+		hasUserToolTracking,
 		invocation.RunOptions,
 	), userToolNames, externalNames
 }
@@ -332,6 +334,26 @@ func appendRunOptionToolList(
 		}
 	}
 	return allTools, userToolNames
+}
+
+// ApplyMandatoryRequestToolFilter prunes request tools with a mandatory
+// invocation policy without mutating a shared request tool map.
+func ApplyMandatoryRequestToolFilter(
+	ctx context.Context,
+	mandatoryFilter tool.FilterFunc,
+	req *model.Request,
+) {
+	if mandatoryFilter == nil || req == nil || len(req.Tools) == 0 {
+		return
+	}
+	filtered := maps.Clone(req.Tools)
+	for name, candidate := range filtered {
+		if toolName(candidate) == "" ||
+			!mandatoryFilter(ctx, itool.ResolveDeclaration(candidate)) {
+			delete(filtered, name)
+		}
+	}
+	req.Tools = filtered
 }
 
 func collectToolNames(tools []tool.Tool) map[string]bool {

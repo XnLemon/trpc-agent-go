@@ -69,6 +69,15 @@ type RuntimeBuilder struct {
 	toolPolicyProvider ToolPolicyProvider
 }
 
+type runtimeServices struct {
+	storage   storagerouter.StorageAdapter
+	session   session.Service
+	memory    memory.Service
+	artifact  artifact.Service
+	knowledge knowledge.Knowledge
+	audit     platform.AuditSink
+}
+
 // RuntimeBuilderOption configures RuntimeBuilder.
 type RuntimeBuilderOption func(*RuntimeBuilder)
 
@@ -130,53 +139,11 @@ func (b *RuntimeBuilder) Build(
 		return gateway.Runtime{}, err
 	}
 
-	adapterRouter, ok := b.router.(storagerouter.AdapterRouter)
-	if !ok {
-		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
-	}
-	storage, err := adapterRouter.Adapter(ctx, tenant.TenantID, app.StorageProfileID)
+	services, err := b.resolveRuntimeServices(ctx, tenant, app)
 	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", err)
+		return gateway.Runtime{}, err
 	}
-	if isNilDependency(storage) {
-		return gateway.Runtime{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
-	}
-	sessionService, err := storage.Session(ctx)
-	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve session service: %w", err)
-	}
-	if isNilDependency(sessionService) {
-		return gateway.Runtime{}, fmt.Errorf("resolve session service: %w", ErrSessionServiceRequired)
-	}
-	memoryService, err := storage.Memory(ctx)
-	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve memory service: %w", err)
-	}
-	if isNilDependency(memoryService) {
-		return gateway.Runtime{}, fmt.Errorf("resolve memory service: %w", ErrMemoryServiceRequired)
-	}
-	artifactService, err := storage.Artifact(ctx)
-	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve artifact service: %w", err)
-	}
-	if isNilDependency(artifactService) {
-		return gateway.Runtime{}, fmt.Errorf("resolve artifact service: %w", ErrArtifactServiceRequired)
-	}
-	knowledgeService, err := storage.Knowledge(ctx)
-	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve knowledge service: %w", err)
-	}
-	if isNilDependency(knowledgeService) {
-		return gateway.Runtime{}, fmt.Errorf("resolve knowledge service: %w", ErrKnowledgeServiceRequired)
-	}
-	auditSink, err := storage.Audit(ctx)
-	if err != nil {
-		return gateway.Runtime{}, fmt.Errorf("resolve audit sink: %w", err)
-	}
-	if isNilDependency(auditSink) {
-		return gateway.Runtime{}, fmt.Errorf("resolve audit sink: %w", ErrAuditSinkRequired)
-	}
-	permissionPolicy, err := compileToolPolicy(resolvedPolicy, auditSink)
+	permissionPolicy, err := compileToolPolicy(resolvedPolicy, services.audit)
 	if err != nil {
 		return gateway.Runtime{}, err
 	}
@@ -189,12 +156,12 @@ func (b *RuntimeBuilder) Build(
 		Tenant:               tenant,
 		App:                  app,
 		Binding:              binding,
-		Storage:              storage,
-		Session:              sessionService,
-		Memory:               memoryService,
-		Artifact:             artifactService,
-		Knowledge:            knowledgeService,
-		Audit:                auditSink,
+		Storage:              services.storage,
+		Session:              services.session,
+		Memory:               services.memory,
+		Artifact:             services.artifact,
+		Knowledge:            services.knowledge,
+		Audit:                services.audit,
 		ToolPolicy:           resolvedPolicy,
 		ToolFilter:           toolFilter,
 		ToolPermissionPolicy: permissionPolicy,
@@ -215,13 +182,13 @@ func (b *RuntimeBuilder) Build(
 		App:     app,
 		Binding: binding,
 		Runner: runner.NewRunner(
-			storage.Scope().ScopedAppName(app.AppID),
+			services.storage.Scope().ScopedAppName(app.AppID),
 			ag,
-			runner.WithSessionService(sessionService),
-			runner.WithMemoryService(memoryService),
-			runner.WithArtifactService(artifactService),
+			runner.WithSessionService(services.session),
+			runner.WithMemoryService(services.memory),
+			runner.WithArtifactService(services.artifact),
 		),
-		Audit:                auditSink,
+		Audit:                services.audit,
 		ToolFilter:           toolFilter,
 		ToolPermissionPolicy: permissionPolicy,
 	}
@@ -230,6 +197,67 @@ func (b *RuntimeBuilder) Build(
 		return gateway.Runtime{}, err
 	}
 	return runtime, nil
+}
+
+func (b *RuntimeBuilder) resolveRuntimeServices(
+	ctx context.Context,
+	tenant platform.Tenant,
+	app platform.AgentApp,
+) (runtimeServices, error) {
+	adapterRouter, ok := b.router.(storagerouter.AdapterRouter)
+	if !ok {
+		return runtimeServices{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
+	}
+	storage, err := adapterRouter.Adapter(ctx, tenant.TenantID, app.StorageProfileID)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve storage adapter: %w", err)
+	}
+	if isNilDependency(storage) {
+		return runtimeServices{}, fmt.Errorf("resolve storage adapter: %w", ErrStorageAdapterRequired)
+	}
+	sessionService, err := storage.Session(ctx)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve session service: %w", err)
+	}
+	if isNilDependency(sessionService) {
+		return runtimeServices{}, fmt.Errorf("resolve session service: %w", ErrSessionServiceRequired)
+	}
+	memoryService, err := storage.Memory(ctx)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve memory service: %w", err)
+	}
+	if isNilDependency(memoryService) {
+		return runtimeServices{}, fmt.Errorf("resolve memory service: %w", ErrMemoryServiceRequired)
+	}
+	artifactService, err := storage.Artifact(ctx)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve artifact service: %w", err)
+	}
+	if isNilDependency(artifactService) {
+		return runtimeServices{}, fmt.Errorf("resolve artifact service: %w", ErrArtifactServiceRequired)
+	}
+	knowledgeService, err := storage.Knowledge(ctx)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve knowledge service: %w", err)
+	}
+	if isNilDependency(knowledgeService) {
+		return runtimeServices{}, fmt.Errorf("resolve knowledge service: %w", ErrKnowledgeServiceRequired)
+	}
+	auditSink, err := storage.Audit(ctx)
+	if err != nil {
+		return runtimeServices{}, fmt.Errorf("resolve audit sink: %w", err)
+	}
+	if isNilDependency(auditSink) {
+		return runtimeServices{}, fmt.Errorf("resolve audit sink: %w", ErrAuditSinkRequired)
+	}
+	return runtimeServices{
+		storage:   storage,
+		session:   sessionService,
+		memory:    memoryService,
+		artifact:  artifactService,
+		knowledge: knowledgeService,
+		audit:     auditSink,
+	}, nil
 }
 
 func validateRuntimeConfig(

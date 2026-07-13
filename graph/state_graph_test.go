@@ -51,6 +51,24 @@ func TestExecutionContextFromState_EdgeCases(t *testing.T) {
 	}))
 }
 
+func TestApplyMandatoryRequestToolFilterClonesRequestTools(t *testing.T) {
+	tools := map[string]tool.Tool{
+		"allowed": &blockingTool{name: "allowed"},
+		"hidden":  &blockingTool{name: "hidden"},
+	}
+	req := &model.Request{Tools: tools}
+	inv := agent.NewInvocation(agent.WithInvocationRunOptions(agent.NewRunOptions(
+		agent.WithMandatoryToolFilter(tool.NewIncludeToolNamesFilter("allowed")),
+	)))
+
+	applyMandatoryRequestToolFilter(context.Background(), inv, req)
+
+	require.Contains(t, req.Tools, "allowed")
+	require.NotContains(t, req.Tools, "hidden")
+	require.Contains(t, tools, "allowed")
+	require.Contains(t, tools, "hidden")
+}
+
 func TestBuilderAddFunctionNode(t *testing.T) {
 	builder := NewStateGraph(NewStateSchema())
 
