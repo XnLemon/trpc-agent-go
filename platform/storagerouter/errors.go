@@ -21,4 +21,6 @@ var (
 	ErrBackendIDRequired = errors.New("storage router backend id required")
 	// ErrBackendTenantMismatch indicates that a registered backend belongs to another tenant.
 	ErrBackendTenantMismatch = errors.New("storage router backend tenant mismatch")
+	// ErrKeyOutsideTenantScope indicates that a storage key is not scoped to the tenant namespace.
+	ErrKeyOutsideTenantScope = errors.New("storage router key outside tenant scope")
 )

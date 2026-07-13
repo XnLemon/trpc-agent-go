@@ -83,6 +83,7 @@ func (r *InMemoryRouter) Status(
 		resource platform.BackendMigrationResource
 	}{
 		{kind: resourceSession, resource: platform.BackendMigrationResourceSession},
+		{kind: resourceSummary, resource: platform.BackendMigrationResourceSummary},
 		{kind: resourceMemory, resource: platform.BackendMigrationResourceMemory},
 		{kind: resourceArtifact, resource: platform.BackendMigrationResourceArtifact},
 		{kind: resourceKnowledge, resource: platform.BackendMigrationResourceKnowledge},
@@ -151,6 +152,8 @@ func backendHasResource(backend BackendSet, kind resourceKind) bool {
 	switch kind {
 	case resourceSession:
 		return backend.Session != nil
+	case resourceSummary:
+		return backend.Summary != nil
 	case resourceMemory:
 		return backend.Memory != nil
 	case resourceArtifact:

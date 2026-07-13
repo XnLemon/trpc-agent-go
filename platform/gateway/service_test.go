@@ -351,6 +351,120 @@ func TestServiceHandleInboundCoversMinimumLoopAcceptance(t *testing.T) {
 	assert.Equal(t, platform.IdempotencyStatusCompleted, groupResult.Status)
 }
 
+func TestServiceHandleInboundPrefersRuntimeAuditSink(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "runtime audit reply"},
+	)
+	runtime.Audit = runtimeAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	result, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-runtime-audit", "user-a", "hello"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "runtime audit reply", result.Outbound.Content)
+	require.Len(t, runtimeAudit.Records(), 1)
+	assert.Equal(t, "completed", runtimeAudit.Records()[0].Decision)
+	assert.Empty(t, fallbackAudit.Records())
+}
+
+func TestServiceHandleInboundUsesFallbackAuditForInvalidRuntime(t *testing.T) {
+	ctx := context.Background()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "unused"},
+	)
+	runtime.App.AppID = "other-app"
+	runtime.Binding.AppID = "other-app"
+	runtime.Audit = runtimeAudit
+	svc := NewService(
+		staticRegistry{runtime: runtime},
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	_, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-runtime-mismatch", "user-a", "hello"),
+	)
+	require.ErrorIs(t, err, ErrRuntimeMismatch)
+	assert.Empty(t, runtimeAudit.Records())
+	require.Len(t, fallbackAudit.Records(), 1)
+	assert.Equal(t, "reject", fallbackAudit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundFallsBackFromTypedNilRuntimeAudit(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "fallback audit reply"},
+	)
+	var typedNilAudit *platform.InMemoryAuditSink
+	runtime.Audit = typedNilAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	result, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-typed-nil-audit", "user-a", "hello"),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "fallback audit reply", result.Outbound.Content)
+	require.Len(t, fallbackAudit.Records(), 1)
+	assert.Equal(t, "completed", fallbackAudit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundUsesRuntimeAuditForBindingRejection(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runtimeAudit := platform.NewInMemoryAuditSink()
+	fallbackAudit := platform.NewInMemoryAuditSink()
+	runtime := validRuntime(
+		"tenant-a",
+		&recordingRunner{response: "unused"},
+	)
+	runtime.Binding.AllowedUsers = []string{"allowed-user"}
+	runtime.Audit = runtimeAudit
+	require.NoError(t, registry.Register(runtime))
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(fallbackAudit),
+	)
+
+	_, err := svc.HandleInbound(
+		ctx,
+		inbound("tenant-a", "msg-binding-reject", "denied-user", "hello"),
+	)
+	require.ErrorIs(t, err, ErrBindingAccessDenied)
+	require.Len(t, runtimeAudit.Records(), 1)
+	assert.Equal(t, "reject", runtimeAudit.Records()[0].Decision)
+	assert.Empty(t, fallbackAudit.Records())
+}
+
 func TestServiceHandleInboundDuplicateReusesOutboxBackedResult(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -464,6 +578,147 @@ func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing
 	assert.Equal(t, resultRef, dup.ResultRef)
 	assert.Equal(t, "queued", dup.Outbound.Content)
 	assert.Len(t, r.calls, 1)
+}
+
+func TestServiceHandleInboundSaveFailureMarksDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	saveErr := errors.New("outbound save unavailable")
+	svc := NewService(
+		registry,
+		idempotency,
+		&failingSaveOutboundStore{
+			InMemoryOutboundStore: NewInMemoryOutboundStore(),
+			saveErr:               saveErr,
+		},
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, saveErr)
+	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, record.Status)
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, dup.Status)
+}
+
+func TestServiceHandleInboundCompleteFailureMarksReplyFailed(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	completeErr := errors.New("idempotency complete unavailable")
+	idempotency := &failingCompleteIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		completeErr:              completeErr,
+	}
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore(), WithAuditSink(audit))
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, completeErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
+	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, record.Status)
+	assert.NotEmpty(t, record.ResultRef)
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, dup.Status)
+	assert.Equal(t, "queued", dup.Outbound.Content)
+}
+
+func TestServiceHandleInboundPreservesRunnerAndDeadLetterErrors(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("runner failed")
+	markErr := errors.New("dead letter unavailable")
+	r := &recordingRunner{runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := &failingMarkDeadLetterIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		markErr:                  markErr,
+	}
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore())
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, runnerErr)
+	require.ErrorIs(t, err, markErr)
+}
+
+func TestServiceHandleInboundCompleteFailureAuditsWhenMarkFails(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	completeErr := errors.New("idempotency complete unavailable")
+	markErr := errors.New("reply failed mark unavailable")
+	idempotency := &failingCompleteIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		completeErr:              completeErr,
+		markErr:                  markErr,
+	}
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore(), WithAuditSink(audit))
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, completeErr)
+	require.ErrorIs(t, err, markErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
+}
+
+func TestServiceHandleInboundPreservesEnqueueAndMarkErrors(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := &failingMarkReplyIDStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		markErr:                  errors.New("reply failed mark unavailable"),
+	}
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	store := NewOutboxBackedOutboundStore(outbox)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	resultRef := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1") + ":outbound:1"
+	_, _, err := outbox.Enqueue(ctx, platform.OutboundMessage{
+		TenantID:                 "other-tenant",
+		BindingID:                "binding",
+		Channel:                  "wecom",
+		SessionID:                "session",
+		ReplyToPlatformMessageID: "msg-1",
+		Kind:                     platform.OutboundMessageKindText,
+		Content:                  "already queued",
+		Sequence:                 1,
+		DedupKey:                 resultRef,
+	}, channeladapter.DefaultRetryPolicy())
+	require.NoError(t, err)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, store, WithAuditSink(audit))
+
+	_, err = svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, channeladapter.ErrOutboundDuplicate)
+	require.ErrorIs(t, err, idempotency.markErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
 }
 
 func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
@@ -581,6 +836,45 @@ func TestServiceHandleInboundReleaseIgnoresCanceledRequestContext(t *testing.T) 
 	require.ErrorIs(t, err, runnerErr)
 	require.True(t, lease.released)
 	require.NoError(t, lease.ctxErr)
+}
+
+func TestServiceHandleInboundPropagatesLeaseFencingToken(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	registerRuntime(t, registry, "tenant-a", r)
+	lease := &recordingLease{token: 42}
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithSessionLeaseStore(&recordingLeaseStore{lease: lease}),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, int64(42), r.calls[0].fencingToken)
+}
+
+func TestServiceHandleInboundAllowsLeaseWithoutFencingToken(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "ok"}
+	registerRuntime(t, registry, "tenant-a", r)
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithSessionLeaseStore(&legacyLeaseStore{lease: &legacyLease{}}),
+	)
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.NoError(t, err)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, int64(0), r.calls[0].fencingToken)
 }
 
 func TestServiceHandleInboundCancellationDuringEventCollectionReleasesSessionLease(t *testing.T) {
@@ -851,6 +1145,66 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	assert.Equal(t, result.Outbound.TraceID, audit.Records()[0].TraceID)
 	assert.Equal(t, result.Outbound.TraceID, events[0].TraceID)
 	assert.Equal(t, result.Outbound.TraceID, events[1].TraceID)
+}
+
+func TestServiceHandleInboundRejectsUnsafeExternalRequestID(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "safe"}
+	registerRuntime(t, registry, "tenant-a", r)
+	audit := platform.NewInMemoryAuditSink()
+	messageEvents := platform.NewInMemoryMessageEventSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.TraceContext = map[string]string{
+		"request_id": "sk-1234567890abcdef",
+	}
+	fallback := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1")
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	assert.Equal(t, fallback, result.RequestID)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, fallback, r.calls[0].requestID)
+	assert.Equal(t, fallback, result.Outbound.TraceID)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, fallback, audit.Records()[0].RequestID)
+	assert.Equal(t, fallback, audit.Records()[0].TraceID)
+	events := messageEvents.Events()
+	require.Len(t, events, 2)
+	assert.Equal(t, fallback, events[0].TraceID)
+	assert.Equal(t, fallback, events[1].TraceID)
+}
+
+func TestServiceAuditUsesInjectedClock(t *testing.T) {
+	createdAt := time.Unix(200, 500*int64(time.Millisecond))
+	svc := NewService(
+		NewInMemoryRegistry(),
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithNow(func() time.Time { return createdAt }),
+	)
+	start := createdAt.Add(-1500 * time.Millisecond)
+
+	record := svc.auditFromMessage(
+		inbound("tenant-a", "msg-1", "user-1", "hello"),
+		"session-a",
+		"internal-user-a",
+		"completed",
+		"",
+		start,
+		nil,
+	)
+
+	assert.Equal(t, createdAt, record.CreatedAt)
+	assert.Equal(t, int64(1500), record.LatencyMS)
 }
 
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
@@ -1213,11 +1567,12 @@ type runnerStub interface {
 }
 
 type runnerCall struct {
-	userID     string
-	sessionID  string
-	message    model.Message
-	requestID  string
-	runOptions agent.RunOptions
+	userID       string
+	sessionID    string
+	message      model.Message
+	requestID    string
+	fencingToken int64
+	runOptions   agent.RunOptions
 }
 
 type recordingRunner struct {
@@ -1231,6 +1586,82 @@ type recordingOutboundProvider struct {
 	status            platform.OutboundStatus
 	providerMessageID string
 	delivered         []platform.OutboundMessage
+}
+
+type failingSaveOutboundStore struct {
+	*InMemoryOutboundStore
+	saveErr error
+}
+
+func (s *failingSaveOutboundStore) Save(
+	ctx context.Context,
+	resultRef string,
+	outbound platform.OutboundMessage,
+) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	return s.InMemoryOutboundStore.Save(ctx, resultRef, outbound)
+}
+
+type failingCompleteIdempotencyStore struct {
+	*platform.InMemoryIdempotencyStore
+	completeErr error
+	markErr     error
+}
+
+func (s *failingCompleteIdempotencyStore) Complete(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.completeErr != nil {
+		return platform.IdempotencyRecord{}, s.completeErr
+	}
+	return s.InMemoryIdempotencyStore.Complete(ctx, key, resultRef)
+}
+
+func (s *failingCompleteIdempotencyStore) MarkReplyFailed(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkReplyFailed(ctx, key, resultRef)
+}
+
+type failingMarkDeadLetterIdempotencyStore struct {
+	*platform.InMemoryIdempotencyStore
+	markErr error
+}
+
+func (s *failingMarkDeadLetterIdempotencyStore) MarkDeadLetter(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkDeadLetter(ctx, key, resultRef)
+}
+
+type failingMarkReplyIDStore struct {
+	*platform.InMemoryIdempotencyStore
+	markErr error
+}
+
+func (s *failingMarkReplyIDStore) MarkReplyFailed(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkReplyFailed(ctx, key, resultRef)
 }
 
 func (p *recordingOutboundProvider) Deliver(
@@ -1258,12 +1689,14 @@ func (r *recordingRunner) Run(
 		return nil, r.runErr
 	}
 	runOptions := runOptionsFromOptions(runOpts...)
+	fencingToken, _ := platform.StorageFencingTokenFromContext(ctx)
 	r.calls = append(r.calls, runnerCall{
-		userID:     userID,
-		sessionID:  sessionID,
-		message:    message,
-		requestID:  runOptions.RequestID,
-		runOptions: runOptions,
+		userID:       userID,
+		sessionID:    sessionID,
+		message:      message,
+		requestID:    runOptions.RequestID,
+		fencingToken: fencingToken,
+		runOptions:   runOptions,
 	})
 	out := make(chan *event.Event, 2)
 	go func() {
@@ -1439,12 +1872,43 @@ func (s *recordingLeaseStore) Acquire(
 type recordingLease struct {
 	released bool
 	ctxErr   error
+	token    int64
+}
+
+func (l *recordingLease) FencingToken() int64 {
+	if l.token == 0 {
+		return 1
+	}
+	return l.token
 }
 
 func (l *recordingLease) Release(ctx context.Context) error {
 	l.released = true
 	l.ctxErr = ctx.Err()
 	return nil
+}
+
+type legacyLeaseStore struct {
+	lease *legacyLease
+}
+
+func (s *legacyLeaseStore) Acquire(
+	ctx context.Context,
+	key SessionLeaseKey,
+) (SessionLease, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return s.lease, true, nil
+}
+
+type legacyLease struct {
+	released bool
+}
+
+func (l *legacyLease) Release(ctx context.Context) error {
+	l.released = true
+	return ctx.Err()
 }
 
 func responseEvent(content string, done bool) *event.Event {
