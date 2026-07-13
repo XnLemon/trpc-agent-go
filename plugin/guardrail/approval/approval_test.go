@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +21,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	approvallog "trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	approvalreview "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	guardtranscript "trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/internal/transcript"
@@ -70,6 +72,15 @@ func TestNew_EmptyToolPolicyName(t *testing.T) {
 	_, err := New(WithReviewer(&stubReviewer{}), WithToolPolicy("", ToolPolicyDenied))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "tool policy name is empty")
+}
+
+func TestNew_RequiresApproverUserIDWhenAuditEnabledForApproval(t *testing.T) {
+	_, err := New(
+		WithReviewer(&stubReviewer{}),
+		WithAuditSink(platform.NewInMemoryAuditSink()),
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "approver user id is required")
 }
 
 func TestNew_WithName(t *testing.T) {
@@ -258,6 +269,119 @@ func TestBeforeTool_ReviewerApprovedLogsInfo(t *testing.T) {
 		"Automatic approval review approved (risk: medium): The action is scoped and user-authorized.",
 		infoLog,
 	)
+}
+
+func TestBeforeTool_RequireApprovalWritesApprovedAuditRecords(t *testing.T) {
+	now := time.Date(2026, 7, 11, 10, 30, 0, 0, time.UTC)
+	audit := platform.NewInMemoryAuditSink()
+	p, err := New(
+		WithReviewer(&stubReviewer{
+			reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+				return &approvalreview.Decision{
+					Approved:  true,
+					RiskScore: 18,
+					RiskLevel: "low",
+					Reason:    "Approved command: git status --short.",
+				}, nil
+			},
+		}),
+		WithAuditSink(audit),
+		WithApproverUserID("security@example.com"),
+		withNow(func() time.Time { return now }),
+	)
+	require.NoError(t, err)
+
+	callbacks := registeredToolCallbacks(t, p)
+	ctx := ContextWithAuditContext(context.Background(), AuditContext{
+		TenantID:  "tenant",
+		AppID:     "app",
+		RequestID: "request-1",
+		TraceID:   "trace-1",
+	})
+	result, runErr := callbacks.RunBeforeTool(ctx, &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-1",
+		Arguments:  []byte(`{"command":"git status --short"}`),
+	})
+	require.NoError(t, runErr)
+	require.Nil(t, result)
+
+	records := audit.Records()
+	require.Len(t, records, 2)
+	assert.Equal(t, "approval_requested", records[0].Decision)
+	assert.Equal(t, "approval_approved", records[1].Decision)
+	for _, record := range records {
+		assert.Equal(t, "tenant", record.TenantID)
+		assert.Equal(t, "app", record.AppID)
+		assert.Equal(t, "request-1", record.RequestID)
+		assert.Equal(t, "trace-1", record.TraceID)
+		assert.Equal(t, "shell", record.ToolName)
+		assert.True(t, record.CreatedAt.Equal(now))
+		assert.Contains(t, record.RedactedDetailRef, "tool_call_id:call-1")
+		assert.Contains(t, record.RedactedDetailRef, "args_ref_sha256:")
+		assert.NotContains(t, record.RedactedDetailRef, "git status --short")
+		assert.NotContains(t, record.RedactedDetailRef, "security@example.com")
+	}
+	assert.Empty(t, records[0].UserIDHash)
+	assert.NotEmpty(t, records[1].UserIDHash)
+	assert.Equal(t, "tool approval approved", records[1].DecisionReason)
+}
+
+func TestBeforeTool_RequireApprovalWritesRejectedAuditRecords(t *testing.T) {
+	now := time.Date(2026, 7, 11, 11, 0, 0, 0, time.UTC)
+	audit := platform.NewInMemoryAuditSink()
+	p, err := New(
+		WithReviewer(&stubReviewer{
+			reviewFn: func(ctx context.Context, req *approvalreview.Request) (*approvalreview.Decision, error) {
+				return &approvalreview.Decision{
+					Approved:  false,
+					RiskScore: 95,
+					RiskLevel: "high",
+					Reason:    "Command rm -rf workspace can delete workspace files.",
+				}, nil
+			},
+		}),
+		WithAuditSink(audit),
+		WithApproverUserID("security@example.com"),
+		withNow(func() time.Time { return now }),
+	)
+	require.NoError(t, err)
+
+	callbacks := registeredToolCallbacks(t, p)
+	ctx := ContextWithAuditContext(context.Background(), AuditContext{
+		TenantID:  "tenant",
+		AppID:     "app",
+		RequestID: "request-2",
+		TraceID:   "trace-2",
+	})
+	result, runErr := callbacks.RunBeforeTool(ctx, &tool.BeforeToolArgs{
+		ToolName:   "shell",
+		ToolCallID: "call-2",
+		Arguments:  []byte(`{"command":"rm -rf workspace"}`),
+	})
+	require.NoError(t, runErr)
+	require.NotNil(t, result)
+	require.Equal(t, "Automatic approval review denied (risk: high): Command rm -rf workspace can delete workspace files.", result.CustomResult)
+
+	records := audit.Records()
+	require.Len(t, records, 2)
+	assert.Equal(t, "approval_requested", records[0].Decision)
+	assert.Equal(t, "approval_rejected", records[1].Decision)
+	for _, record := range records {
+		assert.Equal(t, "tenant", record.TenantID)
+		assert.Equal(t, "app", record.AppID)
+		assert.Equal(t, "request-2", record.RequestID)
+		assert.Equal(t, "trace-2", record.TraceID)
+		assert.Equal(t, "shell", record.ToolName)
+		assert.True(t, record.CreatedAt.Equal(now))
+		assert.Contains(t, record.RedactedDetailRef, "tool_call_id:call-2")
+		assert.Contains(t, record.RedactedDetailRef, "args_ref_sha256:")
+		assert.NotContains(t, record.RedactedDetailRef, "rm -rf workspace")
+		assert.NotContains(t, record.RedactedDetailRef, "security@example.com")
+	}
+	assert.Empty(t, records[0].UserIDHash)
+	assert.NotEmpty(t, records[1].UserIDHash)
+	assert.Equal(t, "tool approval rejected", records[1].DecisionReason)
 }
 
 func TestBeforeTool_ReviewerErrorFailsClosed(t *testing.T) {
