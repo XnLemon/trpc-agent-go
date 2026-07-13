@@ -59,6 +59,66 @@ func TestPolicyDenylistOverridesWhitelist(t *testing.T) {
 	}
 }
 
+func TestPolicyDeniesToolOutsideWhitelistWithAudit(t *testing.T) {
+	audit := platform.NewInMemoryAuditSink()
+	p := newPolicy(t, platform.ToolPolicy{
+		ToolWhitelist: []string{"knowledge_search"},
+	}, WithAuditSink(audit))
+
+	decision, err := p.CheckToolPermission(
+		ContextWithAuditContext(context.Background(), AuditContext{
+			Channel:        "wecom",
+			BindingID:      "binding",
+			SessionID:      "session",
+			InternalUserID: "internal-user",
+			UserIDHash:     platform.UserIDHash("tenant", "wecom", "external-user"),
+			RequestID:      "request-1",
+			AgentName:      "agent",
+		}),
+		request("shell", tool.ToolMetadata{}, []byte(`{"command":"rm -rf /tmp/demo","Authorization":"Bearer raw-token"}`)),
+	)
+	if err != nil {
+		t.Fatalf("CheckToolPermission: %v", err)
+	}
+	if decision.Action != tool.PermissionActionDeny {
+		t.Fatalf("expected deny, got %+v", decision)
+	}
+
+	records := audit.Records()
+	if len(records) != 1 {
+		t.Fatalf("expected one audit record, got %+v", records)
+	}
+	record := records[0]
+	if record.TenantID != "tenant" ||
+		record.AppID != "app" ||
+		record.Channel != "wecom" ||
+		record.BindingID != "binding" ||
+		record.SessionID != "session" ||
+		record.InternalUserID != "internal-user" ||
+		record.RequestID != "request-1" ||
+		record.AgentName != "agent" ||
+		record.ToolName != "shell" ||
+		record.Decision != string(tool.PermissionActionDeny) {
+		t.Fatalf("unexpected audit record: %+v", record)
+	}
+	if record.AuditID == "" || record.RedactionVersion != "platform-toolpolicy-v1" {
+		t.Fatalf("expected audit id and redaction version, got %+v", record)
+	}
+	if !strings.Contains(record.DecisionReason, "whitelist") {
+		t.Fatalf("expected whitelist decision reason, got %q", record.DecisionReason)
+	}
+	if !strings.Contains(record.RedactedDetailRef, "decision:deny") ||
+		!strings.Contains(record.RedactedDetailRef, "args:sha256:") ||
+		!strings.Contains(record.RedactedDetailRef, "args_bytes:") {
+		t.Fatalf("expected safe denial detail summary, got %q", record.RedactedDetailRef)
+	}
+	for _, leaked := range []string{"rm -rf", "raw-token", "Authorization", "/tmp/demo"} {
+		if strings.Contains(record.RedactedDetailRef, leaked) {
+			t.Fatalf("audit leaked raw argument content %q: %q", leaked, record.RedactedDetailRef)
+		}
+	}
+}
+
 func TestPolicyAsksForHighRiskTool(t *testing.T) {
 	p := newPolicy(t, platform.ToolPolicy{
 		DangerousToolAction: platform.DangerousToolActionAsk,
