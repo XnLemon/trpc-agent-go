@@ -317,11 +317,15 @@ func validateStorageNamespace(tenantID, namespace string) error {
 	if err := validateAuditRedactedText("namespace", namespace); err != nil {
 		return err
 	}
-	prefix := "tenant/" + tenantID
-	if namespace != prefix && !strings.HasPrefix(namespace, prefix+"/") {
+	parts := strings.SplitN(namespace, "/", 3)
+	if len(parts) < 2 || parts[0] != "tenant" || parts[1] != storageNamespaceTenantSegment(tenantID) {
 		return fmt.Errorf("namespace must start with tenant/<tenant_id>/")
 	}
 	return nil
+}
+
+func storageNamespaceTenantSegment(tenantID string) string {
+	return url.PathEscape(tenantID)
 }
 
 // Validate checks that audit retention and sampling policy is safe to use.

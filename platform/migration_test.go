@@ -71,13 +71,19 @@ func TestStorageProfileValidateRequiresTenantScopedNamespace(t *testing.T) {
 
 	slashTenant := valid
 	slashTenant.TenantID = "tenant-a/profile"
-	slashTenant.Namespace = "tenant/tenant-a/profile/x"
+	slashTenant.Namespace = "tenant/tenant-a%2Fprofile/x"
 	if err := slashTenant.Validate(); err != nil {
-		t.Fatalf("expected slash-containing tenant ID namespace to pass, got %v", err)
+		t.Fatalf("expected encoded slash-containing tenant ID namespace to pass, got %v", err)
+	}
+
+	rawCollisionTenant := slashTenant
+	rawCollisionTenant.Namespace = "tenant/tenant-a/profile/x"
+	if err := rawCollisionTenant.Validate(); err == nil {
+		t.Fatalf("expected raw slash-containing tenant namespace to fail")
 	}
 
 	nearMatchTenant := slashTenant
-	nearMatchTenant.Namespace = "tenant/tenant-a/profile-other/x"
+	nearMatchTenant.Namespace = "tenant/tenant-a%2Fprofile-other/x"
 	if err := nearMatchTenant.Validate(); err == nil {
 		t.Fatalf("expected namespace with only a partial tenant prefix to fail")
 	}

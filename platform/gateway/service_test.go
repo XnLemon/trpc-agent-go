@@ -621,12 +621,15 @@ func TestServiceHandleInboundCompleteFailureMarksReplyFailed(t *testing.T) {
 		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
 		completeErr:              completeErr,
 	}
-	svc := NewService(registry, idempotency, NewInMemoryOutboundStore())
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore(), WithAuditSink(audit))
 	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
 
 	_, err := svc.HandleInbound(ctx, msg)
 
 	require.ErrorIs(t, err, completeErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
 	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -659,6 +662,29 @@ func TestServiceHandleInboundPreservesRunnerAndDeadLetterErrors(t *testing.T) {
 	require.ErrorIs(t, err, markErr)
 }
 
+func TestServiceHandleInboundCompleteFailureAuditsWhenMarkFails(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	completeErr := errors.New("idempotency complete unavailable")
+	markErr := errors.New("reply failed mark unavailable")
+	idempotency := &failingCompleteIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		completeErr:              completeErr,
+		markErr:                  markErr,
+	}
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore(), WithAuditSink(audit))
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, completeErr)
+	require.ErrorIs(t, err, markErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
+}
+
 func TestServiceHandleInboundPreservesEnqueueAndMarkErrors(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -684,12 +710,15 @@ func TestServiceHandleInboundPreservesEnqueueAndMarkErrors(t *testing.T) {
 		DedupKey:                 resultRef,
 	}, channeladapter.DefaultRetryPolicy())
 	require.NoError(t, err)
-	svc := NewService(registry, idempotency, store)
+	audit := platform.NewInMemoryAuditSink()
+	svc := NewService(registry, idempotency, store, WithAuditSink(audit))
 
 	_, err = svc.HandleInbound(ctx, msg)
 
 	require.ErrorIs(t, err, channeladapter.ErrOutboundDuplicate)
 	require.ErrorIs(t, err, idempotency.markErr)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, "outbound_error", audit.Records()[0].Decision)
 }
 
 func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
@@ -1578,6 +1607,7 @@ func (s *failingSaveOutboundStore) Save(
 type failingCompleteIdempotencyStore struct {
 	*platform.InMemoryIdempotencyStore
 	completeErr error
+	markErr     error
 }
 
 func (s *failingCompleteIdempotencyStore) Complete(
@@ -1589,6 +1619,17 @@ func (s *failingCompleteIdempotencyStore) Complete(
 		return platform.IdempotencyRecord{}, s.completeErr
 	}
 	return s.InMemoryIdempotencyStore.Complete(ctx, key, resultRef)
+}
+
+func (s *failingCompleteIdempotencyStore) MarkReplyFailed(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkReplyFailed(ctx, key, resultRef)
 }
 
 type failingMarkDeadLetterIdempotencyStore struct {

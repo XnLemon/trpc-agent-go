@@ -525,17 +525,18 @@ func (s *Service) writeReply(
 		outbound,
 		channeladapter.RetryPolicyForBinding(runtime.Binding),
 	); err != nil {
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		if markErr := s.markReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
 			joined := errors.Join(err, markErr)
 			recordSpanError(replySpan, joined)
 			return Result{}, joined
 		}
-		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
 	record, err := s.idempotencyStore.Complete(replyCtx, input.Key, reply.ResultRef)
 	if err != nil {
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		if markErr := s.markReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
 			joined := errors.Join(err, markErr)
 			recordSpanError(replySpan, joined)
