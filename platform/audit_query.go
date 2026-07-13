@@ -67,6 +67,9 @@ func (f AuditQueryFilter) normalize() (AuditQueryFilter, error) {
 	if f.TenantID == "" {
 		return AuditQueryFilter{}, ErrTenantIDRequired
 	}
+	if err := validateAuditRedactedText("tenant_id", f.TenantID); err != nil {
+		return AuditQueryFilter{}, err
+	}
 	if err := validateAuditRedactedFields(
 		safeTextField{"app_id", f.AppID},
 		safeTextField{"audit_id", f.AuditID},
