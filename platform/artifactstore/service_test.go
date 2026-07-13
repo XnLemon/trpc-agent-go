@@ -13,12 +13,36 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
 )
+
+const testWaitTimeout = time.Second
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(testWaitTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func receiveWithin[T any](t *testing.T, ch <-chan T, name string) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(testWaitTimeout):
+		t.Fatalf("timed out waiting for %s", name)
+		var zero T
+		return zero
+	}
+}
 
 func TestServiceStoresMetadataSeparatelyFromObjectContent(t *testing.T) {
 	ctx := context.Background()
@@ -88,6 +112,106 @@ func TestServiceStoresMetadataSeparatelyFromObjectContent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	assert.Equal(t, record.ArtifactID, records[0].ArtifactID)
+}
+
+func TestServiceConcurrentSavesAllocateVersionsAtomically(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewInMemoryMetadataStore()
+	objects := NewInMemoryObjectStore()
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   objects,
+		MaxAttempts:   1,
+	})
+	require.NoError(t, err)
+	sessionInfo := artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}
+	const writers = 16
+	start := make(chan struct{})
+	results := make(chan struct {
+		version int
+		err     error
+	}, writers)
+	for i := 0; i < writers; i++ {
+		i := i
+		go func() {
+			<-start
+			version, saveErr := service.SaveArtifact(ctx, sessionInfo, "notes.txt", &artifact.Artifact{
+				Data:     []byte{byte(i), byte(i + 1)},
+				MimeType: "text/plain",
+				Name:     "notes.txt",
+			})
+			results <- struct {
+				version int
+				err     error
+			}{version: version, err: saveErr}
+		}()
+	}
+	close(start)
+
+	versions := make(map[int]struct{}, writers)
+	for i := 0; i < writers; i++ {
+		result := receiveWithin(t, results, "concurrent save")
+		require.NoError(t, result.err)
+		versions[result.version] = struct{}{}
+	}
+	assert.Len(t, versions, writers)
+	for version := 0; version < writers; version++ {
+		assert.Contains(t, versions, version)
+	}
+}
+
+func TestServiceRetriesCommittedObjectPutIdempotently(t *testing.T) {
+	ctx := context.Background()
+	metadata := NewInMemoryMetadataStore()
+	objects := &commitThenFailObjectStore{
+		InMemoryObjectStore: NewInMemoryObjectStore(),
+		err:                 errors.New("timeout after commit"),
+	}
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   objects,
+		MaxAttempts:   2,
+	})
+	require.NoError(t, err)
+	sessionInfo := artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}
+
+	version, err := service.SaveArtifact(ctx, sessionInfo, "notes.txt", &artifact.Artifact{
+		Data:     []byte("committed"),
+		MimeType: "text/plain",
+		Name:     "notes.txt",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, version)
+	assert.Equal(t, 2, objects.PutAttempts())
+	loaded, err := service.LoadArtifact(ctx, sessionInfo, "notes.txt", nil)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, []byte("committed"), loaded.Data)
+	records, err := metadata.Query(ctx, MetadataQuery{
+		TenantID:        "tenant-a",
+		AppName:         sessionInfo.AppName,
+		UserID:          sessionInfo.UserID,
+		SessionID:       sessionInfo.SessionID,
+		Filename:        "notes.txt",
+		IncludePending:  true,
+		IncludeDeleting: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, MetadataStatusActive, records[0].Status)
 }
 
 func TestServiceRejectsSessionIDReservedForUserArtifacts(t *testing.T) {
@@ -212,6 +336,68 @@ func TestServiceRetriesTransientObjectUploadFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, version)
 	assert.Equal(t, 2, objects.PutAttempts())
+}
+
+func TestServiceExpiredReservationCanBeRecoveredAfterCleanupMarkFailure(t *testing.T) {
+	ctx := context.Background()
+	metadata := &failingDeleteMetadataStore{
+		InMemoryMetadataStore: NewInMemoryMetadataStore(),
+		failDelete:            errors.New("metadata mark deleting unavailable"),
+	}
+	objects := NewInMemoryObjectStore()
+	objects.FailNextPut(errors.New("object store unavailable"))
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   objects,
+	})
+	require.NoError(t, err)
+	sessionInfo := artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}
+
+	_, err = service.SaveArtifact(ctx, sessionInfo, "notes.txt", &artifact.Artifact{
+		Data:     []byte("v0"),
+		MimeType: "text/plain",
+		Name:     "notes.txt",
+	})
+	require.Error(t, err)
+	pending, err := metadata.Query(ctx, MetadataQuery{
+		TenantID:        "tenant-a",
+		AppName:         sessionInfo.AppName,
+		UserID:          sessionInfo.UserID,
+		SessionID:       sessionInfo.SessionID,
+		Filename:        "notes.txt",
+		IncludePending:  true,
+		IncludeDeleting: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, MetadataStatusPending, pending[0].Status)
+	assert.NotEmpty(t, pending[0].ReservationOwner)
+	assert.False(t, pending[0].ReservationExpiresAt.IsZero())
+
+	metadata.mu.Lock()
+	for index := range metadata.records {
+		metadata.records[index].ReservationExpiresAt = time.Now().Add(-time.Second)
+	}
+	metadata.mu.Unlock()
+
+	require.NoError(t, service.DeleteArtifact(ctx, sessionInfo, "notes.txt"))
+	pending, err = metadata.Query(ctx, MetadataQuery{
+		TenantID:        "tenant-a",
+		AppName:         sessionInfo.AppName,
+		UserID:          sessionInfo.UserID,
+		SessionID:       sessionInfo.SessionID,
+		Filename:        "notes.txt",
+		IncludePending:  true,
+		IncludeDeleting: true,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, pending)
 }
 
 func TestServiceDeleteRemovesMetadataAndObjects(t *testing.T) {
@@ -578,7 +764,7 @@ func TestServiceConcurrentDeleteAndReuploadKeepsNewObject(t *testing.T) {
 	go func() {
 		deleteDone <- deleteService.DeleteArtifact(ctx, sessionInfo, "notes.txt")
 	}()
-	<-objects.deleteStarted
+	waitForSignal(t, objects.deleteStarted, "delete start")
 
 	version, err := saveService.SaveArtifact(ctx, sessionInfo, "notes.txt", &artifact.Artifact{
 		Data:     content,
@@ -588,7 +774,7 @@ func TestServiceConcurrentDeleteAndReuploadKeepsNewObject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, version)
 	close(objects.continueDelete)
-	require.NoError(t, <-deleteDone)
+	require.NoError(t, receiveWithin(t, deleteDone, "delete completion"))
 
 	loaded, err := saveService.LoadArtifact(ctx, sessionInfo, "notes.txt", nil)
 	require.NoError(t, err)
@@ -597,6 +783,43 @@ func TestServiceConcurrentDeleteAndReuploadKeepsNewObject(t *testing.T) {
 	versions, err := saveService.ListVersions(ctx, sessionInfo, "notes.txt")
 	require.NoError(t, err)
 	assert.Equal(t, []int{1}, versions)
+}
+
+func TestServiceDeleteBlockedObjectCleanupHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	metadata := NewInMemoryMetadataStore()
+	objects := &blockingDeleteObjectStore{
+		InMemoryObjectStore: NewInMemoryObjectStore(),
+		deleteStarted:       make(chan struct{}),
+		continueDelete:      make(chan struct{}),
+	}
+	service, err := New(ServiceConfig{
+		TenantID:      "tenant-a",
+		Namespace:     "tenant/tenant-a",
+		MetadataStore: metadata,
+		ObjectStore:   objects,
+	})
+	require.NoError(t, err)
+	sessionInfo := artifact.SessionInfo{
+		AppName:   "tenant/tenant-a/app-a",
+		UserID:    "internal-user-a",
+		SessionID: "session-a",
+	}
+	_, err = service.SaveArtifact(context.Background(), sessionInfo, "notes.txt", &artifact.Artifact{
+		Data:     []byte("v0"),
+		MimeType: "text/plain",
+		Name:     "notes.txt",
+	})
+	require.NoError(t, err)
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		deleteDone <- service.DeleteArtifact(ctx, sessionInfo, "notes.txt")
+	}()
+	waitForSignal(t, objects.deleteStarted, "delete start")
+	cancel()
+
+	require.ErrorIs(t, receiveWithin(t, deleteDone, "delete cancellation"), context.Canceled)
 }
 
 func TestServiceDeleteDoesNotCancelPendingUpload(t *testing.T) {
@@ -642,7 +865,7 @@ func TestServiceDeleteDoesNotCancelPendingUpload(t *testing.T) {
 			err     error
 		}{version: version, err: saveErr}
 	}()
-	<-objects.firstPutStarted
+	waitForSignal(t, objects.firstPutStarted, "first put start")
 
 	err = secondService.DeleteArtifact(ctx, sessionInfo, "notes.txt")
 	require.ErrorIs(t, err, ErrArtifactWriteInProgress)
@@ -656,7 +879,7 @@ func TestServiceDeleteDoesNotCancelPendingUpload(t *testing.T) {
 	assert.Equal(t, 1, secondVersion)
 
 	close(objects.continueFirstPut)
-	firstResult := <-firstDone
+	firstResult := receiveWithin(t, firstDone, "first save completion")
 	require.NoError(t, firstResult.err)
 	assert.Equal(t, 0, firstResult.version)
 
@@ -728,6 +951,26 @@ func (s *failingDeleteObjectStore) Delete(ctx context.Context, objectID string) 
 	return s.InMemoryObjectStore.Delete(ctx, objectID)
 }
 
+type commitThenFailObjectStore struct {
+	*InMemoryObjectStore
+	mu  sync.Mutex
+	err error
+}
+
+func (s *commitThenFailObjectStore) Put(ctx context.Context, object ObjectRecord) error {
+	s.mu.Lock()
+	err := s.err
+	s.err = nil
+	s.mu.Unlock()
+	if err == nil {
+		return s.InMemoryObjectStore.Put(ctx, object)
+	}
+	if putErr := s.InMemoryObjectStore.Put(ctx, object); putErr != nil {
+		return putErr
+	}
+	return err
+}
+
 type blockingDeleteObjectStore struct {
 	*InMemoryObjectStore
 	deleteStarted  chan struct{}
@@ -736,10 +979,18 @@ type blockingDeleteObjectStore struct {
 }
 
 func (s *blockingDeleteObjectStore) Delete(ctx context.Context, objectID string) error {
+	var waitErr error
 	s.once.Do(func() {
 		close(s.deleteStarted)
-		<-s.continueDelete
+		select {
+		case <-s.continueDelete:
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		}
 	})
+	if waitErr != nil {
+		return waitErr
+	}
 	return s.InMemoryObjectStore.Delete(ctx, objectID)
 }
 
@@ -758,7 +1009,11 @@ func (s *blockingFirstPutObjectStore) Put(ctx context.Context, object ObjectReco
 	s.mu.Unlock()
 	if call == 1 {
 		close(s.firstPutStarted)
-		<-s.continueFirstPut
+		select {
+		case <-s.continueFirstPut:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return s.InMemoryObjectStore.Put(ctx, object)
 }

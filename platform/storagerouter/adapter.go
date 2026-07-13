@@ -21,7 +21,10 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
-const tenantMetadataKey = "tenant_id"
+const (
+	tenantMetadataKey    = "tenant_id"
+	namespaceMetadataKey = "storage_namespace"
+)
 
 // StorageAdapter is a tenant/profile-bound storage facade.
 type StorageAdapter interface {
@@ -768,19 +771,43 @@ func (s *scopedKnowledge) Search(
 		scopedReq.SearchFilter = &filter
 	}
 	if scopedReq.SearchFilter.Metadata == nil {
-		scopedReq.SearchFilter.Metadata = make(map[string]any, 1)
+		scopedReq.SearchFilter.Metadata = make(map[string]any, 2)
 	} else {
-		metadata := make(map[string]any, len(scopedReq.SearchFilter.Metadata)+1)
+		metadata := make(map[string]any, len(scopedReq.SearchFilter.Metadata)+2)
 		for key, value := range scopedReq.SearchFilter.Metadata {
 			metadata[key] = value
 		}
 		scopedReq.SearchFilter.Metadata = metadata
 	}
-	if tenantID, ok := scopedReq.SearchFilter.Metadata[tenantMetadataKey]; ok && tenantID != s.scope.TenantID {
+	if err := validateScopedMetadata(
+		scopedReq.SearchFilter.Metadata,
+		tenantMetadataKey,
+		s.scope.TenantID,
+	); err != nil {
+		return nil, err
+	}
+	if err := validateScopedMetadata(
+		scopedReq.SearchFilter.Metadata,
+		namespaceMetadataKey,
+		s.scope.Namespace,
+	); err != nil {
 		return nil, ErrKeyOutsideTenantScope
 	}
 	scopedReq.SearchFilter.Metadata[tenantMetadataKey] = s.scope.TenantID
+	scopedReq.SearchFilter.Metadata[namespaceMetadataKey] = s.scope.Namespace
 	return s.Knowledge.Search(ctx, &scopedReq)
+}
+
+func validateScopedMetadata(metadata map[string]any, key string, want string) error {
+	value, ok := metadata[key]
+	if !ok {
+		return nil
+	}
+	got, ok := value.(string)
+	if !ok || got != want {
+		return ErrKeyOutsideTenantScope
+	}
+	return nil
 }
 
 type scopedAuditSink struct {

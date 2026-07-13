@@ -8,12 +8,26 @@
 
 package artifactstore
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// MetadataReservationBuilder builds a pending metadata record for the atomically
+// allocated artifact version.
+type MetadataReservationBuilder func(version int) (MetadataRecord, error)
 
 // MetadataStore stores queryable artifact metadata without embedding object bytes.
 type MetadataStore interface {
-	// Put reserves one scoped version and returns ErrVersionConflict when the
-	// scoped version already exists.
+	// Reserve atomically allocates the next scoped version and stores its
+	// pending metadata reservation.
+	Reserve(
+		ctx context.Context,
+		query MetadataQuery,
+		build MetadataReservationBuilder,
+	) (MetadataRecord, error)
+	// Put stores one explicit metadata record and returns ErrVersionConflict
+	// when the scoped version already exists.
 	Put(ctx context.Context, record MetadataRecord) error
 	// Query hides pending uploads and deleting tombstones unless requested.
 	Query(ctx context.Context, query MetadataQuery) ([]MetadataRecord, error)
@@ -30,6 +44,9 @@ type MetadataStore interface {
 
 // ObjectStore stores artifact object content addressed by opaque object IDs.
 type ObjectStore interface {
+	// Put must be retry-safe: storing the same object ID with identical bytes is
+	// idempotent, while storing different bytes for an existing ID returns
+	// ErrObjectConflict without changing the committed object.
 	Put(ctx context.Context, object ObjectRecord) error
 	Get(ctx context.Context, objectID string) ([]byte, error)
 	// Delete must be idempotent and treat an already-missing object as success.
@@ -75,6 +92,11 @@ type MetadataRecord struct {
 	ObjectID   string
 	ArtifactID string
 	Status     MetadataStatus
+	// ReservationOwner identifies the writer that owns a pending reservation.
+	ReservationOwner string
+	// ReservationExpiresAt is the time after which a pending reservation may be
+	// reclaimed by cleanup or delete recovery.
+	ReservationExpiresAt time.Time
 }
 
 // MetadataQuery filters artifact metadata records. Empty string fields are not
@@ -87,6 +109,9 @@ type MetadataQuery struct {
 	Filename  string
 	Version   *int
 	ObjectID  string
+	// ReservationOwner restricts pending reservation transitions to the writer
+	// that created them.
+	ReservationOwner string
 	// IncludePending includes upload reservations retained for safe cleanup.
 	IncludePending bool
 	// IncludeDeleting includes tombstones retained for retryable object cleanup.

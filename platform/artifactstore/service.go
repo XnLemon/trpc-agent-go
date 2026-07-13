@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"trpc.group/trpc-go/trpc-agent-go/artifact"
@@ -25,7 +26,8 @@ import (
 const (
 	defaultContentType        = "application/octet-stream"
 	userNamespace             = "user:"
-	maxMetadataCommitAttempts = 8
+	reservationTTL            = 15 * time.Minute
+	cleanupReservationTimeout = 5 * time.Second
 )
 
 var _ artifact.Service = (*Service)(nil)
@@ -102,64 +104,62 @@ func (s *Service) SaveArtifact(
 		mimeType = defaultContentType
 	}
 	artifactID := makeArtifactID(s.tenantID, sessionInfo, filename)
-	for commitAttempt := 0; commitAttempt < maxMetadataCommitAttempts; commitAttempt++ {
-		query := s.metadataQuery(sessionInfo, filename)
-		query.IncludePending = true
-		query.IncludeDeleting = true
-		records, err := s.metadataStore.Query(ctx, query)
-		if err != nil {
-			return 0, fmt.Errorf("query artifact metadata: %w", err)
-		}
-		version := nextVersion(records)
-		objectID, err := makeObjectID(artifactID, version, sha)
-		if err != nil {
-			return 0, err
-		}
-		record := MetadataRecord{
-			TenantID:       s.tenantID,
-			AppName:        sessionInfo.AppName,
-			UserID:         sessionInfo.UserID,
-			SessionID:      metadataSessionID(sessionInfo, filename),
-			Filename:       filename,
-			Version:        version,
-			MimeType:       mimeType,
-			SizeBytes:      int64(len(data)),
-			SHA256:         sha,
-			AttachmentKind: attachmentKind(mimeType),
-			ContentRef:     makeContentRef(artifactID, version),
-			ObjectID:       objectID,
-			ArtifactID:     artifactID,
-			Status:         MetadataStatusPending,
-		}
-		object := ObjectRecord{
-			ObjectID:  objectID,
-			TenantID:  s.tenantID,
-			Data:      data,
-			MimeType:  mimeType,
-			SizeBytes: int64(len(data)),
-			SHA256:    sha,
-		}
-		if err := s.metadataStore.Put(ctx, record); err != nil {
-			if errors.Is(err, ErrVersionConflict) {
-				continue
+	query := s.metadataQuery(sessionInfo, filename)
+	query.IncludePending = true
+	query.IncludeDeleting = true
+	record, err := s.metadataStore.Reserve(
+		ctx,
+		query,
+		func(version int) (MetadataRecord, error) {
+			objectID, err := makeObjectID(artifactID, version, sha)
+			if err != nil {
+				return MetadataRecord{}, err
 			}
-			return 0, fmt.Errorf("reserve artifact metadata: %w", err)
-		}
-		if err := s.putObjectWithRetry(ctx, object); err != nil {
-			return 0, errors.Join(err, s.cleanupReservedArtifact(ctx, record))
-		}
-		activateQuery := s.metadataQuery(sessionInfo, filename)
-		activateQuery.Version = &version
-		activateQuery.IncludePending = true
-		if err := s.metadataStore.Activate(ctx, activateQuery, objectID); err != nil {
-			return 0, errors.Join(
-				fmt.Errorf("activate artifact metadata: %w", err),
-				s.cleanupReservedArtifact(ctx, record),
-			)
-		}
-		return version, nil
+			return MetadataRecord{
+				TenantID:             s.tenantID,
+				AppName:              sessionInfo.AppName,
+				UserID:               sessionInfo.UserID,
+				SessionID:            metadataSessionID(sessionInfo, filename),
+				Filename:             filename,
+				Version:              version,
+				MimeType:             mimeType,
+				SizeBytes:            int64(len(data)),
+				SHA256:               sha,
+				AttachmentKind:       attachmentKind(mimeType),
+				ContentRef:           makeContentRef(artifactID, version),
+				ObjectID:             objectID,
+				ArtifactID:           artifactID,
+				Status:               MetadataStatusPending,
+				ReservationOwner:     objectID,
+				ReservationExpiresAt: time.Now().Add(reservationTTL),
+			}, nil
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("reserve artifact metadata: %w", err)
 	}
-	return 0, ErrVersionConflict
+	object := ObjectRecord{
+		ObjectID:  record.ObjectID,
+		TenantID:  s.tenantID,
+		Data:      data,
+		MimeType:  mimeType,
+		SizeBytes: int64(len(data)),
+		SHA256:    sha,
+	}
+	if err := s.putObjectWithRetry(ctx, object); err != nil {
+		return 0, errors.Join(err, s.cleanupReservedArtifact(ctx, record))
+	}
+	activateQuery := s.metadataQuery(sessionInfo, filename)
+	activateQuery.Version = &record.Version
+	activateQuery.IncludePending = true
+	activateQuery.ReservationOwner = record.ReservationOwner
+	if err := s.metadataStore.Activate(ctx, activateQuery, record.ObjectID); err != nil {
+		return 0, errors.Join(
+			fmt.Errorf("activate artifact metadata: %w", err),
+			s.cleanupReservedArtifact(ctx, record),
+		)
+	}
+	return record.Version, nil
 }
 
 // LoadArtifact loads object bytes using metadata as the authority.
@@ -289,7 +289,11 @@ func (s *Service) cleanupReservedArtifact(
 	ctx context.Context,
 	record MetadataRecord,
 ) error {
-	cleanupCtx := context.WithoutCancel(ctx)
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		cleanupReservationTimeout,
+	)
+	defer cancel()
 	version := record.Version
 	query := MetadataQuery{
 		TenantID:               record.TenantID,
@@ -299,6 +303,7 @@ func (s *Service) cleanupReservedArtifact(
 		Filename:               record.Filename,
 		Version:                &version,
 		ObjectID:               record.ObjectID,
+		ReservationOwner:       record.ReservationOwner,
 		IncludePending:         true,
 		IncludeDeleting:        true,
 		AllowPendingTransition: true,
@@ -383,6 +388,9 @@ func (s *Service) putObjectWithRetry(ctx context.Context, object ObjectRecord) e
 			return err
 		}
 		if err := s.objectStore.Put(ctx, object); err != nil {
+			if errors.Is(err, ErrObjectConflict) {
+				return err
+			}
 			lastErr = err
 			continue
 		}
@@ -534,19 +542,8 @@ func scopedHash(parts ...string) string {
 }
 
 func namespaceContainsSegment(namespace, tenantID string) bool {
-	for _, segment := range strings.FieldsFunc(namespace, func(r rune) bool {
-		switch r {
-		case '/', '\\', ':', '|':
-			return true
-		default:
-			return false
-		}
-	}) {
-		if segment == tenantID {
-			return true
-		}
-	}
-	return false
+	prefix := "tenant/" + tenantID
+	return namespace == prefix || strings.HasPrefix(namespace, prefix+"/")
 }
 
 func hasLeadingOrTrailingSpace(value string) bool {

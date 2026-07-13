@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -28,6 +29,18 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/platform/channeladapter"
 	telemetrytrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
+
+const maxExternalRequestIDLength = 128
+
+var unsafeRequestIDPrefixes = []string{
+	"sk-",
+	"xoxb-",
+	"xoxp-",
+	"ya29.",
+	"ghp_",
+	"github_pat_",
+	"glpat-",
+}
 
 // Service handles normalized inbound platform messages.
 type Service struct {
@@ -121,7 +134,7 @@ func (s *Service) HandleInbound(
 		return Result{}, err
 	}
 	if err := msg.Validate(); err != nil {
-		s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+		s.writeAudit(ctx, s.auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
 		recordSpanError(callbackSpan, err)
 		return Result{}, err
 	}
@@ -405,7 +418,7 @@ func (s *Service) runAndReply(
 	)
 	if err != nil {
 		if markErr := s.markRunDeadLetter(routeCtx, input.Key); markErr != nil {
-			return Result{}, markErr
+			return Result{}, errors.Join(err, markErr)
 		}
 		return Result{}, err
 	}
@@ -424,6 +437,13 @@ func (s *Service) markRunDeadLetter(ctx context.Context, key string) error {
 	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	_, err := s.idempotencyStore.MarkDeadLetter(markCtx, key, "")
+	return err
+}
+
+func (s *Service) markReplyFailed(ctx context.Context, key string, resultRef string) error {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := s.idempotencyStore.MarkReplyFailed(markCtx, key, resultRef)
 	return err
 }
 
@@ -452,13 +472,13 @@ func (s *Service) runGatewayRunner(
 		agent.WithLatencyDiagnosticsEvents(false),
 	)
 	if err != nil {
-		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
 		return "", err
 	}
 	content, err := collectAssistantText(auditCtx, ch)
 	if err != nil {
-		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "runner_error", err.Error(), input.Start, err))
 		recordSpanError(runnerSpan, err)
 		return "", err
 	}
@@ -491,7 +511,12 @@ func (s *Service) writeReply(
 	defer replySpan.End()
 	setInboundTraceAttributes(replySpan, msg, input.SessionID, input.RequestID, input.InternalUserID)
 	if err := s.outboundStore.Save(replyCtx, reply.ResultRef, outbound); err != nil {
-		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
+		if markErr := s.markRunDeadLetter(replyCtx, input.Key); markErr != nil {
+			joined := errors.Join(err, markErr)
+			recordSpanError(replySpan, joined)
+			return Result{}, joined
+		}
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
@@ -500,22 +525,28 @@ func (s *Service) writeReply(
 		outbound,
 		channeladapter.RetryPolicyForBinding(runtime.Binding),
 	); err != nil {
-		if _, markErr := s.idempotencyStore.MarkReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
-			recordSpanError(replySpan, markErr)
-			return Result{}, markErr
+		if markErr := s.markReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
+			joined := errors.Join(err, markErr)
+			recordSpanError(replySpan, joined)
+			return Result{}, joined
 		}
-		s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
+		s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "outbound_error", err.Error(), input.Start, err))
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
 	record, err := s.idempotencyStore.Complete(replyCtx, input.Key, reply.ResultRef)
 	if err != nil {
+		if markErr := s.markReplyFailed(replyCtx, input.Key, reply.ResultRef); markErr != nil {
+			joined := errors.Join(err, markErr)
+			recordSpanError(replySpan, joined)
+			return Result{}, joined
+		}
 		recordSpanError(replySpan, err)
 		return Result{}, err
 	}
 	s.writeMessageEvent(auditCtx, messageEventFromInbound(msg, input.SessionID, input.Key, input.RequestID, reply.InboundSequence, input.Start))
 	s.writeMessageEvent(auditCtx, messageEventFromAssistant(msg, input.SessionID, reply.ResultRef, input.RequestID, reply.AssistantSequence, s.now()))
-	s.writeAuditTo(auditCtx, auditSink, auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
+	s.writeAuditTo(auditCtx, auditSink, s.auditFromMessage(msg, input.SessionID, input.InternalUserID, "completed", "", input.Start, nil))
 	return Result{
 		RequestID:   input.RequestID,
 		SessionID:   input.SessionID,
@@ -550,7 +581,7 @@ func (s *Service) writeRejectAudit(
 	start time.Time,
 	err error,
 ) {
-	s.writeAudit(ctx, auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
+	s.writeAudit(ctx, s.auditFromMessage(msg, "", "", "reject", err.Error(), start, err))
 }
 
 func (s *Service) writeRejectAuditTo(
@@ -563,7 +594,7 @@ func (s *Service) writeRejectAuditTo(
 	s.writeAuditTo(
 		ctx,
 		auditSink,
-		auditFromMessage(msg, "", "", "reject", err.Error(), start, err),
+		s.auditFromMessage(msg, "", "", "reject", err.Error(), start, err),
 	)
 }
 
@@ -712,7 +743,7 @@ done:
 }
 
 func requestIDFor(msg platform.InboundMessage) string {
-	if requestID := strings.TrimSpace(msg.TraceContext["request_id"]); requestID != "" {
+	if requestID := strings.TrimSpace(msg.TraceContext["request_id"]); validExternalRequestID(requestID) {
 		return requestID
 	}
 	return platform.IdempotencyKey(
@@ -723,13 +754,47 @@ func requestIDFor(msg platform.InboundMessage) string {
 	)
 }
 
-func auditFromMessage(
+func validExternalRequestID(value string) bool {
+	if value == "" || len(value) > maxExternalRequestIDLength {
+		return false
+	}
+	lower := strings.ToLower(value)
+	for _, prefix := range unsafeRequestIDPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+		case r == '-', r == '_', r == '.', r == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) auditFromMessage(
 	msg platform.InboundMessage,
 	sessionID string,
 	internalUserID string,
 	decision string,
 	reason string,
 	start time.Time,
+	err error,
+) platform.AuditRecord {
+	return auditFromMessageAt(msg, sessionID, internalUserID, decision, reason, start, s.now(), err)
+}
+
+func auditFromMessageAt(
+	msg platform.InboundMessage,
+	sessionID string,
+	internalUserID string,
+	decision string,
+	reason string,
+	start time.Time,
+	now time.Time,
 	err error,
 ) platform.AuditRecord {
 	record := platform.AuditRecord{
@@ -747,8 +812,8 @@ func auditFromMessage(
 		TraceID:        requestIDFor(msg),
 		Decision:       decision,
 		DecisionReason: redactAuditReason(reason),
-		LatencyMS:      time.Since(start).Milliseconds(),
-		CreatedAt:      time.Now(),
+		LatencyMS:      now.Sub(start).Milliseconds(),
+		CreatedAt:      now,
 	}
 	if err != nil {
 		record.ErrorType = fmt.Sprintf("%T", err)

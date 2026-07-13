@@ -341,8 +341,10 @@ func TestRouterAdapterScopesKnowledgeQueries(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "tenant-a", knowledgeSvc.last.SearchFilter.Metadata["tenant_id"])
+	assert.Equal(t, p.Namespace, knowledgeSvc.last.SearchFilter.Metadata["storage_namespace"])
 	assert.Equal(t, "runbook", knowledgeSvc.last.SearchFilter.Metadata["category"])
 	assert.NotContains(t, req.SearchFilter.Metadata, "tenant_id")
+	assert.NotContains(t, req.SearchFilter.Metadata, "storage_namespace")
 
 	_, err = knowledgeStore.Search(ctx, &knowledge.SearchRequest{
 		Query: "deployment",
@@ -359,6 +361,46 @@ func TestRouterAdapterScopesKnowledgeQueries(t *testing.T) {
 		},
 	})
 	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+
+	_, err = knowledgeStore.Search(ctx, &knowledge.SearchRequest{
+		Query: "deployment",
+		SearchFilter: &knowledge.SearchFilter{
+			Metadata: map[string]any{"storage_namespace": "tenant/tenant-a/profile/other"},
+		},
+	})
+	require.ErrorIs(t, err, ErrKeyOutsideTenantScope)
+}
+
+func TestRouterAdapterScopesKnowledgeQueriesByProfileNamespace(t *testing.T) {
+	ctx := context.Background()
+	router := NewInMemoryRouter()
+	knowledgeSvc := &capturingKnowledge{}
+	profileA := profile("tenant-a", "profile-a", "hot")
+	profileB := profile("tenant-a", "profile-b", "hot")
+	require.NoError(t, router.RegisterProfile(profileA))
+	require.NoError(t, router.RegisterProfile(profileB))
+	require.NoError(t, router.RegisterBackend(BackendSet{
+		TenantID:  "tenant-a",
+		BackendID: "hot",
+		Knowledge: knowledgeSvc,
+	}))
+	adapterA, err := router.Adapter(ctx, "tenant-a", "profile-a")
+	require.NoError(t, err)
+	knowledgeA, err := adapterA.Knowledge(ctx)
+	require.NoError(t, err)
+	adapterB, err := router.Adapter(ctx, "tenant-a", "profile-b")
+	require.NoError(t, err)
+	knowledgeB, err := adapterB.Knowledge(ctx)
+	require.NoError(t, err)
+
+	_, err = knowledgeA.Search(ctx, &knowledge.SearchRequest{Query: "deployment"})
+	require.NoError(t, err)
+	assert.Equal(t, profileA.Namespace, knowledgeSvc.last.SearchFilter.Metadata["storage_namespace"])
+
+	_, err = knowledgeB.Search(ctx, &knowledge.SearchRequest{Query: "deployment"})
+	require.NoError(t, err)
+	assert.Equal(t, profileB.Namespace, knowledgeSvc.last.SearchFilter.Metadata["storage_namespace"])
+	assert.Equal(t, "tenant-a", knowledgeSvc.last.SearchFilter.Metadata["tenant_id"])
 }
 
 func TestRegisterProfileValidatesSecretRefs(t *testing.T) {

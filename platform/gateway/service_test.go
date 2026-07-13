@@ -580,6 +580,118 @@ func TestServiceHandleInboundDuplicateReplyFailedReusesStoredOutbound(t *testing
 	assert.Len(t, r.calls, 1)
 }
 
+func TestServiceHandleInboundSaveFailureMarksDeadLetter(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := platform.NewInMemoryIdempotencyStore()
+	saveErr := errors.New("outbound save unavailable")
+	svc := NewService(
+		registry,
+		idempotency,
+		&failingSaveOutboundStore{
+			InMemoryOutboundStore: NewInMemoryOutboundStore(),
+			saveErr:               saveErr,
+		},
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, saveErr)
+	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, record.Status)
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, dup.Status)
+}
+
+func TestServiceHandleInboundCompleteFailureMarksReplyFailed(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	completeErr := errors.New("idempotency complete unavailable")
+	idempotency := &failingCompleteIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		completeErr:              completeErr,
+	}
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore())
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+
+	_, err := svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, completeErr)
+	record, ok, err := idempotency.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, record.Status)
+	assert.NotEmpty(t, record.ResultRef)
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusReplyFailed, dup.Status)
+	assert.Equal(t, "queued", dup.Outbound.Content)
+}
+
+func TestServiceHandleInboundPreservesRunnerAndDeadLetterErrors(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	runnerErr := errors.New("runner failed")
+	markErr := errors.New("dead letter unavailable")
+	r := &recordingRunner{runErr: runnerErr}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := &failingMarkDeadLetterIdempotencyStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		markErr:                  markErr,
+	}
+	svc := NewService(registry, idempotency, NewInMemoryOutboundStore())
+
+	_, err := svc.HandleInbound(ctx, inbound("tenant-a", "msg-1", "user-1", "hello"))
+
+	require.ErrorIs(t, err, runnerErr)
+	require.ErrorIs(t, err, markErr)
+}
+
+func TestServiceHandleInboundPreservesEnqueueAndMarkErrors(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "queued"}
+	registerRuntime(t, registry, "tenant-a", r)
+	idempotency := &failingMarkReplyIDStore{
+		InMemoryIdempotencyStore: platform.NewInMemoryIdempotencyStore(),
+		markErr:                  errors.New("reply failed mark unavailable"),
+	}
+	outbox := channeladapter.NewInMemoryOutboxStore()
+	store := NewOutboxBackedOutboundStore(outbox)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	resultRef := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1") + ":outbound:1"
+	_, _, err := outbox.Enqueue(ctx, platform.OutboundMessage{
+		TenantID:                 "other-tenant",
+		BindingID:                "binding",
+		Channel:                  "wecom",
+		SessionID:                "session",
+		ReplyToPlatformMessageID: "msg-1",
+		Kind:                     platform.OutboundMessageKindText,
+		Content:                  "already queued",
+		Sequence:                 1,
+		DedupKey:                 resultRef,
+	}, channeladapter.DefaultRetryPolicy())
+	require.NoError(t, err)
+	svc := NewService(registry, idempotency, store)
+
+	_, err = svc.HandleInbound(ctx, msg)
+
+	require.ErrorIs(t, err, channeladapter.ErrOutboundDuplicate)
+	require.ErrorIs(t, err, idempotency.markErr)
+}
+
 func TestServiceHandleInboundDuplicateProcessingDoesNotRun(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
@@ -1006,6 +1118,66 @@ func TestServiceHandleInboundUsesRequestIDAndStreamsText(t *testing.T) {
 	assert.Equal(t, result.Outbound.TraceID, events[1].TraceID)
 }
 
+func TestServiceHandleInboundRejectsUnsafeExternalRequestID(t *testing.T) {
+	ctx := context.Background()
+	registry := NewInMemoryRegistry()
+	r := &recordingRunner{response: "safe"}
+	registerRuntime(t, registry, "tenant-a", r)
+	audit := platform.NewInMemoryAuditSink()
+	messageEvents := platform.NewInMemoryMessageEventSink()
+	svc := NewService(
+		registry,
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithAuditSink(audit),
+		WithMessageEventSink(messageEvents),
+	)
+	msg := inbound("tenant-a", "msg-1", "user-1", "hello")
+	msg.TraceContext = map[string]string{
+		"request_id": "sk-1234567890abcdef",
+	}
+	fallback := platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1")
+
+	result, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+
+	assert.Equal(t, fallback, result.RequestID)
+	require.Len(t, r.calls, 1)
+	assert.Equal(t, fallback, r.calls[0].requestID)
+	assert.Equal(t, fallback, result.Outbound.TraceID)
+	require.Len(t, audit.Records(), 1)
+	assert.Equal(t, fallback, audit.Records()[0].RequestID)
+	assert.Equal(t, fallback, audit.Records()[0].TraceID)
+	events := messageEvents.Events()
+	require.Len(t, events, 2)
+	assert.Equal(t, fallback, events[0].TraceID)
+	assert.Equal(t, fallback, events[1].TraceID)
+}
+
+func TestServiceAuditUsesInjectedClock(t *testing.T) {
+	createdAt := time.Unix(200, 500*int64(time.Millisecond))
+	svc := NewService(
+		NewInMemoryRegistry(),
+		platform.NewInMemoryIdempotencyStore(),
+		NewInMemoryOutboundStore(),
+		WithNow(func() time.Time { return createdAt }),
+	)
+	start := createdAt.Add(-1500 * time.Millisecond)
+
+	record := svc.auditFromMessage(
+		inbound("tenant-a", "msg-1", "user-1", "hello"),
+		"session-a",
+		"internal-user-a",
+		"completed",
+		"",
+		start,
+		nil,
+	)
+
+	assert.Equal(t, createdAt, record.CreatedAt)
+	assert.Equal(t, int64(1500), record.LatencyMS)
+}
+
 func TestServiceHandleInboundEmitsTraceSkeleton(t *testing.T) {
 	recorder := useGatewaySpanRecorder(t)
 	ctx := context.Background()
@@ -1385,6 +1557,70 @@ type recordingOutboundProvider struct {
 	status            platform.OutboundStatus
 	providerMessageID string
 	delivered         []platform.OutboundMessage
+}
+
+type failingSaveOutboundStore struct {
+	*InMemoryOutboundStore
+	saveErr error
+}
+
+func (s *failingSaveOutboundStore) Save(
+	ctx context.Context,
+	resultRef string,
+	outbound platform.OutboundMessage,
+) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	return s.InMemoryOutboundStore.Save(ctx, resultRef, outbound)
+}
+
+type failingCompleteIdempotencyStore struct {
+	*platform.InMemoryIdempotencyStore
+	completeErr error
+}
+
+func (s *failingCompleteIdempotencyStore) Complete(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.completeErr != nil {
+		return platform.IdempotencyRecord{}, s.completeErr
+	}
+	return s.InMemoryIdempotencyStore.Complete(ctx, key, resultRef)
+}
+
+type failingMarkDeadLetterIdempotencyStore struct {
+	*platform.InMemoryIdempotencyStore
+	markErr error
+}
+
+func (s *failingMarkDeadLetterIdempotencyStore) MarkDeadLetter(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkDeadLetter(ctx, key, resultRef)
+}
+
+type failingMarkReplyIDStore struct {
+	*platform.InMemoryIdempotencyStore
+	markErr error
+}
+
+func (s *failingMarkReplyIDStore) MarkReplyFailed(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (platform.IdempotencyRecord, error) {
+	if s.markErr != nil {
+		return platform.IdempotencyRecord{}, s.markErr
+	}
+	return s.InMemoryIdempotencyStore.MarkReplyFailed(ctx, key, resultRef)
 }
 
 func (p *recordingOutboundProvider) Deliver(

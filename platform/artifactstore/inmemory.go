@@ -9,9 +9,12 @@
 package artifactstore
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 var (
@@ -47,6 +50,42 @@ func (s *InMemoryMetadataStore) Put(ctx context.Context, record MetadataRecord) 
 	}
 	s.records = append(s.records, record)
 	return nil
+}
+
+// Reserve atomically allocates the next version and stores its pending metadata.
+func (s *InMemoryMetadataStore) Reserve(
+	ctx context.Context,
+	query MetadataQuery,
+	build MetadataReservationBuilder,
+) (MetadataRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return MetadataRecord{}, err
+	}
+	if build == nil {
+		return MetadataRecord{}, errors.New("artifactstore reservation builder is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	records := make([]MetadataRecord, 0)
+	for _, record := range s.records {
+		if matchMetadata(record, query) {
+			records = append(records, record)
+		}
+	}
+	record, err := build(nextVersion(records))
+	if err != nil {
+		return MetadataRecord{}, err
+	}
+	if record.Status == "" {
+		record.Status = MetadataStatusPending
+	}
+	for _, existing := range s.records {
+		if sameVersion(existing, record) {
+			return MetadataRecord{}, ErrVersionConflict
+		}
+	}
+	s.records = append(s.records, record)
+	return record, nil
 }
 
 // Query returns records matching all non-empty query fields.
@@ -117,7 +156,10 @@ func (s *InMemoryMetadataStore) MarkDeleting(
 			continue
 		}
 		if s.records[index].Status == MetadataStatusPending && !query.AllowPendingTransition {
-			return nil, ErrArtifactWriteInProgress
+			expiresAt := s.records[index].ReservationExpiresAt
+			if expiresAt.IsZero() || time.Now().Before(expiresAt) {
+				return nil, ErrArtifactWriteInProgress
+			}
 		}
 		indexes = append(indexes, index)
 	}
@@ -188,6 +230,12 @@ func (s *InMemoryObjectStore) Put(ctx context.Context, object ObjectRecord) erro
 		err := s.failNextPut[0]
 		s.failNextPut = s.failNextPut[1:]
 		return err
+	}
+	if existing, ok := s.objects[object.ObjectID]; ok {
+		if bytes.Equal(existing.data, object.Data) {
+			return nil
+		}
+		return ErrObjectConflict
 	}
 	s.objects[object.ObjectID] = objectValue{
 		data: append([]byte(nil), object.Data...),
@@ -301,6 +349,9 @@ func matchMetadata(record MetadataRecord, query MetadataQuery) bool {
 		return false
 	}
 	if query.ObjectID != "" && record.ObjectID != query.ObjectID {
+		return false
+	}
+	if query.ReservationOwner != "" && record.ReservationOwner != query.ReservationOwner {
 		return false
 	}
 	if query.Version != nil && record.Version != *query.Version {

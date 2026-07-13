@@ -317,8 +317,8 @@ func validateStorageNamespace(tenantID, namespace string) error {
 	if err := validateAuditRedactedText("namespace", namespace); err != nil {
 		return err
 	}
-	parts := strings.SplitN(namespace, "/", 3)
-	if len(parts) != 3 || parts[0] != "tenant" || parts[1] != tenantID {
+	prefix := "tenant/" + tenantID
+	if namespace != prefix && !strings.HasPrefix(namespace, prefix+"/") {
 		return fmt.Errorf("namespace must start with tenant/<tenant_id>/")
 	}
 	return nil

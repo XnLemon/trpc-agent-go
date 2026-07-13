@@ -31,6 +31,8 @@ var (
 	ErrNilArtifact = errors.New("artifactstore artifact cannot be nil")
 	// ErrObjectNotFound indicates that object content is missing.
 	ErrObjectNotFound = errors.New("artifactstore object not found")
+	// ErrObjectConflict indicates that an object ID already contains different bytes.
+	ErrObjectConflict = errors.New("artifactstore object conflict")
 	// ErrVersionConflict indicates that another writer committed the same version.
 	ErrVersionConflict = errors.New("artifactstore version conflict")
 	// ErrMetadataReservationNotFound indicates that a pending upload record is missing.
