@@ -113,6 +113,38 @@ func TestAuditRecordValidateRejectsSensitiveRequestAndTraceIDs(t *testing.T) {
 	}
 }
 
+func TestAuditRecordValidateRejectsSensitiveFreeTextFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		mut   func(*AuditRecord)
+		field string
+	}{
+		{name: "app_id", mut: func(record *AuditRecord) { record.AppID = "ghp_1234567890abcdef" }, field: "app_id"},
+		{name: "channel", mut: func(record *AuditRecord) { record.Channel = "ghp_1234567890abcdef" }, field: "channel"},
+		{name: "binding_id", mut: func(record *AuditRecord) { record.BindingID = "ghp_1234567890abcdef" }, field: "binding_id"},
+		{name: "user_id", mut: func(record *AuditRecord) { record.UserID = "ghp_1234567890abcdef" }, field: "user_id"},
+		{name: "internal_user_id", mut: func(record *AuditRecord) { record.InternalUserID = "ghp_1234567890abcdef" }, field: "internal_user_id"},
+		{name: "user_id_hash", mut: func(record *AuditRecord) { record.UserIDHash = "ghp_1234567890abcdef" }, field: "user_id_hash"},
+		{name: "session_id", mut: func(record *AuditRecord) { record.SessionID = "ghp_1234567890abcdef" }, field: "session_id"},
+		{name: "message_id", mut: func(record *AuditRecord) { record.MessageID = "ghp_1234567890abcdef" }, field: "message_id"},
+		{name: "agent_name", mut: func(record *AuditRecord) { record.AgentName = "ghp_1234567890abcdef" }, field: "agent_name"},
+		{name: "model_name", mut: func(record *AuditRecord) { record.ModelName = "ghp_1234567890abcdef" }, field: "model_name"},
+		{name: "tool_name", mut: func(record *AuditRecord) { record.ToolName = "ghp_1234567890abcdef" }, field: "tool_name"},
+		{name: "decision", mut: func(record *AuditRecord) { record.Decision = "ghp_1234567890abcdef" }, field: "decision"},
+		{name: "redaction_version", mut: func(record *AuditRecord) { record.RedactionVersion = "ghp_1234567890abcdef" }, field: "redaction_version"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			record := validAuditRecord()
+			tt.mut(&record)
+			if err := record.Validate(); err == nil || !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("expected sensitive %s rejection, got %v", tt.field, err)
+			}
+		})
+	}
+}
+
 func TestAuditRecordValidateRejectsSensitiveErrorType(t *testing.T) {
 	record := validAuditRecord()
 	record.ErrorType = "storage_error password=plain"

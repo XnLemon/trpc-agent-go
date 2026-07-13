@@ -371,9 +371,19 @@ func (s *Service) runAndReply(
 ) (Result, error) {
 	content, err := s.runGatewayRunner(routeCtx, auditCtx, runtime, msg, input)
 	if err != nil {
+		if markErr := s.markRunDeadLetter(routeCtx, input.Key); markErr != nil {
+			return Result{}, markErr
+		}
 		return Result{}, err
 	}
 	return s.writeReply(routeCtx, auditCtx, runtime, msg, input, content)
+}
+
+func (s *Service) markRunDeadLetter(ctx context.Context, key string) error {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_, err := s.idempotencyStore.MarkDeadLetter(markCtx, key, "")
+	return err
 }
 
 func (s *Service) runGatewayRunner(

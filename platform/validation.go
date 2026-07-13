@@ -341,24 +341,29 @@ func (r AuditRecord) Validate() error {
 	if math.IsNaN(r.Cost) || math.IsInf(r.Cost, 0) || r.Cost < 0 {
 		return fmt.Errorf("cost must be greater than or equal to 0")
 	}
-	for field, value := range map[string]string{
-		"request_id": r.RequestID,
-		"trace_id":   r.TraceID,
-	} {
-		if err := validateAuditRedactedText(field, value); err != nil {
-			return err
-		}
-	}
-	if err := validateAuditRedactedText("decision_reason", r.DecisionReason); err != nil {
-		return err
-	}
-	if err := validateAuditRedactedText("error_type", r.ErrorType); err != nil {
-		return err
-	}
-	if err := validateAuditRedactedText("token_usage_json", r.TokenUsageJSON); err != nil {
-		return err
-	}
-	if err := validateAuditRedactedText("redacted_detail_ref", r.RedactedDetailRef); err != nil {
+	if err := validateAuditRedactedFields(
+		safeTextField{"tenant_id", r.TenantID},
+		safeTextField{"audit_id", r.AuditID},
+		safeTextField{"app_id", r.AppID},
+		safeTextField{"channel", r.Channel},
+		safeTextField{"binding_id", r.BindingID},
+		safeTextField{"user_id", r.UserID},
+		safeTextField{"internal_user_id", r.InternalUserID},
+		safeTextField{"user_id_hash", r.UserIDHash},
+		safeTextField{"session_id", r.SessionID},
+		safeTextField{"message_id", r.MessageID},
+		safeTextField{"request_id", r.RequestID},
+		safeTextField{"agent_name", r.AgentName},
+		safeTextField{"model_name", r.ModelName},
+		safeTextField{"tool_name", r.ToolName},
+		safeTextField{"decision", r.Decision},
+		safeTextField{"decision_reason", r.DecisionReason},
+		safeTextField{"error_type", r.ErrorType},
+		safeTextField{"token_usage_json", r.TokenUsageJSON},
+		safeTextField{"trace_id", r.TraceID},
+		safeTextField{"redacted_detail_ref", r.RedactedDetailRef},
+		safeTextField{"redaction_version", r.RedactionVersion},
+	); err != nil {
 		return err
 	}
 	return nil

@@ -217,6 +217,25 @@ func TestSecretRotationStatusReportValidateRejectsUnsafeReport(t *testing.T) {
 	}
 }
 
+func TestSecretRotationStatusReportValidateRejectsMismatchedRotationID(t *testing.T) {
+	report, err := NewSecretRotationStatusReport(validSecretRotationStatusInput())
+	if err != nil {
+		t.Fatalf("new generated report: %v", err)
+	}
+	otherInput := validSecretRotationStatusInput()
+	otherInput.OperationID = "other-rotation"
+	other, err := NewSecretRotationStatusReport(otherInput)
+	if err != nil {
+		t.Fatalf("new other report: %v", err)
+	}
+
+	report.RotationID = other.RotationID
+	if err := report.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "rotation_id does not match") {
+		t.Fatalf("expected mismatched rotation id rejection, got %v", err)
+	}
+}
+
 func TestNewSecretRotationStatusReportRequiresSafeReferenceFormat(t *testing.T) {
 	base := validSecretRotationStatusInput()
 

@@ -73,12 +73,13 @@ func NewSecretRotationStatusReport(input SecretRotationStatusInput) (SecretRotat
 	if err != nil {
 		return SecretRotationStatusReport{}, err
 	}
+	resourceHash := shortHash(normalized.TenantID, normalized.ResourceType, normalized.ResourceID)
 	report := SecretRotationStatusReport{
 		TenantID:      normalized.TenantID,
 		AppID:         normalized.AppID,
-		RotationID:    normalized.rotationID(),
+		RotationID:    normalized.rotationID(resourceHash),
 		ResourceType:  normalized.ResourceType,
-		ResourceHash:  shortHash(normalized.TenantID, normalized.ResourceType, normalized.ResourceID),
+		ResourceHash:  resourceHash,
 		SecretField:   normalized.SecretField,
 		PreviousRef:   normalized.PreviousRef,
 		NextRef:       normalized.NextRef,
@@ -131,6 +132,9 @@ func (r SecretRotationStatusReport) Validate() error {
 	}
 	if strings.TrimSpace(r.OperationID) == "" {
 		return fmt.Errorf("operation_id is required")
+	}
+	if expected := r.expectedRotationID(); r.RotationID != expected {
+		return fmt.Errorf("rotation_id does not match report identity")
 	}
 	if r.UpdatedAt.IsZero() {
 		return fmt.Errorf("updated_at is required")
@@ -219,14 +223,25 @@ func validateSecretRotationStatusGate(r SecretRotationStatusReport) error {
 	return nil
 }
 
-func (i SecretRotationStatusInput) rotationID() string {
+func (i SecretRotationStatusInput) rotationID(resourceHash string) string {
 	return secretRotationIDPrefix + shortHash(
 		i.TenantID,
 		i.AppID,
 		i.ResourceType,
-		i.ResourceID,
+		resourceHash,
 		i.SecretField,
 		i.OperationID,
+	)
+}
+
+func (r SecretRotationStatusReport) expectedRotationID() string {
+	return secretRotationIDPrefix + shortHash(
+		r.TenantID,
+		r.AppID,
+		r.ResourceType,
+		r.ResourceHash,
+		r.SecretField,
+		r.OperationID,
 	)
 }
 

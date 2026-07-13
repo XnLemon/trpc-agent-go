@@ -21,8 +21,10 @@ type IdempotencyStore interface {
 	Start(ctx context.Context, record IdempotencyRecord) (IdempotencyRecord, bool, error)
 	// Complete marks a processing record as completed.
 	Complete(ctx context.Context, key string, resultRef string) (IdempotencyRecord, error)
-	// MarkReplyFailed marks a completed record as needing outbound retry.
+	// MarkReplyFailed marks a processing or completed record as needing outbound retry.
 	MarkReplyFailed(ctx context.Context, key string, resultRef string) (IdempotencyRecord, error)
+	// MarkDeadLetter marks a processing record as requiring manual replay.
+	MarkDeadLetter(ctx context.Context, key string, resultRef string) (IdempotencyRecord, error)
 	// Get returns the record for key.
 	Get(ctx context.Context, key string) (IdempotencyRecord, bool, error)
 }
@@ -80,13 +82,22 @@ func (s *InMemoryIdempotencyStore) Complete(
 	return s.update(ctx, key, IdempotencyStatusProcessing, IdempotencyStatusCompleted, resultRef)
 }
 
-// MarkReplyFailed marks a completed record as needing outbound retry.
+// MarkReplyFailed marks a processing or completed record as needing outbound retry.
 func (s *InMemoryIdempotencyStore) MarkReplyFailed(
 	ctx context.Context,
 	key string,
 	resultRef string,
 ) (IdempotencyRecord, error) {
 	return s.update(ctx, key, "", IdempotencyStatusReplyFailed, resultRef)
+}
+
+// MarkDeadLetter marks a processing record as requiring manual replay.
+func (s *InMemoryIdempotencyStore) MarkDeadLetter(
+	ctx context.Context,
+	key string,
+	resultRef string,
+) (IdempotencyRecord, error) {
+	return s.update(ctx, key, IdempotencyStatusProcessing, IdempotencyStatusDeadLetter, resultRef)
 }
 
 // Get returns the record for key.

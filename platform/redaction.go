@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-var defaultRedactionPatterns = []*regexp.Regexp{
+var defaultRedactionPatterns = append([]*regexp.Regexp{
 	regexp.MustCompile(`(?i)(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9._~+/\-]+=*`),
 	regexp.MustCompile(`(?i)(Authorization\s*=\s*Bearer\s+)[^\r\n\s]+`),
 	regexp.MustCompile(`(?i)(Bearer\s+)[A-Za-z0-9._~+/\-]+=*`),
@@ -22,9 +22,18 @@ var defaultRedactionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie)=([^&\s]+)`),
 	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|cookie):\s*([^,\s]+)`),
 	regexp.MustCompile(`(?i)("(?:api[_-]?key|token|secret|password|passwd|authorization|cookie)"\s*:\s*")([^"]+)(")`),
-	regexp.MustCompile(`(?i)(sk-[A-Za-z0-9._~+/\-]{8,})`),
 	regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s/?#]*@[^\s/?#]+`),
 	regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`),
+}, rawSecretRedactionPatterns()...)
+
+func rawSecretRedactionPatterns() []*regexp.Regexp {
+	patterns := make([]*regexp.Regexp, 0, len(rawSecretPrefixes))
+	for _, prefix := range rawSecretPrefixes {
+		patterns = append(patterns, regexp.MustCompile(
+			`(?i)`+regexp.QuoteMeta(prefix)+`[A-Za-z0-9._~+/\-]{8,}`,
+		))
+	}
+	return patterns
 }
 
 // Redactor masks sensitive values before logging, tracing, or auditing.

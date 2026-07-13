@@ -649,6 +649,30 @@ func TestIdempotencyStoreEnforcesStateTransitions(t *testing.T) {
 		t.Fatalf("reply-failed processing record should not transition to completed")
 	}
 
+	deadLetterStore := NewInMemoryIdempotencyStore()
+	deadLetter, started, err := deadLetterStore.Start(ctx, IdempotencyRecord{
+		TenantID:          "tenant",
+		Channel:           "telegram",
+		AccountID:         "bot",
+		PlatformMessageID: "msg-dead-letter",
+	})
+	if err != nil {
+		t.Fatalf("start dead-letter record: %v", err)
+	}
+	if !started {
+		t.Fatalf("dead-letter record should start")
+	}
+	deadLetter, err = deadLetterStore.MarkDeadLetter(ctx, deadLetter.IdempotencyKey, "")
+	if err != nil {
+		t.Fatalf("mark dead letter from processing: %v", err)
+	}
+	if deadLetter.Status != IdempotencyStatusDeadLetter {
+		t.Fatalf("unexpected dead-letter record: %#v", deadLetter)
+	}
+	if _, err := deadLetterStore.Complete(ctx, deadLetter.IdempotencyKey, "outbound-1"); err == nil {
+		t.Fatalf("dead-letter record should not transition to completed")
+	}
+
 	completedStore := NewInMemoryIdempotencyStore()
 	completed, started, err := completedStore.Start(ctx, IdempotencyRecord{
 		TenantID:          "tenant",
@@ -805,6 +829,22 @@ func TestRedactorMasksSecrets(t *testing.T) {
 	}
 	if !strings.Contains(got, "api_key=****") {
 		t.Fatalf("expected api_key mask, got %q", got)
+	}
+}
+
+func TestRedactorMasksRawSecretPrefixes(t *testing.T) {
+	redactor, err := NewRedactor()
+	if err != nil {
+		t.Fatalf("NewRedactor: %v", err)
+	}
+	for _, prefix := range rawSecretPrefixes {
+		t.Run(prefix, func(t *testing.T) {
+			secret := prefix + "1234567890abcdef"
+			got := redactor.Redact(secret)
+			if got == secret || strings.Contains(got, secret) {
+				t.Fatalf("redacted output leaked %q: %q", secret, got)
+			}
+		})
 	}
 }
 

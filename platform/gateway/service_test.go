@@ -750,7 +750,7 @@ func TestServiceHandleInboundAllowsAuthorizedGroupMention(t *testing.T) {
 	require.Len(t, r.calls, 1)
 }
 
-func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
+func TestServiceHandleInboundRunnerErrorMarksDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	registry := NewInMemoryRegistry()
 	runnerErr := errors.New("runner failed")
@@ -772,9 +772,16 @@ func TestServiceHandleInboundRunnerErrorDoesNotComplete(t *testing.T) {
 	record, ok, err := store.Get(ctx, platform.IdempotencyKey("tenant-a", "wecom", "acct", "msg-1"))
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, platform.IdempotencyStatusProcessing, record.Status)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, record.Status)
 	assert.Empty(t, record.ResultRef)
 	assert.Empty(t, messageEvents.Events())
+
+	dup, err := svc.HandleInbound(ctx, msg)
+	require.NoError(t, err)
+	assert.True(t, dup.Duplicate)
+	assert.False(t, dup.Processing)
+	assert.Equal(t, platform.IdempotencyStatusDeadLetter, dup.Status)
+	assert.Empty(t, dup.ResultRef)
 }
 
 func TestServiceHandleInboundRunnerErrorRedactsAuditReason(t *testing.T) {
