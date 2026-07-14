@@ -28,6 +28,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/internal/profilecompiler"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
@@ -195,7 +196,7 @@ func runErrorResponse(input model.Message, appName string, requestID string, err
 	response := runResponse{
 		Status:       status,
 		Messages:     []model.Message{input},
-		ErrorMessage: err.Error(),
+		ErrorMessage: redactErrorMessage(err.Error()),
 	}
 	appendRunTerminalEvents(&response, appName, requestID, err)
 	return response
@@ -251,6 +252,7 @@ func collectRunResponse(
 				continue
 			}
 			eventValue := *evt
+			redactEventResponseError(&eventValue)
 			if eventValue.RequestID == "" {
 				return response, errors.New("runner event request id is empty")
 			}
@@ -282,8 +284,9 @@ func collectRunResponse(
 
 func appendRunTerminalEvents(response *runResponse, appName string, requestID string, err error) {
 	invocationID := terminalInvocationID(response)
+	message := redactErrorMessage(err.Error())
 	if !lastEventIsTerminalError(response.Events) {
-		evt := event.NewErrorEvent(invocationID, appName, model.ErrorTypeRunError, err.Error())
+		evt := event.NewErrorEvent(invocationID, appName, model.ErrorTypeRunError, message)
 		evt.RequestID = requestID
 		response.Events = append(response.Events, *evt)
 	}
@@ -294,7 +297,7 @@ func appendRunTerminalEvents(response *runResponse, appName string, requestID st
 		Done:    true,
 		Error: &model.ResponseError{
 			Type:    model.ErrorTypeRunError,
-			Message: err.Error(),
+			Message: message,
 		},
 	})
 	evt.RequestID = requestID
@@ -356,7 +359,23 @@ func (s *Server) respondJSON(w http.ResponseWriter, r *http.Request, statusCode 
 }
 
 func (s *Server) respondError(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
-	s.respondJSON(w, r, statusCode, map[string]string{"error": message})
+	s.respondJSON(w, r, statusCode, map[string]string{"error": redactErrorMessage(message)})
+}
+
+func redactEventResponseError(evt *event.Event) {
+	if evt == nil || evt.Response == nil || evt.Response.Error == nil {
+		return
+	}
+	evt.Response = evt.Response.Clone()
+	evt.Response.Error.Message = redactErrorMessage(evt.Response.Error.Message)
+}
+
+func redactErrorMessage(message string) string {
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return message
+	}
+	return redactor.Redact(message)
 }
 
 func (s *Server) handleCORS(w http.ResponseWriter) {
