@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval"
@@ -590,6 +592,34 @@ func TestApprovalOptionsWithReviewerAllowsWhitelistedHighRiskAsk(t *testing.T) {
 	if result != nil {
 		t.Fatalf("expected approved ask flow to continue, got %+v", result)
 	}
+}
+
+func TestNewCopiesMutablePolicySlices(t *testing.T) {
+	source := defaultPolicy(platform.ToolPolicy{
+		ToolWhitelist:           []string{"read_file"},
+		ToolDenylist:            []string{"shell"},
+		ArgumentRedactionRules:  []string{"secret"},
+		PlatformDenylist:        []string{"admin"},
+		HighRiskTools:           []string{"workspace_write"},
+		DangerousToolAction:     platform.DangerousToolActionDeny,
+		NetworkPolicyJSON:       `{"mode":"deny"}`,
+		FilesystemPolicyJSON:    `{"mode":"deny"}`,
+		ToolBudgetRemainingJSON: `{"calls":1}`,
+	})
+	p, err := New(source)
+	require.NoError(t, err)
+
+	source.ToolWhitelist[0] = "mutated"
+	source.ToolDenylist[0] = "mutated"
+	source.ArgumentRedactionRules[0] = "mutated"
+	source.PlatformDenylist[0] = "mutated"
+	source.HighRiskTools[0] = "mutated"
+
+	require.Equal(t, []string{"read_file"}, p.policy.ToolWhitelist)
+	require.Equal(t, []string{"shell"}, p.policy.ToolDenylist)
+	require.Equal(t, []string{"secret"}, p.policy.ArgumentRedactionRules)
+	require.Equal(t, []string{"admin"}, p.policy.PlatformDenylist)
+	require.Equal(t, []string{"workspace_write"}, p.policy.HighRiskTools)
 }
 
 func newPolicy(t *testing.T, policy platform.ToolPolicy, opts ...Option) *Policy {

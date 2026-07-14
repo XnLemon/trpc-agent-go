@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -972,6 +973,79 @@ func (m *dynRecordingModel) snapshot() [][]string {
 	return out
 }
 
+type dynToolCallModel struct {
+	name     string
+	toolName string
+	calls    atomic.Int32
+}
+
+func (m *dynToolCallModel) GenerateContent(
+	_ context.Context,
+	_ *model.Request,
+) (<-chan *model.Response, error) {
+	call := m.calls.Add(1)
+	response := &model.Response{Done: true}
+	if call == 1 {
+		response.Choices = []model.Choice{{
+			Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "call-restricted",
+					Type: "function",
+					Function: model.FunctionDefinitionParam{
+						Name:      m.toolName,
+						Arguments: []byte(`{}`),
+					},
+				}},
+			},
+		}}
+	} else {
+		response.Choices = []model.Choice{{
+			Message: model.NewAssistantMessage("child-done"),
+		}}
+	}
+	ch := make(chan *model.Response, 1)
+	ch <- response
+	close(ch)
+	return ch, nil
+}
+
+func (m *dynToolCallModel) Info() model.Info {
+	return model.Info{Name: m.name}
+}
+
+type dynActivationSurfaceAgent struct {
+	agent.Agent
+	disabled string
+}
+
+func (a *dynActivationSurfaceAgent) InvocationToolSurface(
+	ctx context.Context,
+	inv *agent.Invocation,
+) ([]tool.Tool, map[string]bool) {
+	provider := a.Agent.(agent.InvocationToolSurfaceProvider)
+	return provider.InvocationToolSurface(ctx, inv)
+}
+
+func (a *dynActivationSurfaceAgent) ApplyInvocationToolActivation(
+	_ context.Context,
+	_ *agent.Invocation,
+	tools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	filtered := make([]tool.Tool, 0, len(tools))
+	for _, candidate := range tools {
+		if candidate.Declaration().Name == a.disabled {
+			delete(userToolNames, a.disabled)
+			delete(externalToolNames, a.disabled)
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered, userToolNames, externalToolNames
+}
+
 type dynBlockingModel struct{}
 
 func (m *dynBlockingModel) GenerateContent(
@@ -1058,6 +1132,42 @@ func TestNewDynamicTool_Integration_DefaultAllTools(t *testing.T) {
 	seen := recModel.snapshot()
 	require.Len(t, seen, 1)
 	require.Equal(t, []string{"tool_a", "tool_b"}, seen[0])
+}
+
+func TestNewDynamicTool_Integration_AppliesParentInvocationActivation(
+	t *testing.T,
+) {
+	parentModel := &dynRecordingModel{name: "parent", response: "unused"}
+	parentBase := llmagent.New(
+		"main",
+		llmagent.WithModel(parentModel),
+		llmagent.WithTools([]tool.Tool{
+			newDynTestTool("tool_a"),
+			newDynTestTool("tool_b"),
+		}),
+	)
+	parent := &dynActivationSurfaceAgent{
+		Agent:    parentBase,
+		disabled: "tool_b",
+	}
+	templateModel := &dynRecordingModel{name: "template", response: "done"}
+	template := llmagent.New("subagent", llmagent.WithModel(templateModel))
+	at := NewDynamicTool(WithTemplateAgent(template))
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(parent),
+		agent.WithInvocationSession(session.NewSession("app", "user", "session")),
+		agent.WithInvocationEventFilterKey("main"),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), inv)
+
+	got, err := at.Call(ctx, []byte(`{"request":"use available tools"}`))
+	require.NoError(t, err)
+	require.Equal(t, "done", got)
+	require.Empty(t, parentModel.snapshot())
+	seen := templateModel.snapshot()
+	require.Len(t, seen, 1)
+	require.Equal(t, []string{"tool_a"}, seen[0],
+		"dynamic child must use the parent's activated tool surface")
 }
 
 func TestNewDynamicTool_Integration_UnavailableReasonReturnedToParent(t *testing.T) {
@@ -1170,6 +1280,179 @@ func TestNewDynamicTool_Integration_WithTemplateAgent(t *testing.T) {
 	require.Len(t, seen, 1, "template agent should run exactly once")
 	require.Equal(t, []string{"tool_a"}, seen[0],
 		"tools selected from the parent surface must be injected into the template")
+}
+
+func TestNewDynamicTool_Integration_TemplatePreservesMandatoryPermissionPolicy(
+	t *testing.T,
+) {
+	const restrictedToolName = "restricted_tool"
+	var executions atomic.Int32
+	restrictedTool := function.NewFunctionTool(
+		func(_ context.Context, _ struct{}) (string, error) {
+			executions.Add(1)
+			return "executed", nil
+		},
+		function.WithName(restrictedToolName),
+		function.WithDescription("must remain tenant-governed"),
+	)
+	parentModel := &dynRecordingModel{
+		name:     "parent",
+		response: "parent-should-not-run",
+	}
+	templateModel := &dynToolCallModel{
+		name:     "template",
+		toolName: restrictedToolName,
+	}
+	main := llmagent.New(
+		"main",
+		llmagent.WithModel(parentModel),
+		llmagent.WithTools([]tool.Tool{restrictedTool}),
+	)
+	subTemplate := llmagent.New(
+		"subagent",
+		llmagent.WithModel(templateModel),
+	)
+	at := NewDynamicTool(WithTemplateAgent(subTemplate))
+
+	sess := session.NewSession("app", "user", "session")
+	parent := agent.NewInvocation(
+		agent.WithInvocationAgent(main),
+		agent.WithInvocationSession(sess),
+		agent.WithInvocationEventFilterKey("main"),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(
+					_ context.Context,
+					req *tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					if req.ToolName == restrictedToolName {
+						return tool.DenyPermission("tenant policy"), nil
+					}
+					return tool.AllowPermission(), nil
+				},
+			),
+		)),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), parent)
+
+	got, err := at.Call(
+		ctx,
+		[]byte(`{"request":"run restricted tool","tools":["restricted_tool"]}`),
+	)
+	require.NoError(t, err)
+	require.Equal(t, "child-done", got)
+	require.Equal(t, int32(0), executions.Load(),
+		"template child must not clear tenant mandatory permission policy")
+	require.Equal(t, int32(2), templateModel.calls.Load(),
+		"permission denial should be returned to the child model")
+	require.Empty(t, parentModel.snapshot(),
+		"template model must remain the child execution boundary")
+}
+
+func TestTool_Integration_FallbackRunnerPreservesMandatoryPermissionPolicy(
+	t *testing.T,
+) {
+	const restrictedToolName = "restricted_tool"
+	var executions atomic.Int32
+	restrictedTool := function.NewFunctionTool(
+		func(_ context.Context, _ struct{}) (string, error) {
+			executions.Add(1)
+			return "executed", nil
+		},
+		function.WithName(restrictedToolName),
+		function.WithDescription("must remain parent-governed"),
+	)
+	childModel := &dynToolCallModel{
+		name:     "child",
+		toolName: restrictedToolName,
+	}
+	child := llmagent.New(
+		"child",
+		llmagent.WithModel(childModel),
+		llmagent.WithTools([]tool.Tool{restrictedTool}),
+	)
+	at := NewTool(child)
+	parent := agent.NewInvocation(
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(
+					_ context.Context,
+					req *tool.PermissionRequest,
+				) (tool.PermissionDecision, error) {
+					if req.ToolName == restrictedToolName {
+						return tool.DenyPermission("parent policy"), nil
+					}
+					return tool.AllowPermission(), nil
+				},
+			),
+		)),
+	)
+	ctx := agent.NewInvocationContext(context.Background(), parent)
+
+	got, err := at.Call(ctx, []byte(`{"request":"run restricted tool"}`))
+	require.NoError(t, err)
+	require.Equal(t, "child-done", got)
+	require.Equal(t, int32(0), executions.Load())
+	require.Equal(t, int32(2), childModel.calls.Load())
+}
+
+func TestTool_Integration_FallbackRunnerPreservesMandatoryToolFilter(
+	t *testing.T,
+) {
+	for _, stream := range []bool{false, true} {
+		name := "sync"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			childModel := &dynRecordingModel{name: "child", response: "done"}
+			child := llmagent.New(
+				"child",
+				llmagent.WithModel(childModel),
+				llmagent.WithTools([]tool.Tool{
+					newDynTestTool("allowed_tool"),
+					newDynTestTool("hidden_tool"),
+				}),
+			)
+			var opts []Option
+			if stream {
+				opts = append(opts, WithStreamInner(true))
+			}
+			at := NewTool(child, opts...)
+			parent := agent.NewInvocation(
+				agent.WithInvocationRunOptions(agent.NewRunOptions(
+					agent.WithMandatoryToolFilter(
+						tool.NewIncludeToolNamesFilter("allowed_tool"),
+					),
+				)),
+			)
+			ctx := agent.NewInvocationContext(context.Background(), parent)
+
+			if stream {
+				reader, err := at.StreamableCall(
+					ctx,
+					[]byte(`{"request":"list tools"}`),
+				)
+				require.NoError(t, err)
+				defer reader.Close()
+				for {
+					_, recvErr := reader.Recv()
+					if recvErr == io.EOF {
+						break
+					}
+					require.NoError(t, recvErr)
+				}
+			} else {
+				got, err := at.Call(ctx, []byte(`{"request":"list tools"}`))
+				require.NoError(t, err)
+				require.Equal(t, "done", got)
+			}
+
+			seen := childModel.snapshot()
+			require.Len(t, seen, 1)
+			require.Equal(t, []string{"allowed_tool"}, seen[0])
+		})
+	}
 }
 
 // TestNewDynamicTool_Integration_ExcludesSelf ensures the dynamic tool never
@@ -1814,12 +2097,13 @@ func TestChildCodeExecutor_TemplatePassesNonNilInvocation(t *testing.T) {
 
 func fullyPopulatedChildRunOptions() agent.RunOptions {
 	return agent.RunOptions{
-		AdditionalTools:   stubTools("extra"),
-		ExternalTools:     stubTools("ext"),
-		ExternalToolNames: map[string]bool{"ext": true},
-		ToolFilter:        func(context.Context, tool.Tool) bool { return true },
-		Model:             &dynRecordingModel{name: "m"},
-		ModelName:         "mname",
+		AdditionalTools:     stubTools("extra"),
+		ExternalTools:       stubTools("ext"),
+		ExternalToolNames:   map[string]bool{"ext": true},
+		ToolFilter:          func(context.Context, tool.Tool) bool { return true },
+		MandatoryToolFilter: func(context.Context, tool.Tool) bool { return true },
+		Model:               &dynRecordingModel{name: "m"},
+		ModelName:           "mname",
 		ModelSelector: func(context.Context, *agent.Invocation) (model.Model, error) {
 			return nil, nil
 		},
@@ -1830,6 +2114,11 @@ func fullyPopulatedChildRunOptions() agent.RunOptions {
 		ToolPermissionPolicy: tool.PermissionPolicyFunc(
 			func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
 				return tool.AllowPermission(), nil
+			},
+		),
+		MandatoryToolPermissionPolicy: tool.PermissionPolicyFunc(
+			func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+				return tool.DenyPermission("tenant policy"), nil
 			},
 		),
 	}
@@ -1859,6 +2148,8 @@ func TestSanitizeChildRunOptions_TemplateBoundaryClearsAll(t *testing.T) {
 	require.Nil(t, runOpts.CodeExecutor)
 	require.Nil(t, runOpts.ToolExecutionFilter)
 	require.Nil(t, runOpts.ToolPermissionPolicy)
+	require.NotNil(t, runOpts.MandatoryToolFilter)
+	require.NotNil(t, runOpts.MandatoryToolPermissionPolicy)
 }
 
 // TestSanitizeChildRunOptions_NoTemplateKeepsBoundaryFields verifies that
@@ -1884,6 +2175,8 @@ func TestSanitizeChildRunOptions_NoTemplateKeepsBoundaryFields(t *testing.T) {
 	require.NotNil(t, runOpts.CodeExecutor)
 	require.NotNil(t, runOpts.ToolExecutionFilter)
 	require.NotNil(t, runOpts.ToolPermissionPolicy)
+	require.NotNil(t, runOpts.MandatoryToolFilter)
+	require.NotNil(t, runOpts.MandatoryToolPermissionPolicy)
 }
 
 // TestNewDynamicTool_Integration_CapabilityToolsBypassParentFilter is this

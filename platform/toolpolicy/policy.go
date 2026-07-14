@@ -103,6 +103,7 @@ func New(policy platform.ToolPolicy, opts ...Option) (*Policy, error) {
 	if err := validateRuntimeIdentity(policy); err != nil {
 		return nil, err
 	}
+	policy = cloneToolPolicy(policy)
 	redactor, err := platform.NewRedactor(policy.ArgumentRedactionRules...)
 	if err != nil {
 		return nil, fmt.Errorf("newing platform tool policy: redaction rules: %w", err)
@@ -119,6 +120,18 @@ func New(policy platform.ToolPolicy, opts ...Option) (*Policy, error) {
 		}
 	}
 	return p, nil
+}
+
+func cloneToolPolicy(policy platform.ToolPolicy) platform.ToolPolicy {
+	policy.ToolWhitelist = append([]string(nil), policy.ToolWhitelist...)
+	policy.ToolDenylist = append([]string(nil), policy.ToolDenylist...)
+	policy.ArgumentRedactionRules = append(
+		[]string(nil),
+		policy.ArgumentRedactionRules...,
+	)
+	policy.PlatformDenylist = append([]string(nil), policy.PlatformDenylist...)
+	policy.HighRiskTools = append([]string(nil), policy.HighRiskTools...)
+	return policy
 }
 
 // Name implements plugin.Plugin when Policy is registered with a plugin manager.

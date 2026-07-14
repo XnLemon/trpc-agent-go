@@ -17,6 +17,8 @@ var (
 	ErrRuntimeInactive = errors.New("gateway runtime inactive")
 	// ErrRuntimeMismatch indicates that a runtime's tenant, app, binding, or inbound identifiers do not match.
 	ErrRuntimeMismatch = errors.New("gateway runtime identifiers mismatch")
+	// ErrToolPermissionPolicyRequired indicates that a governed app runtime has no enforcement policy.
+	ErrToolPermissionPolicyRequired = errors.New("gateway tool permission policy is required")
 	// ErrBindingAccessDenied indicates that a binding policy rejects the inbound sender or conversation.
 	ErrBindingAccessDenied = errors.New("gateway binding access denied")
 	// ErrBindingMentionRequired indicates that a group/thread message did not mention the agent.

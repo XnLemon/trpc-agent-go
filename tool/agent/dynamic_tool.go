@@ -1058,10 +1058,11 @@ func (at *Tool) dynamicChildInvocationOptions(
 //   - prompt: Instruction/GlobalInstruction outrank the template prompt — a
 //     model-provided instruction still applies because it travels via the
 //     surface patch, which is resolved before RunOptions;
-//   - execution: CodeExecutor, plus the execution-policy filters
+//   - execution: CodeExecutor, plus the ordinary execution-policy filters
 //     (ToolExecutionFilter defers tool calls, ToolPermissionPolicy gates them)
 //     which have no natural external-continuation channel for a synchronous
-//     sub-agent. Inheriting these requires an explicit future Option.
+//     sub-agent. MandatoryToolFilter and MandatoryToolPermissionPolicy are
+//     intentionally preserved as non-negotiable parent governance.
 func (at *Tool) sanitizeChildRunOptions(
 	runOpts *agent.RunOptions,
 	enforceTemplateBoundary bool,

@@ -4508,6 +4508,24 @@ func TestTool_FallbackRunnerRunOptions_PreserveOnlyCompatibilityControls(t *test
 		agent.WithInvocationRunOptions(agent.NewRunOptions(
 			agent.WithStreamMode(agent.StreamModeUpdates),
 			agent.WithGraphEmitFinalModelResponses(true),
+			agent.WithToolFilter(func(context.Context, tool.Tool) bool {
+				return true
+			}),
+			agent.WithToolPermissionPolicyFunc(
+				func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					return tool.AllowPermission(), nil
+				},
+			),
+			agent.WithMandatoryToolFilter(
+				func(context.Context, tool.Tool) bool {
+					return true
+				},
+			),
+			agent.WithMandatoryToolPermissionPolicyFunc(
+				func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+					return tool.AllowPermission(), nil
+				},
+			),
 			agent.WithDisableGraphCompletionEvent(true),
 			agent.WithDisableGraphExecutorEvents(true),
 			agent.WithEventChannelBufferSize(7),
@@ -4519,6 +4537,10 @@ func TestTool_FallbackRunnerRunOptions_PreserveOnlyCompatibilityControls(t *test
 
 	require.False(t, runOptions.StreamModeEnabled)
 	require.False(t, runOptions.GraphEmitFinalModelResponses)
+	require.Nil(t, runOptions.ToolFilter)
+	require.Nil(t, runOptions.ToolPermissionPolicy)
+	require.NotNil(t, runOptions.MandatoryToolFilter)
+	require.NotNil(t, runOptions.MandatoryToolPermissionPolicy)
 	require.True(t, agent.IsGraphCompletionEventDisabled(child))
 	require.True(t, agent.IsGraphExecutorEventsDisabled(child))
 	require.Equal(t, 7, agent.GetEventChannelBufferSize(child))

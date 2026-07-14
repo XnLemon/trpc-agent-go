@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/internal/state/eventstream"
 	"trpc.group/trpc-go/trpc-agent-go/internal/state/flush"
 	"trpc.group/trpc-go/trpc-agent-go/internal/state/livesession"
+	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -230,7 +231,13 @@ func (g *workflowGateway) callTool(ctx context.Context, call Call) (json.RawMess
 	if err := json.Unmarshal(call.Args, &args); err != nil || args == nil {
 		return nil, fmt.Errorf("dynamicworkflow: tool %q requires a JSON object argument", call.Name)
 	}
-	permissionResult, err := g.checkToolPermission(ctx, call, candidate)
+	permissionResult, err := g.checkMandatoryToolVisibility(ctx, call, candidate)
+	if err != nil {
+		return nil, fmt.Errorf("dynamicworkflow: check visibility for tool %q: %w", call.Name, err)
+	}
+	if permissionResult == nil {
+		permissionResult, err = g.checkToolPermission(ctx, call, candidate)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("dynamicworkflow: check permission for tool %q: %w", call.Name, err)
 	}
@@ -252,19 +259,39 @@ func (g *workflowGateway) callTool(ctx context.Context, call Call) (json.RawMess
 	return raw, nil
 }
 
+func (g *workflowGateway) checkMandatoryToolVisibility(
+	ctx context.Context,
+	call Call,
+	candidate tool.CallableTool,
+) (*tool.PermissionResult, error) {
+	if g == nil || g.parent == nil || g.parent.RunOptions.MandatoryToolFilter == nil {
+		return nil, nil
+	}
+	if g.parent.RunOptions.MandatoryToolFilter(
+		ctx,
+		itool.ResolveDeclaration(candidate),
+	) {
+		return nil, nil
+	}
+	req := workflowToolPermissionRequest(call, candidate)
+	return normalizeWorkflowToolPermissionResult(
+		req,
+		tool.DenyPermission(
+			fmt.Sprintf(
+				"tool %q is hidden by mandatory tool filter",
+				req.ToolName,
+			),
+		),
+		nil,
+	)
+}
+
 func (g *workflowGateway) checkToolPermission(
 	ctx context.Context,
 	call Call,
 	candidate tool.CallableTool,
 ) (*tool.PermissionResult, error) {
-	req := &tool.PermissionRequest{
-		Tool:        candidate,
-		ToolName:    call.Name,
-		ToolCallID:  call.ID,
-		Declaration: candidate.Declaration(),
-		Arguments:   append([]byte(nil), call.Args...),
-		Metadata:    tool.MetadataOf(candidate),
-	}
+	req := workflowToolPermissionRequest(call, candidate)
 	if checker, ok := candidate.(tool.PermissionChecker); ok {
 		decision, err := checker.CheckPermission(ctx, req)
 		result, err := normalizeWorkflowToolPermissionResult(req, decision, err)
@@ -272,11 +299,25 @@ func (g *workflowGateway) checkToolPermission(
 			return result, err
 		}
 	}
-	if g == nil || g.parent == nil || g.parent.RunOptions.ToolPermissionPolicy == nil {
+	if g == nil || g.parent == nil {
 		return nil, nil
 	}
-	decision, err := g.parent.RunOptions.ToolPermissionPolicy.CheckToolPermission(ctx, req)
+	decision, err := g.parent.RunOptions.CheckToolPermission(ctx, req)
 	return normalizeWorkflowToolPermissionResult(req, decision, err)
+}
+
+func workflowToolPermissionRequest(
+	call Call,
+	candidate tool.CallableTool,
+) *tool.PermissionRequest {
+	return &tool.PermissionRequest{
+		Tool:        candidate,
+		ToolName:    call.Name,
+		ToolCallID:  call.ID,
+		Declaration: candidate.Declaration(),
+		Arguments:   append([]byte(nil), call.Args...),
+		Metadata:    tool.MetadataOf(candidate),
+	}
 }
 
 func normalizeWorkflowToolPermissionResult(
