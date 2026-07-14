@@ -51,10 +51,61 @@ func TestStorageProfileValidateRejectsInvalidMigrationMode(t *testing.T) {
 	profile := StorageProfile{
 		TenantID:      "tenant",
 		ProfileID:     "profile",
+		Namespace:     "tenant/tenant",
 		MigrationMode: "dual-read",
 	}
 	if err := profile.Validate(); err == nil {
 		t.Fatalf("expected invalid migration mode error")
+	}
+}
+
+func TestStorageProfileValidateRequiresTenantScopedNamespace(t *testing.T) {
+	valid := StorageProfile{
+		TenantID:  "tenant-a",
+		ProfileID: "profile",
+		Namespace: "tenant/tenant-a/profile/profile",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected tenant-scoped namespace to pass, got %v", err)
+	}
+
+	slashTenant := valid
+	slashTenant.TenantID = "tenant-a/profile"
+	slashTenant.Namespace = "tenant/tenant-a%2Fprofile/x"
+	if err := slashTenant.Validate(); err != nil {
+		t.Fatalf("expected encoded slash-containing tenant ID namespace to pass, got %v", err)
+	}
+
+	rawCollisionTenant := slashTenant
+	rawCollisionTenant.Namespace = "tenant/tenant-a/profile/x"
+	if err := rawCollisionTenant.Validate(); err == nil {
+		t.Fatalf("expected raw slash-containing tenant namespace to fail")
+	}
+
+	nearMatchTenant := slashTenant
+	nearMatchTenant.Namespace = "tenant/tenant-a%2Fprofile-other/x"
+	if err := nearMatchTenant.Validate(); err == nil {
+		t.Fatalf("expected namespace with only a partial tenant prefix to fail")
+	}
+
+	tests := []struct {
+		name      string
+		namespace string
+	}{
+		{name: "missing", namespace: ""},
+		{name: "other_tenant", namespace: "tenant/tenant-b/profile/profile"},
+		{name: "nested_other_tenant", namespace: "tenant/tenant-b/tenant-a/profile/profile"},
+		{name: "shared", namespace: "shared/profile"},
+		{name: "whitespace", namespace: " tenant/tenant-a/profile/profile "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := valid
+			profile.Namespace = tt.namespace
+			if err := profile.Validate(); err == nil {
+				t.Fatalf("expected namespace %q to fail", tt.namespace)
+			}
+		})
 	}
 }
 

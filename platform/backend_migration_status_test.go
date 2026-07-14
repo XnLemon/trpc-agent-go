@@ -342,6 +342,7 @@ func TestNewBackendMigrationStatusReportEnforcesStatusGates(t *testing.T) {
 func TestNewBackendMigrationStatusReportSupportsAcceptanceResources(t *testing.T) {
 	for _, resource := range []BackendMigrationResource{
 		BackendMigrationResourceSession,
+		BackendMigrationResourceSummary,
 		BackendMigrationResourceMemory,
 		BackendMigrationResourceArtifact,
 		BackendMigrationResourceKnowledge,

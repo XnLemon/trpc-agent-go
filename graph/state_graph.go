@@ -43,6 +43,7 @@ import (
 	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
 	"trpc.group/trpc-go/trpc-agent-go/internal/toolcall"
 	"trpc.group/trpc-go/trpc-agent-go/internal/toolretry"
+	"trpc.group/trpc-go/trpc-agent-go/internal/toolsurface"
 	"trpc.group/trpc-go/trpc-agent-go/internal/util"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -1599,6 +1600,7 @@ func (r *llmRunner) executeModel(
 		Tools:            tools,
 		GenerationConfig: r.generationConfig,
 	}
+	applyMandatoryRequestToolFilter(ctx, callInvocation, request)
 	// Sanitize invalid tool calls in history to avoid poisoning future requests.
 	request.Messages = toolcall.SanitizeMessagesWithTools(ctx, request.Messages, request.Tools)
 	applyInvocationRequestOverrides(request, callInvocation, nodeID)
@@ -2283,11 +2285,37 @@ func runModelStream(
 		}
 		return ctx, singleResponseStream(customResponse), nil
 	}
+	applyMandatoryRequestToolFilter(ctx, invocation, request)
+	if request != nil {
+		request.Messages = toolcall.SanitizeMessagesWithTools(
+			ctx,
+			request.Messages,
+			request.Tools,
+		)
+	}
 	if beforeGenerate != nil {
 		beforeGenerate(ctx)
 	}
 	stream, err := generateModelStream(ctx, llmModel, request, span)
 	return ctx, stream, err
+}
+
+func applyMandatoryRequestToolFilter(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	request *model.Request,
+) {
+	if invocation == nil ||
+		invocation.RunOptions.MandatoryToolFilter == nil ||
+		request == nil ||
+		len(request.Tools) == 0 {
+		return
+	}
+	toolsurface.ApplyMandatoryRequestToolFilter(
+		ctx,
+		invocation.RunOptions.MandatoryToolFilter,
+		request,
+	)
 }
 
 // runModel preserves the pre-refactor test-facing helper signature by
@@ -4358,53 +4386,22 @@ func runToolWithEventContexts(
 	retryPolicy *tool.RetryPolicy,
 	toolCallIndex int,
 ) (context.Context, *agent.Invocation, context.Context, *agent.Invocation, any, []byte, error) {
-	ctx = context.WithValue(ctx, tool.ContextKeyToolCallID{}, toolCall.ID)
-	if invocation, ok := agent.InvocationFromContext(ctx); ok && jsonrepair.IsToolCallArgumentsJSONRepairEnabled(invocation) {
-		jsonrepair.RepairToolCallArgumentsInPlace(ctx, &toolCall)
-	}
 	decl := t.Declaration()
-	startInvocation := invocationFromContextOrFallback(ctx, nil)
-
-	ctx, toolCall, customResult, err := runBeforeToolPluginCallbacks(
+	prepared, customResult, err := prepareToolCall(
 		ctx,
 		toolCall,
-		decl,
-		state,
-	)
-	startInvocation = invocationFromContextOrFallback(ctx, startInvocation)
-	if err != nil {
-		return ctx, startInvocation, ctx, startInvocation, customResult, toolCall.Function.Arguments, err
-	}
-	if customResult != nil {
-		return ctx, startInvocation, ctx, startInvocation, customResult, toolCall.Function.Arguments, nil
-	}
-
-	ctx, toolCall, customResult, err = runBeforeToolCallbacks(
-		ctx,
-		toolCall,
-		decl,
 		toolCallbacks,
+		t,
 		state,
 	)
-	startInvocation = invocationFromContextOrFallback(ctx, startInvocation)
+	ctx = prepared.ctx
+	toolCall = prepared.toolCall
+	startInvocation := prepared.startInvocation
 	if err != nil {
 		return ctx, startInvocation, ctx, startInvocation, customResult, toolCall.Function.Arguments, err
 	}
 	if customResult != nil {
 		return ctx, startInvocation, ctx, startInvocation, customResult, toolCall.Function.Arguments, nil
-	}
-	permissionResult, err := checkToolPermission(
-		ctx,
-		startInvocation,
-		toolCall,
-		t,
-		decl,
-	)
-	if err != nil {
-		return ctx, startInvocation, ctx, startInvocation, nil, toolCall.Function.Arguments, err
-	}
-	if permissionResult != nil {
-		return ctx, startInvocation, ctx, startInvocation, permissionResult, toolCall.Function.Arguments, nil
 	}
 	startCtx := ctx
 
@@ -4432,14 +4429,16 @@ func runToolWithEventContexts(
 	)
 	completeInvocation = invocationFromContextOrFallback(ctx, completeInvocation)
 	if err != nil {
-		if customResult != nil {
-			return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, err
-		}
-		var interruptErr *InterruptError
-		if errors.As(err, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, err
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments, err
+		return toolCallbackErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			customResult,
+			toolCall.Function.Arguments,
+			err,
+		)
 	}
 	if customResult != nil {
 		return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, nil
@@ -4455,28 +4454,176 @@ func runToolWithEventContexts(
 	)
 	completeInvocation = invocationFromContextOrFallback(ctx, completeInvocation)
 	if err != nil {
-		if customResult != nil {
-			return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, err
-		}
-		var interruptErr *InterruptError
-		if errors.As(err, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, err
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments, err
+		return toolCallbackErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			customResult,
+			toolCall.Function.Arguments,
+			err,
+		)
 	}
 	if customResult != nil {
 		return startCtx, startInvocation, ctx, completeInvocation, customResult, toolCall.Function.Arguments, nil
 	}
 
 	if toolErr != nil {
-		var interruptErr *InterruptError
-		if errors.As(toolErr, &interruptErr) {
-			return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, toolErr
-		}
-		return startCtx, startInvocation, ctx, completeInvocation, nil, toolCall.Function.Arguments,
-			fmt.Errorf("tool %s call failed: %w", toolCall.Function.Name, toolErr)
+		return toolRunErrorResult(
+			startCtx,
+			startInvocation,
+			ctx,
+			completeInvocation,
+			result,
+			toolCall,
+			toolErr,
+		)
 	}
 	return startCtx, startInvocation, ctx, completeInvocation, result, toolCall.Function.Arguments, nil
+}
+
+type preparedToolCall struct {
+	ctx                           context.Context
+	toolCall                      model.ToolCall
+	startInvocation               *agent.Invocation
+	mandatoryToolPermissionPolicy tool.PermissionPolicy
+}
+
+func prepareToolCall(
+	ctx context.Context,
+	toolCall model.ToolCall,
+	toolCallbacks *tool.Callbacks,
+	t tool.Tool,
+	state State,
+) (preparedToolCall, any, error) {
+	ctx = context.WithValue(ctx, tool.ContextKeyToolCallID{}, toolCall.ID)
+	if invocation, ok := agent.InvocationFromContext(ctx); ok && jsonrepair.IsToolCallArgumentsJSONRepairEnabled(invocation) {
+		jsonrepair.RepairToolCallArgumentsInPlace(ctx, &toolCall)
+	}
+	decl := t.Declaration()
+	startInvocation := invocationFromContextOrFallback(ctx, nil)
+	prepared := preparedToolCall{
+		ctx:                           ctx,
+		toolCall:                      toolCall,
+		startInvocation:               startInvocation,
+		mandatoryToolPermissionPolicy: mandatoryToolPermissionPolicy(startInvocation),
+	}
+	customResult, err := runPreToolChecks(&prepared, toolCallbacks, t, decl, state)
+	return prepared, customResult, err
+}
+
+func runPreToolChecks(
+	prepared *preparedToolCall,
+	toolCallbacks *tool.Callbacks,
+	t tool.Tool,
+	decl *tool.Declaration,
+	state State,
+) (any, error) {
+	visibilityResult, err := checkMandatoryToolVisibility(
+		prepared.ctx,
+		prepared.startInvocation,
+		prepared.toolCall,
+		t,
+		decl,
+	)
+	if err != nil || visibilityResult != nil {
+		return visibilityResult, err
+	}
+
+	customResult, err := runPreToolCallbacks(prepared, toolCallbacks, decl, state)
+	if err != nil || customResult != nil {
+		return customResult, err
+	}
+
+	permissionResult, err := checkToolPermission(
+		prepared.ctx,
+		prepared.mandatoryToolPermissionPolicy,
+		prepared.startInvocation,
+		prepared.toolCall,
+		t,
+		decl,
+	)
+	if err != nil || permissionResult != nil {
+		return permissionResult, err
+	}
+	return nil, nil
+}
+
+func runPreToolCallbacks(
+	prepared *preparedToolCall,
+	toolCallbacks *tool.Callbacks,
+	decl *tool.Declaration,
+	state State,
+) (any, error) {
+	ctx, toolCall, customResult, err := runBeforeToolPluginCallbacks(
+		prepared.ctx,
+		prepared.toolCall,
+		decl,
+		state,
+	)
+	prepared.ctx = ctx
+	prepared.toolCall = toolCall
+	prepared.startInvocation = invocationFromContextOrFallback(ctx, prepared.startInvocation)
+	if err != nil || customResult != nil {
+		return customResult, err
+	}
+
+	ctx, toolCall, customResult, err = runBeforeToolCallbacks(
+		prepared.ctx,
+		prepared.toolCall,
+		decl,
+		toolCallbacks,
+		state,
+	)
+	prepared.ctx = ctx
+	prepared.toolCall = toolCall
+	prepared.startInvocation = invocationFromContextOrFallback(ctx, prepared.startInvocation)
+	return customResult, err
+}
+
+func mandatoryToolPermissionPolicy(invocation *agent.Invocation) tool.PermissionPolicy {
+	if invocation == nil {
+		return nil
+	}
+	return invocation.RunOptions.MandatoryToolPermissionPolicy
+}
+
+func toolCallbackErrorResult(
+	startCtx context.Context,
+	startInvocation *agent.Invocation,
+	completeCtx context.Context,
+	completeInvocation *agent.Invocation,
+	result any,
+	customResult any,
+	modifiedArgs []byte,
+	err error,
+) (context.Context, *agent.Invocation, context.Context, *agent.Invocation, any, []byte, error) {
+	if customResult != nil {
+		return startCtx, startInvocation, completeCtx, completeInvocation, customResult, modifiedArgs, err
+	}
+	var interruptErr *InterruptError
+	if errors.As(err, &interruptErr) {
+		return startCtx, startInvocation, completeCtx, completeInvocation, result, modifiedArgs, err
+	}
+	return startCtx, startInvocation, completeCtx, completeInvocation, nil, modifiedArgs, err
+}
+
+func toolRunErrorResult(
+	startCtx context.Context,
+	startInvocation *agent.Invocation,
+	completeCtx context.Context,
+	completeInvocation *agent.Invocation,
+	result any,
+	toolCall model.ToolCall,
+	err error,
+) (context.Context, *agent.Invocation, context.Context, *agent.Invocation, any, []byte, error) {
+	var interruptErr *InterruptError
+	if errors.As(err, &interruptErr) {
+		return startCtx, startInvocation, completeCtx, completeInvocation, result, toolCall.Function.Arguments, err
+	}
+	return startCtx, startInvocation, completeCtx, completeInvocation, nil, toolCall.Function.Arguments,
+		fmt.Errorf("tool %s call failed: %w", toolCall.Function.Name, err)
 }
 
 func agentToolGraphRuntimeContext(
@@ -4561,8 +4708,45 @@ func callToolWithRetry(
 	return runResult.Result, runResult.Error
 }
 
+func checkMandatoryToolVisibility(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	toolCall model.ToolCall,
+	t tool.Tool,
+	decl *tool.Declaration,
+) (*tool.PermissionResult, error) {
+	if invocation == nil || invocation.RunOptions.MandatoryToolFilter == nil {
+		return nil, nil
+	}
+	if invocation.RunOptions.MandatoryToolFilter(
+		ctx,
+		itool.ResolveDeclaration(t),
+	) {
+		return nil, nil
+	}
+	req := &tool.PermissionRequest{
+		Tool:        t,
+		ToolName:    toolCall.Function.Name,
+		ToolCallID:  toolCall.ID,
+		Declaration: decl,
+		Arguments:   toolCall.Function.Arguments,
+		Metadata:    tool.MetadataOf(itool.ResolveSemantic(t)),
+	}
+	return normalizeToolPermissionResult(
+		req,
+		tool.DenyPermission(
+			fmt.Sprintf(
+				"tool %q is hidden by mandatory tool filter",
+				req.ToolName,
+			),
+		),
+		nil,
+	)
+}
+
 func checkToolPermission(
 	ctx context.Context,
+	mandatoryPolicy tool.PermissionPolicy,
 	invocation *agent.Invocation,
 	toolCall model.ToolCall,
 	t tool.Tool,
@@ -4583,10 +4767,21 @@ func checkToolPermission(
 			return result, err
 		}
 	}
-	if invocation == nil || invocation.RunOptions.ToolPermissionPolicy == nil {
+	mandatoryOpts := agent.RunOptions{
+		MandatoryToolPermissionPolicy: mandatoryPolicy,
+	}
+	decision, err := mandatoryOpts.CheckToolPermission(ctx, req)
+	result, err := normalizeToolPermissionResult(req, decision, err)
+	if result != nil || err != nil {
+		return result, err
+	}
+	if invocation == nil {
 		return nil, nil
 	}
-	decision, err := invocation.RunOptions.ToolPermissionPolicy.CheckToolPermission(ctx, req)
+	ordinaryOpts := agent.RunOptions{
+		ToolPermissionPolicy: invocation.RunOptions.ToolPermissionPolicy,
+	}
+	decision, err = ordinaryOpts.CheckToolPermission(ctx, req)
 	return normalizeToolPermissionResult(req, decision, err)
 }
 

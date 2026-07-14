@@ -922,6 +922,16 @@ func WithToolFilter(filter tool.FilterFunc) RunOption {
 	}
 }
 
+// WithMandatoryToolFilter sets a non-negotiable tool visibility boundary for
+// this run. Unlike WithToolFilter, it applies to the complete invocation tool
+// surface, including framework-managed tools, and is preserved across derived
+// child invocations.
+func WithMandatoryToolFilter(filter tool.FilterFunc) RunOption {
+	return func(opts *RunOptions) {
+		opts.MandatoryToolFilter = filter
+	}
+}
+
 // WithAdditionalTools appends tools that are visible only for this run.
 //
 // Additional tools are treated as user tools, so WithToolFilter can still
@@ -995,6 +1005,71 @@ func WithToolPermissionPolicy(policy tool.PermissionPolicy) RunOption {
 // WithToolPermissionPolicyFunc adapts fn into a per-run tool permission policy.
 func WithToolPermissionPolicyFunc(fn tool.PermissionPolicyFunc) RunOption {
 	return WithToolPermissionPolicy(fn)
+}
+
+// WithMandatoryToolPermissionPolicy sets a non-negotiable permission policy
+// that derived child invocations must preserve. It is checked before the
+// ordinary per-run ToolPermissionPolicy.
+func WithMandatoryToolPermissionPolicy(policy tool.PermissionPolicy) RunOption {
+	return func(opts *RunOptions) {
+		opts.MandatoryToolPermissionPolicy = policy
+	}
+}
+
+// WithMandatoryToolPermissionPolicyFunc adapts fn into a mandatory per-run
+// tool permission policy.
+func WithMandatoryToolPermissionPolicyFunc(fn tool.PermissionPolicyFunc) RunOption {
+	return WithMandatoryToolPermissionPolicy(fn)
+}
+
+// CheckToolPermission applies the non-negotiable policy followed by the
+// ordinary per-run policy. The first non-allow decision terminates the chain.
+func (opts *RunOptions) CheckToolPermission(
+	ctx context.Context,
+	req *tool.PermissionRequest,
+) (tool.PermissionDecision, error) {
+	if opts == nil {
+		return tool.AllowPermission(), nil
+	}
+	policies := [...]tool.PermissionPolicy{
+		opts.MandatoryToolPermissionPolicy,
+		opts.ToolPermissionPolicy,
+	}
+	for _, policy := range policies {
+		if isNilToolPermissionPolicy(policy) {
+			continue
+		}
+		decision, err := policy.CheckToolPermission(ctx, req)
+		if err != nil {
+			return tool.PermissionDecision{}, err
+		}
+		decision, err = tool.NormalizePermissionDecision(decision)
+		if err != nil {
+			return tool.PermissionDecision{}, err
+		}
+		if decision.Action != tool.PermissionActionAllow {
+			return decision, nil
+		}
+	}
+	return tool.AllowPermission(), nil
+}
+
+func isNilToolPermissionPolicy(policy tool.PermissionPolicy) bool {
+	if policy == nil {
+		return true
+	}
+	value := reflect.ValueOf(policy)
+	switch value.Kind() {
+	case reflect.Chan,
+		reflect.Func,
+		reflect.Interface,
+		reflect.Map,
+		reflect.Pointer,
+		reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func appendRunTools(opts *RunOptions, tools []tool.Tool) {
@@ -1336,7 +1411,12 @@ type RunOptions struct {
 	// StructuredOutputType is the Go type to unmarshal the final JSON into for this run.
 	StructuredOutputType reflect.Type
 
-	// ToolFilter is a custom function to filter tools for this run.
+	// MandatoryToolFilter is a non-negotiable visibility boundary applied to
+	// the complete invocation tool surface, including framework-managed tools.
+	// Derived child invocations must preserve it.
+	MandatoryToolFilter tool.FilterFunc
+
+	// ToolFilter is a custom function to filter user tools for this run.
 	// If set, only tools for which the filter returns true will be available to the model.
 	// If nil, all registered tools will be available (default behavior).
 	//
@@ -1388,6 +1468,10 @@ type RunOptions struct {
 	// assistant tool_call response so the caller can execute the tool
 	// externally and later provide tool results (RoleTool messages).
 	ToolExecutionFilter tool.FilterFunc
+
+	// MandatoryToolPermissionPolicy is checked before ToolPermissionPolicy and
+	// is preserved across derived child invocations.
+	MandatoryToolPermissionPolicy tool.PermissionPolicy
 
 	// ToolPermissionPolicy checks whether a tool call may run after the model
 	// has requested it, after argument repair, and after before-tool callbacks

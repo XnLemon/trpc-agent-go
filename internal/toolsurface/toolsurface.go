@@ -9,7 +9,8 @@
 
 // Package toolsurface resolves the effective tool surface for an invocation:
 // the base surface exposed by the agent plus the run-scoped tools, with the
-// run-scoped tool filter applied. It is the single source of truth shared by
+// mandatory and ordinary run-scoped tool filters applied. It is the single
+// source of truth shared by
 // the LLM flow (which uses it to build the model request) and by helpers such
 // as the dynamic AgentTool (which derives a child capability surface from a
 // parent invocation). Keeping the logic here avoids both behavioral drift and
@@ -18,10 +19,12 @@ package toolsurface
 
 import (
 	"context"
+	"maps"
 	"sort"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	itool "trpc.group/trpc-go/trpc-agent-go/internal/tool"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -48,33 +51,37 @@ func ResolveBase(
 	ctx context.Context,
 	invocation *agent.Invocation,
 ) ([]tool.Tool, map[string]bool, bool) {
-	var allTools []tool.Tool
-	var userToolNames map[string]bool
-	hasUserToolTracking := false
 	if provider, ok := invocation.Agent.(agent.InvocationToolSurfaceProvider); ok {
-		allTools, userToolNames = provider.InvocationToolSurface(ctx, invocation)
-		hasUserToolTracking = userToolNames != nil
-	} else if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
-		allTools = provider.FilterTools(ctx)
-	} else {
-		allTools = invocation.Agent.Tools()
+		allTools, userToolNames := provider.InvocationToolSurface(ctx, invocation)
+		if userToolNames != nil {
+			return allTools, userToolNames, true
+		}
+		return withTrackedUserTools(invocation, allTools)
 	}
+	if provider, ok := invocation.Agent.(ToolFilterProvider); ok {
+		return withTrackedUserTools(invocation, provider.FilterTools(ctx))
+	}
+	return withTrackedUserTools(invocation, invocation.Agent.Tools())
+}
 
+func withTrackedUserTools(
+	invocation *agent.Invocation,
+	allTools []tool.Tool,
+) ([]tool.Tool, map[string]bool, bool) {
 	// User tools are those explicitly registered via WithTools and
 	// WithToolSets. Framework tools (Knowledge, SubAgents) are never filtered.
-	if !hasUserToolTracking {
-		if provider, ok := invocation.Agent.(UserToolsProvider); ok {
-			userTools := provider.UserTools()
-			hasUserToolTracking = true
-			userToolNames = make(map[string]bool, len(userTools))
-			for _, t := range userTools {
-				if name := toolName(t); name != "" {
-					userToolNames[name] = true
-				}
-			}
+	provider, ok := invocation.Agent.(UserToolsProvider)
+	if !ok {
+		return allTools, nil, false
+	}
+	userTools := provider.UserTools()
+	userToolNames := make(map[string]bool, len(userTools))
+	for _, t := range userTools {
+		if name := toolName(t); name != "" {
+			userToolNames[name] = true
 		}
 	}
-	return allTools, userToolNames, hasUserToolTracking
+	return allTools, userToolNames, true
 }
 
 // AppendRunOptionTools appends RunOptions.AdditionalTools and ExternalTools to
@@ -124,6 +131,37 @@ func AppendRunOptionTools(
 	return allTools, userToolNames, hasUserToolTracking, externalNames
 }
 
+// ApplyInvocationToolActivation applies the agent's invocation-scoped
+// activation layer, if supported. The inputs are copied before invoking the
+// provider so activation cannot mutate the configured/base surface.
+func ApplyInvocationToolActivation(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	allTools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool, bool) {
+	if invocation == nil || invocation.Agent == nil {
+		return allTools, userToolNames, externalToolNames, false
+	}
+	provider, ok := invocation.Agent.(agent.InvocationToolActivationProvider)
+	if !ok {
+		return allTools, userToolNames, externalToolNames, false
+	}
+	allTools = append([]tool.Tool(nil), allTools...)
+	userToolNames = copyToolNames(userToolNames)
+	externalToolNames = copyToolNames(externalToolNames)
+	allTools, userToolNames, externalToolNames =
+		provider.ApplyInvocationToolActivation(
+			ctx,
+			invocation,
+			allTools,
+			userToolNames,
+			externalToolNames,
+		)
+	return allTools, userToolNames, externalToolNames, true
+}
+
 // ApplyToolFilter applies the run-scoped ToolFilter to allTools, always keeping
 // framework tools and keeping user tools only when the filter passes. The
 // result is sorted by name for stable prompt-cache behavior. It assumes
@@ -166,6 +204,40 @@ func ApplyToolFilter(
 	return filtered
 }
 
+// ApplyMandatoryToolFilter applies the non-negotiable run filter to the
+// complete tool surface and removes hidden names from the user/external
+// classification maps. Unlike ApplyToolFilter, framework tools are not exempt.
+func ApplyMandatoryToolFilter(
+	ctx context.Context,
+	allTools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+	opts agent.RunOptions,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	if opts.MandatoryToolFilter == nil {
+		return allTools, userToolNames, externalToolNames
+	}
+	filtered := make([]tool.Tool, 0, len(allTools))
+	visibleNames := make(map[string]bool, len(allTools))
+	for _, candidate := range allTools {
+		name := toolName(candidate)
+		if name == "" {
+			continue
+		}
+		if !opts.MandatoryToolFilter(
+			ctx,
+			itool.ResolveDeclaration(candidate),
+		) {
+			continue
+		}
+		filtered = append(filtered, candidate)
+		visibleNames[name] = true
+	}
+	return filtered,
+		visibleToolNames(userToolNames, visibleNames),
+		visibleToolNames(externalToolNames, visibleNames)
+}
+
 // Effective returns the effective tool surface for the invocation: the base
 // surface (InvocationToolSurface / FilterTools / Tools) plus
 // RunOptions.AdditionalTools and ExternalTools, with the run-scoped
@@ -206,13 +278,28 @@ func EffectiveWithExternal(
 		ctx = context.Background()
 	}
 	allTools, userToolNames, hasUserToolTracking := ResolveBase(ctx, invocation)
-	allTools, userToolNames, hasUserToolTracking, externalNames :=
+	allTools, userToolNames, _, externalNames :=
 		AppendRunOptionTools(
 			allTools,
 			userToolNames,
 			hasUserToolTracking,
 			invocation.RunOptions,
 		)
+	allTools, userToolNames, externalNames, _ =
+		ApplyInvocationToolActivation(
+			ctx,
+			invocation,
+			allTools,
+			userToolNames,
+			externalNames,
+		)
+	allTools, userToolNames, externalNames = ApplyMandatoryToolFilter(
+		ctx,
+		allTools,
+		userToolNames,
+		externalNames,
+		invocation.RunOptions,
+	)
 	if invocation.RunOptions.ToolFilter == nil {
 		return allTools, userToolNames, externalNames
 	}
@@ -249,6 +336,26 @@ func appendRunOptionToolList(
 	return allTools, userToolNames
 }
 
+// ApplyMandatoryRequestToolFilter prunes request tools with a mandatory
+// invocation policy without mutating a shared request tool map.
+func ApplyMandatoryRequestToolFilter(
+	ctx context.Context,
+	mandatoryFilter tool.FilterFunc,
+	req *model.Request,
+) {
+	if mandatoryFilter == nil || req == nil || len(req.Tools) == 0 {
+		return
+	}
+	filtered := maps.Clone(req.Tools)
+	for name, candidate := range filtered {
+		if toolName(candidate) == "" ||
+			!mandatoryFilter(ctx, itool.ResolveDeclaration(candidate)) {
+			delete(filtered, name)
+		}
+	}
+	req.Tools = filtered
+}
+
 func collectToolNames(tools []tool.Tool) map[string]bool {
 	names := make(map[string]bool, len(tools))
 	for _, tl := range tools {
@@ -260,11 +367,30 @@ func collectToolNames(tools []tool.Tool) map[string]bool {
 }
 
 func copyToolNames(src map[string]bool) map[string]bool {
+	if src == nil {
+		return nil
+	}
 	dst := make(map[string]bool, len(src))
 	for name, ok := range src {
 		dst[name] = ok
 	}
 	return dst
+}
+
+func visibleToolNames(
+	names map[string]bool,
+	visibleNames map[string]bool,
+) map[string]bool {
+	if names == nil {
+		return nil
+	}
+	visible := make(map[string]bool, len(names))
+	for name, enabled := range names {
+		if enabled && visibleNames[name] {
+			visible[name] = true
+		}
+	}
+	return visible
 }
 
 func toolName(tl tool.Tool) string {

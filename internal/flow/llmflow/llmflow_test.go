@@ -327,6 +327,36 @@ func TestPreprocess_AddsAgentToolsWhenPresent(t *testing.T) {
 	require.Contains(t, req.Tools, "t1")
 }
 
+func TestPreprocess_ReappliesMandatoryToolFilterAfterRequestProcessors(
+	t *testing.T,
+) {
+	allowed := &mockTool{name: "allowed"}
+	hidden := &mockTool{name: "hidden"}
+	f := New(
+		[]flow.RequestProcessor{&injectToolsRequestProcessor{
+			tools: map[string]tool.Tool{"hidden": hidden},
+		}},
+		nil,
+		Options{},
+	)
+	req := &model.Request{Tools: map[string]tool.Tool{}}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(&minimalAgent{
+			tools: []tool.Tool{allowed, hidden},
+		}),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("allowed"),
+			),
+		)),
+	)
+
+	f.preprocess(context.Background(), inv, req, make(chan *event.Event, 1))
+
+	require.Contains(t, req.Tools, "allowed")
+	require.NotContains(t, req.Tools, "hidden")
+}
+
 func TestPreprocess_DowngradesOrphanToolCallBeforeModel(t *testing.T) {
 	modelStub := &mockModel{
 		responses: []*model.Response{
@@ -2044,6 +2074,24 @@ func (p *seedMessagesRequestProcessor) ProcessRequest(
 	req.Messages = append(req.Messages, cloneMessagesForTest(p.messages)...)
 }
 
+type injectToolsRequestProcessor struct {
+	tools map[string]tool.Tool
+}
+
+func (p *injectToolsRequestProcessor) ProcessRequest(
+	_ context.Context,
+	_ *agent.Invocation,
+	req *model.Request,
+	_ chan<- *event.Event,
+) {
+	if req.Tools == nil {
+		req.Tools = make(map[string]tool.Tool)
+	}
+	for name, candidate := range p.tools {
+		req.Tools[name] = candidate
+	}
+}
+
 const flowRunPanicTestMsg = "boom"
 
 type panicRequestProcessor struct{}
@@ -3132,6 +3180,49 @@ func TestFlow_CallLLM_PluginBeforeModelCanShortCircuit(t *testing.T) {
 	require.True(t, plugCalled)
 	require.False(t, localCalled)
 	require.False(t, m.called)
+}
+
+func TestFlow_CallLLM_ReappliesMandatoryToolFilterAfterBeforeModelCallbacks(
+	t *testing.T,
+) {
+	allowed := &mockTool{name: "allowed"}
+	hidden := &mockTool{name: "hidden"}
+	callbacks := model.NewCallbacks().RegisterBeforeModel(
+		func(
+			_ context.Context,
+			req *model.Request,
+		) (*model.Response, error) {
+			req.Tools["hidden"] = hidden
+			return nil, nil
+		},
+	)
+	f := New(nil, nil, Options{ModelCallbacks: callbacks})
+	selectedModel := &namedFlowModel{name: "selected"}
+	inv := agent.NewInvocation(
+		agent.WithInvocationModel(selectedModel),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("allowed"),
+			),
+		)),
+	)
+	req := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("check tools")},
+		Tools:    map[string]tool.Tool{"allowed": allowed},
+	}
+
+	_, seq, err := f.callLLM(
+		context.Background(),
+		inv,
+		req,
+		selectedModel,
+	)
+	require.NoError(t, err)
+	seq(func(*model.Response) bool { return true })
+
+	require.True(t, selectedModel.Called())
+	require.Contains(t, req.Tools, "allowed")
+	require.NotContains(t, req.Tools, "hidden")
 }
 
 type testCtxKey struct{}

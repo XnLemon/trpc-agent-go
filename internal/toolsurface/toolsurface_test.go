@@ -123,6 +123,79 @@ type stubSurfaceAgent struct {
 	userTools []tool.Tool
 }
 
+type stubActivationSurfaceAgent struct {
+	*stubSurfaceAgent
+	seen []string
+}
+
+type stubUntrackedActivationAgent struct {
+	tools                []tool.Tool
+	returnEmptyUserNames bool
+	sawNilUsers          bool
+}
+
+func (s *stubActivationSurfaceAgent) ApplyInvocationToolActivation(
+	_ context.Context,
+	_ *agent.Invocation,
+	tools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	s.seen = make([]string, 0, len(tools))
+	for _, candidate := range tools {
+		s.seen = append(s.seen, candidate.Declaration().Name)
+	}
+	filtered := make([]tool.Tool, 0, len(tools))
+	for _, candidate := range tools {
+		if candidate.Declaration().Name == "disabled" {
+			delete(userToolNames, "disabled")
+			delete(externalToolNames, "disabled")
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered, userToolNames, externalToolNames
+}
+
+func (s *stubUntrackedActivationAgent) ApplyInvocationToolActivation(
+	_ context.Context,
+	_ *agent.Invocation,
+	tools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	s.sawNilUsers = userToolNames == nil
+	if s.returnEmptyUserNames {
+		userToolNames = map[string]bool{}
+	}
+	return tools, userToolNames, externalToolNames
+}
+
+func (s *stubUntrackedActivationAgent) Run(
+	context.Context,
+	*agent.Invocation,
+) (<-chan *event.Event, error) {
+	ch := make(chan *event.Event)
+	close(ch)
+	return ch, nil
+}
+
+func (s *stubUntrackedActivationAgent) Tools() []tool.Tool {
+	return s.tools
+}
+
+func (s *stubUntrackedActivationAgent) Info() agent.Info {
+	return agent.Info{Name: "untracked-activation-agent"}
+}
+
+func (s *stubUntrackedActivationAgent) SubAgents() []agent.Agent {
+	return nil
+}
+
+func (s *stubUntrackedActivationAgent) FindSubAgent(string) agent.Agent {
+	return nil
+}
+
 func (s *stubSurfaceAgent) Run(
 	context.Context,
 	*agent.Invocation,
@@ -234,6 +307,133 @@ func TestEffectiveWithExternal_AppendsAndClassifiesRunOptionTools(t *testing.T) 
 		"external": true,
 	}, userToolNames)
 	require.Equal(t, map[string]bool{"external": true}, externalNames)
+}
+
+func TestEffectiveWithExternal_AppliesMandatoryFilterAfterRunOptionTools(
+	t *testing.T,
+) {
+	agt := &stubSurfaceAgent{
+		tools:     []tool.Tool{surfaceTool("base")},
+		userTools: []tool.Tool{surfaceTool("base")},
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(agt),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithAdditionalTools([]tool.Tool{
+				surfaceTool("added"),
+			}),
+			agent.WithExternalTools([]tool.Tool{
+				surfaceTool("external"),
+			}),
+			agent.WithMandatoryToolFilter(
+				tool.NewIncludeToolNamesFilter("base"),
+			),
+		)),
+	)
+
+	tools, userToolNames, externalNames := EffectiveWithExternal(
+		context.Background(),
+		inv,
+	)
+
+	requireToolNames(t, tools, []string{"base"})
+	require.Equal(t, map[string]bool{"base": true}, userToolNames)
+	require.Empty(t, externalNames)
+}
+
+func TestEffectiveWithExternal_AppliesInvocationActivationAfterRunOptionTools(
+	t *testing.T,
+) {
+	base := &stubSurfaceAgent{
+		tools: []tool.Tool{
+			surfaceTool("base"),
+			surfaceTool("disabled"),
+		},
+		userTools: []tool.Tool{
+			surfaceTool("base"),
+			surfaceTool("disabled"),
+		},
+	}
+	agt := &stubActivationSurfaceAgent{stubSurfaceAgent: base}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(agt),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithAdditionalTools([]tool.Tool{surfaceTool("added")}),
+		)),
+	)
+
+	tools, userToolNames, externalNames := EffectiveWithExternal(
+		context.Background(),
+		inv,
+	)
+
+	require.ElementsMatch(t, []string{"base", "disabled", "added"}, agt.seen)
+	requireToolNames(t, tools, []string{"base", "added"})
+	require.Equal(t, map[string]bool{
+		"base":  true,
+		"added": true,
+	}, userToolNames)
+	require.Empty(t, externalNames)
+	requireToolNames(t, base.tools, []string{"base", "disabled"})
+}
+
+func TestEffectiveWithExternal_ActivationPreservesMissingUserToolTracking(
+	t *testing.T,
+) {
+	agt := &stubUntrackedActivationAgent{
+		tools: []tool.Tool{
+			surfaceTool("keep"),
+			surfaceTool("drop"),
+		},
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(agt),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithToolFilter(
+				tool.NewIncludeToolNamesFilter("keep"),
+			),
+		)),
+	)
+
+	tools, userToolNames, externalNames := EffectiveWithExternal(
+		context.Background(),
+		inv,
+	)
+
+	require.True(t, agt.sawNilUsers)
+	require.Nil(t, userToolNames)
+	require.Nil(t, externalNames)
+	requireToolNames(t, tools, []string{"keep"})
+}
+
+func TestEffectiveWithExternal_ActivationPreservesExplicitMissingTracking(
+	t *testing.T,
+) {
+	agt := &stubUntrackedActivationAgent{
+		tools: []tool.Tool{
+			surfaceTool("keep"),
+			surfaceTool("drop"),
+		},
+		returnEmptyUserNames: true,
+	}
+	inv := agent.NewInvocation(
+		agent.WithInvocationAgent(agt),
+		agent.WithInvocationRunOptions(agent.NewRunOptions(
+			agent.WithToolFilter(
+				tool.NewIncludeToolNamesFilter("keep"),
+			),
+		)),
+	)
+
+	tools, userToolNames, externalNames := EffectiveWithExternal(
+		context.Background(),
+		inv,
+	)
+
+	require.True(t, agt.sawNilUsers)
+	require.Empty(t, userToolNames)
+	require.Nil(t, externalNames)
+	requireToolNames(t, tools, []string{"keep"})
 }
 
 func TestApplyDeclarations_OverridesDeclarationAndPreservesCall(t *testing.T) {

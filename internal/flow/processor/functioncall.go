@@ -2513,6 +2513,22 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 	}
 	rememberExecutingToolArgs(ctx, toolCall.Function.Arguments)
 	toolDeclaration := tl.Declaration()
+	visibilityResult, err := checkMandatoryToolVisibility(
+		ctx,
+		invocation,
+		toolCall,
+		tl,
+		toolDeclaration,
+	)
+	if err != nil {
+		return ctx, nil, toolCall.Function.Arguments, false, false, err
+	}
+	if visibilityResult != nil {
+		ctx = withSkippedToolStateDelta(ctx)
+		ctx = withSkippedToolSkipSummarization(ctx)
+		return ctx, *visibilityResult, toolCall.Function.Arguments, false,
+			false, nil
+	}
 	ctx, toolCall, customResult, err := p.runBeforeToolPluginCallbacks(
 		ctx,
 		invocation,
@@ -2626,6 +2642,42 @@ func (p *FunctionCallResponseProcessor) executeToolWithCallbacks(
 		suppressDefaultToolMessage, skipSummarization || localSkip, toolErr
 }
 
+func checkMandatoryToolVisibility(
+	ctx context.Context,
+	invocation *agent.Invocation,
+	toolCall model.ToolCall,
+	tl tool.Tool,
+	decl *tool.Declaration,
+) (*tool.PermissionResult, error) {
+	if invocation == nil || invocation.RunOptions.MandatoryToolFilter == nil {
+		return nil, nil
+	}
+	if invocation.RunOptions.MandatoryToolFilter(
+		ctx,
+		itool.ResolveDeclaration(tl),
+	) {
+		return nil, nil
+	}
+	req := &tool.PermissionRequest{
+		Tool:        tl,
+		ToolName:    toolCall.Function.Name,
+		ToolCallID:  toolCall.ID,
+		Declaration: decl,
+		Arguments:   toolCall.Function.Arguments,
+		Metadata:    tool.MetadataOf(itool.ResolveSemantic(tl)),
+	}
+	return normalizeToolPermissionResult(
+		req,
+		tool.DenyPermission(
+			fmt.Sprintf(
+				"tool %q is hidden by mandatory tool filter",
+				req.ToolName,
+			),
+		),
+		nil,
+	)
+}
+
 func (p *FunctionCallResponseProcessor) checkToolPermission(
 	ctx context.Context,
 	invocation *agent.Invocation,
@@ -2649,10 +2701,10 @@ func (p *FunctionCallResponseProcessor) checkToolPermission(
 			return result, err
 		}
 	}
-	if invocation == nil || invocation.RunOptions.ToolPermissionPolicy == nil {
+	if invocation == nil {
 		return nil, nil
 	}
-	decision, err := invocation.RunOptions.ToolPermissionPolicy.CheckToolPermission(ctx, req)
+	decision, err := invocation.RunOptions.CheckToolPermission(ctx, req)
 	return normalizeToolPermissionResult(req, decision, err)
 }
 

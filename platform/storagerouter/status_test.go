@@ -32,6 +32,7 @@ func TestRouterStatusReportsAllResourcesReady(t *testing.T) {
 		TenantID:  "tenant-a",
 		BackendID: "hot",
 		Session:   sessioninmemory.NewSessionService(),
+		Summary:   sessioninmemory.NewSessionService(),
 		Memory:    memoryinmemory.NewMemoryService(),
 		Artifact:  artifactmemory.NewService(),
 		Knowledge: &stubKnowledge{},
@@ -45,9 +46,9 @@ func TestRouterStatusReportsAllResourcesReady(t *testing.T) {
 	assert.Equal(t, "profile-a", summary.ProfileID)
 	assert.Equal(t, platform.StorageMigrationModeDualWrite, summary.MigrationMode)
 	assert.True(t, summary.IsMigrating)
-	assert.Equal(t, 5, summary.ReadyCount)
+	assert.Equal(t, 6, summary.ReadyCount)
 	assert.Equal(t, 0, summary.MissingCount)
-	require.Len(t, summary.Resources, 5)
+	require.Len(t, summary.Resources, 6)
 	for _, resource := range summary.Resources {
 		assert.Equal(t, "hot", resource.BackendID)
 		assert.Equal(t, ResourceStatusReady, resource.Status)
@@ -74,8 +75,9 @@ func TestRouterStatusReportsMissingBackendAndService(t *testing.T) {
 
 	assert.False(t, summary.IsMigrating)
 	assert.Equal(t, 2, summary.ReadyCount)
-	assert.Equal(t, 3, summary.MissingCount)
+	assert.Equal(t, 4, summary.MissingCount)
 	assertResourceStatus(t, summary, platform.BackendMigrationResourceSession, "hot", ResourceStatusReady)
+	assertResourceStatus(t, summary, platform.BackendMigrationResourceSummary, "hot", ResourceStatusServiceMissing)
 	assertResourceStatus(t, summary, platform.BackendMigrationResourceMemory, "missing", ResourceStatusBackendMissing)
 	assertResourceStatus(t, summary, platform.BackendMigrationResourceArtifact, "", ResourceStatusBackendMissing)
 	assertResourceStatus(t, summary, platform.BackendMigrationResourceKnowledge, "hot", ResourceStatusServiceMissing)

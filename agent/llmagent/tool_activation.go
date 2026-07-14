@@ -332,6 +332,23 @@ func (a *LLMAgent) applyToolActivation(
 	)
 }
 
+// ApplyInvocationToolActivation implements agent.InvocationToolActivationProvider.
+func (a *LLMAgent) ApplyInvocationToolActivation(
+	ctx context.Context,
+	inv *agent.Invocation,
+	tools []tool.Tool,
+	userToolNames map[string]bool,
+	externalToolNames map[string]bool,
+) ([]tool.Tool, map[string]bool, map[string]bool) {
+	return a.applyToolActivation(
+		ctx,
+		inv,
+		tools,
+		userToolNames,
+		externalToolNames,
+	)
+}
+
 func (a *LLMAgent) toolActivationInputs() (
 	[]tool.ToolSet,
 	[]toolActivationRule,

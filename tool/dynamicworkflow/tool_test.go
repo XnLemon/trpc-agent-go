@@ -503,6 +503,57 @@ func TestWorkflowCoordinatesExplicitAgentAndTool(t *testing.T) {
 func TestWorkflowCallToolHonorsPermissionBoundaries(t *testing.T) {
 	reviewer := &testAgent{name: "reviewer"}
 
+	t.Run("mandatory filter deny skips checker policy and execution", func(t *testing.T) {
+		sensitive := &permissionTestTool{
+			name:     "sensitive",
+			decision: tool.AllowPermission(),
+		}
+		workflow, err := NewTool(scriptedRuntime{run: func(ctx context.Context, handler CallHandler) (Result, error) {
+			raw, err := handler.HandleWorkflowCall(ctx, Call{
+				ID: "tool-1", Kind: CallKindTool, Name: "sensitive", Args: json.RawMessage(`{"id":"42"}`),
+			})
+			return Result{Value: raw}, err
+		}}, []agent.Agent{reviewer}, WithCodeCallableTools(sensitive))
+		require.NoError(t, err)
+
+		filterCalled := false
+		policyCalled := false
+		parent := agent.NewInvocation(
+			agent.WithInvocationSession(&session.Session{ID: "session-1", AppName: "app", UserID: "user"}),
+			agent.WithInvocationRunOptions(agent.NewRunOptions(
+				agent.WithMandatoryToolFilter(
+					func(_ context.Context, candidate tool.Tool) bool {
+						filterCalled = true
+						require.Equal(t, "sensitive", candidate.Declaration().Name)
+						return false
+					},
+				),
+				agent.WithToolPermissionPolicyFunc(
+					func(context.Context, *tool.PermissionRequest) (tool.PermissionDecision, error) {
+						policyCalled = true
+						return tool.AllowPermission(), nil
+					},
+				),
+			)),
+		)
+
+		value, err := workflow.Call(
+			agent.NewInvocationContext(context.Background(), parent),
+			[]byte(`{"code":"return None"}`),
+		)
+		require.NoError(t, err)
+		result := value.(Result)
+		require.JSONEq(
+			t,
+			`{"status":"denied","tool":"sensitive","reason":"tool \"sensitive\" is hidden by mandatory tool filter"}`,
+			string(result.Value),
+		)
+		require.True(t, filterCalled)
+		require.False(t, sensitive.checkerCalled)
+		require.False(t, policyCalled)
+		require.False(t, sensitive.called)
+	})
+
 	t.Run("tool checker deny skips execution and run policy", func(t *testing.T) {
 		sensitive := &permissionTestTool{
 			name:     "sensitive",
@@ -562,6 +613,55 @@ func TestWorkflowCallToolHonorsPermissionBoundaries(t *testing.T) {
 		result := value.(Result)
 		require.JSONEq(t, `{"status":"approval_required","tool":"sensitive","reason":"needs approval"}`, string(result.Value))
 		require.False(t, sensitive.called)
+	})
+
+	t.Run("mandatory deny cannot be overridden by run policy", func(t *testing.T) {
+		sensitive := &permissionTestTool{name: "sensitive", decision: tool.AllowPermission()}
+		workflow, err := NewTool(scriptedRuntime{run: func(ctx context.Context, handler CallHandler) (Result, error) {
+			raw, err := handler.HandleWorkflowCall(ctx, Call{
+				ID: "tool-1", Kind: CallKindTool, Name: "sensitive", Args: json.RawMessage(`{"id":"42"}`),
+			})
+			return Result{Value: raw}, err
+		}}, []agent.Agent{reviewer}, WithCodeCallableTools(sensitive))
+		require.NoError(t, err)
+
+		ordinaryCalled := false
+		parent := agent.NewInvocation(
+			agent.WithInvocationSession(&session.Session{ID: "session-1", AppName: "app", UserID: "user"}),
+			agent.WithInvocationRunOptions(agent.NewRunOptions(
+				agent.WithMandatoryToolPermissionPolicyFunc(
+					func(
+						context.Context,
+						*tool.PermissionRequest,
+					) (tool.PermissionDecision, error) {
+						return tool.DenyPermission("tenant policy"), nil
+					},
+				),
+				agent.WithToolPermissionPolicyFunc(
+					func(
+						context.Context,
+						*tool.PermissionRequest,
+					) (tool.PermissionDecision, error) {
+						ordinaryCalled = true
+						return tool.AllowPermission(), nil
+					},
+				),
+			)),
+		)
+
+		value, err := workflow.Call(
+			agent.NewInvocationContext(context.Background(), parent),
+			[]byte(`{"code":"return None"}`),
+		)
+		require.NoError(t, err)
+		result := value.(Result)
+		require.JSONEq(
+			t,
+			`{"status":"denied","tool":"sensitive","reason":"tenant policy"}`,
+			string(result.Value),
+		)
+		require.False(t, sensitive.called)
+		require.False(t, ordinaryCalled)
 	})
 }
 
@@ -1891,10 +1991,11 @@ func (a *schemaTestAgent) SubAgents() []agent.Agent { return nil }
 func (a *schemaTestAgent) FindSubAgent(string) agent.Agent { return nil }
 
 type permissionTestTool struct {
-	name     string
-	decision tool.PermissionDecision
-	err      error
-	called   bool
+	name          string
+	decision      tool.PermissionDecision
+	err           error
+	called        bool
+	checkerCalled bool
 }
 
 func (t *permissionTestTool) Declaration() *tool.Declaration {
@@ -1910,6 +2011,7 @@ func (t *permissionTestTool) CheckPermission(
 	context.Context,
 	*tool.PermissionRequest,
 ) (tool.PermissionDecision, error) {
+	t.checkerCalled = true
 	return t.decision, t.err
 }
 
