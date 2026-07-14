@@ -50,11 +50,47 @@ type Service struct {
 	leaseStore       SessionLeaseStore
 	auditSink        platform.AuditSink
 	messageEventSink platform.MessageEventSink
+	budgetEstimator  BudgetEstimator
 	now              func() time.Time
 }
 
 // Option configures a Service.
 type Option func(*Service)
+
+// BudgetEstimateRequest contains safe request metadata for gateway budget checks.
+type BudgetEstimateRequest struct {
+	Runtime        Runtime
+	Message        platform.InboundMessage
+	Text           string
+	SessionID      string
+	RequestID      string
+	InternalUserID string
+}
+
+// BudgetEstimator estimates maximum pre-run token and cost usage for one request.
+type BudgetEstimator interface {
+	EstimateBudget(
+		ctx context.Context,
+		request BudgetEstimateRequest,
+	) (platform.UsageEstimate, error)
+}
+
+// BudgetEstimatorFunc adapts a function into a BudgetEstimator.
+type BudgetEstimatorFunc func(
+	ctx context.Context,
+	request BudgetEstimateRequest,
+) (platform.UsageEstimate, error)
+
+// EstimateBudget implements BudgetEstimator.
+func (f BudgetEstimatorFunc) EstimateBudget(
+	ctx context.Context,
+	request BudgetEstimateRequest,
+) (platform.UsageEstimate, error) {
+	if f == nil {
+		return platform.UsageEstimate{}, nil
+	}
+	return f(ctx, request)
+}
 
 // WithAuditSink sets the audit sink used by the service.
 func WithAuditSink(sink platform.AuditSink) Option {
@@ -83,6 +119,13 @@ func WithNow(now func() time.Time) Option {
 func WithSessionLeaseStore(store SessionLeaseStore) Option {
 	return func(s *Service) {
 		s.leaseStore = store
+	}
+}
+
+// WithBudgetEstimator enables pre-run tenant budget checks.
+func WithBudgetEstimator(estimator BudgetEstimator) Option {
+	return func(s *Service) {
+		s.budgetEstimator = estimator
 	}
 }
 
@@ -160,6 +203,21 @@ func (s *Service) HandleInbound(
 	internalUserID := platform.InternalUserID(msg.TenantID, msg.Channel, msg.ExternalUserID)
 	setInboundTraceAttributes(callbackSpan, msg, sessionID, requestID, internalUserID)
 	setInboundTraceAttributes(routeSpan, msg, sessionID, requestID, internalUserID)
+	if err := s.checkBudget(
+		routeCtx,
+		ctx,
+		routeSpan,
+		runtime,
+		auditSink,
+		msg,
+		text,
+		sessionID,
+		requestID,
+		internalUserID,
+		start,
+	); err != nil {
+		return Result{}, err
+	}
 	key := platform.IdempotencyKey(
 		msg.TenantID,
 		msg.Channel,
@@ -251,6 +309,111 @@ func (s *Service) lookupRuntime(
 		return Runtime{}, err
 	}
 	return runtime, nil
+}
+
+func (s *Service) checkBudget(
+	routeCtx context.Context,
+	auditCtx context.Context,
+	routeSpan oteltrace.Span,
+	runtime Runtime,
+	auditSink platform.AuditSink,
+	msg platform.InboundMessage,
+	text string,
+	sessionID string,
+	requestID string,
+	internalUserID string,
+	start time.Time,
+) error {
+	if s.budgetEstimator == nil {
+		return nil
+	}
+	budgetCtx, budgetSpan := telemetrytrace.Tracer.Start(routeCtx, "gateway.budget")
+	defer budgetSpan.End()
+	setInboundTraceAttributes(budgetSpan, msg, sessionID, requestID, internalUserID)
+	quota, err := platform.ParseTenantQuota(runtime.Tenant)
+	if err != nil {
+		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		recordSpanError(budgetSpan, err)
+		return err
+	}
+	estimate, err := s.budgetEstimator.EstimateBudget(
+		budgetCtx,
+		BudgetEstimateRequest{
+			Runtime:        runtime,
+			Message:        msg,
+			Text:           text,
+			SessionID:      sessionID,
+			RequestID:      requestID,
+			InternalUserID: internalUserID,
+		},
+	)
+	if err != nil {
+		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		recordSpanError(budgetSpan, err)
+		return err
+	}
+	decision, err := quota.Check(estimate)
+	if err != nil {
+		s.writeRejectAuditTo(auditCtx, auditSink, msg, start, err)
+		recordSpanError(routeSpan, err)
+		recordSpanError(budgetSpan, err)
+		return err
+	}
+	budgetSpan.SetAttributes(
+		attribute.String("decision", "allow"),
+		attribute.Int("estimated_total_tokens", estimatedTotalTokens(estimate)),
+	)
+	if decision.Allowed {
+		return nil
+	}
+	budgetSpan.SetAttributes(attribute.String("decision", "deny"))
+	s.writeBudgetDeniedAudit(
+		auditCtx,
+		auditSink,
+		runtime,
+		requestID,
+		decision,
+		estimate,
+		quota,
+		start,
+	)
+	err = fmt.Errorf("%w: %s", ErrBudgetExceeded, decision.Reason)
+	recordSpanError(routeSpan, err)
+	recordSpanError(budgetSpan, err)
+	return err
+}
+
+func (s *Service) writeBudgetDeniedAudit(
+	ctx context.Context,
+	auditSink platform.AuditSink,
+	runtime Runtime,
+	requestID string,
+	decision platform.BudgetDecision,
+	estimate platform.UsageEstimate,
+	quota platform.TenantQuota,
+	start time.Time,
+) {
+	record, err := platform.NewBudgetDecisionAuditRecord(platform.BudgetDecisionAuditInput{
+		TenantID:  runtime.Tenant.TenantID,
+		AppID:     runtime.App.AppID,
+		RequestID: requestID,
+		TraceID:   requestID,
+		Decision:  decision,
+		Estimate:  estimate,
+		Quota:     quota,
+		Outcome:   platform.BudgetDecisionOutcomeDeny,
+		CreatedAt: start,
+	})
+	if err != nil {
+		s.writeRejectAuditTo(ctx, auditSink, platform.InboundMessage{
+			TenantID: runtime.Tenant.TenantID,
+			AppID:    runtime.App.AppID,
+		}, start, err)
+		return
+	}
+	s.writeAuditTo(ctx, auditSink, record)
 }
 
 func validateRuntimeForMessage(runtime Runtime, msg platform.InboundMessage) error {
@@ -1015,5 +1178,21 @@ var traceErrorTypes = []struct {
 	{ErrBindingMentionRequired, "binding_mention_required"},
 	{ErrUnsupportedMessageType, "unsupported_message_type"},
 	{ErrEmptyText, "empty_text"},
+	{ErrBudgetExceeded, "budget_exceeded"},
 	{ErrRunnerResponseEmpty, "runner_response_empty"},
+}
+
+func estimatedTotalTokens(estimate platform.UsageEstimate) int {
+	if estimate.PromptTokens > maxInt()-estimate.CompletionTokens {
+		return estimate.TotalTokens
+	}
+	sum := estimate.PromptTokens + estimate.CompletionTokens
+	if sum > estimate.TotalTokens {
+		return sum
+	}
+	return estimate.TotalTokens
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
 }
