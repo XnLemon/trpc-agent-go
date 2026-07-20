@@ -33,8 +33,9 @@ import (
 )
 
 var (
-	_ session.Service      = (*Service)(nil)
-	_ session.TrackService = (*Service)(nil)
+	_ session.Service                = (*Service)(nil)
+	_ session.SessionStateCASService = (*Service)(nil)
+	_ session.TrackService           = (*Service)(nil)
 )
 
 // Service is the redis session service.

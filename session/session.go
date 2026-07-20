@@ -28,6 +28,38 @@ import (
 // StateMap is a map of state key-value pairs.
 type StateMap map[string][]byte
 
+// SessionStateCASValue represents one session state value for a compare-and-swap
+// operation. Exists distinguishes a missing key from a present key whose value
+// is nil or empty.
+type SessionStateCASValue struct {
+	Exists bool
+	Value  []byte
+}
+
+// SessionStateCASRequest describes an atomic replacement of one session state
+// key. An absent Desired value deletes the key.
+type SessionStateCASRequest struct {
+	StateKey string
+	Expected SessionStateCASValue
+	Desired  SessionStateCASValue
+}
+
+// SessionStateCASService is an optional capability implemented by session
+// services that can compare and replace one session state key atomically.
+//
+// It intentionally does not extend Service so existing external Service
+// implementations remain source compatible. A false result with nil error
+// means the expected value did not match. Implementations must distinguish
+// missing, present-nil, and present-empty values, compare exact bytes, and not
+// retain request-owned byte slices.
+type SessionStateCASService interface {
+	CompareAndSwapSessionState(
+		ctx context.Context,
+		key Key,
+		request SessionStateCASRequest,
+	) (swapped bool, err error)
+}
+
 var (
 	// ErrAppNameRequired is the error for app name required.
 	ErrAppNameRequired = errors.New("appName is required")

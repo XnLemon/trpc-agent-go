@@ -10,9 +10,12 @@
 package hashidx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -66,6 +69,134 @@ func (c *Client) UpdateSessionState(ctx context.Context, key session.Key, state 
 		return fmt.Errorf("update session state: unexpected script result %d", result)
 	}
 	return nil
+}
+
+// CompareAndSwapSessionState atomically compares and replaces one session
+// state key in HashIdx metadata.
+func (c *Client) CompareAndSwapSessionState(
+	ctx context.Context,
+	key session.Key,
+	request session.SessionStateCASRequest,
+) (bool, error) {
+	if err := key.CheckSessionKey(); err != nil {
+		return false, err
+	}
+	if request.StateKey == "" {
+		return false, fmt.Errorf("state key is required")
+	}
+	if strings.HasPrefix(request.StateKey, session.StateAppPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateAppState instead", request.StateKey)
+	}
+	if strings.HasPrefix(request.StateKey, session.StateUserPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateUserState instead", request.StateKey)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	metaKey := c.keys.SessionMetaKey(key)
+	retryDelay := 5 * time.Millisecond
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		err := c.compareAndSwapSessionStateAttempt(ctx, metaKey, request)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, errHashidxSessionStateCASMismatch):
+			return false, nil
+		case errors.Is(err, errHashidxSessionStateNotFound):
+			return false, fmt.Errorf("session not found")
+		case errors.Is(err, redis.TxFailedErr):
+			if err := waitHashidxSessionStateCASRetry(ctx, retryDelay); err != nil {
+				return false, err
+			}
+			if retryDelay < 100*time.Millisecond {
+				retryDelay *= 2
+			}
+		default:
+			return false, fmt.Errorf("compare and swap session state: %w", err)
+		}
+	}
+}
+
+func (c *Client) compareAndSwapSessionStateAttempt(
+	ctx context.Context,
+	metaKey string,
+	request session.SessionStateCASRequest,
+) error {
+	return c.client.Watch(ctx, func(tx *redis.Tx) error {
+		metaJSON, err := tx.Get(ctx, metaKey).Bytes()
+		if err == redis.Nil {
+			return errHashidxSessionStateNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("get session meta: %w", err)
+		}
+		var meta sessionMeta
+		if err := json.Unmarshal(metaJSON, &meta); err != nil {
+			return fmt.Errorf("unmarshal session meta: %w", err)
+		}
+		if meta.State == nil {
+			meta.State = make(session.StateMap)
+		}
+		current, exists := meta.State[request.StateKey]
+		if exists != request.Expected.Exists ||
+			(exists && !equalHashidxSessionStateCASBytes(current, request.Expected.Value)) {
+			return errHashidxSessionStateCASMismatch
+		}
+		if request.Desired.Exists {
+			meta.State[request.StateKey] = cloneHashidxSessionStateCASBytes(request.Desired.Value)
+		} else {
+			delete(meta.State, request.StateKey)
+		}
+		meta.UpdatedAt = time.Now()
+		updatedJSON, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("marshal session meta: %w", err)
+		}
+		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			expiration := time.Duration(redis.KeepTTL)
+			if c.cfg.SessionTTL > 0 {
+				expiration = c.cfg.SessionTTL
+			}
+			pipe.Set(ctx, metaKey, updatedJSON, expiration)
+			return nil
+		})
+		return err
+	}, metaKey)
+}
+
+func waitHashidxSessionStateCASRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+var (
+	errHashidxSessionStateCASMismatch = errors.New("session state compare and swap mismatch")
+	errHashidxSessionStateNotFound    = errors.New("session state not found")
+)
+
+func equalHashidxSessionStateCASBytes(actual, expected []byte) bool {
+	if expected == nil {
+		return actual == nil
+	}
+	return actual != nil && bytes.Equal(actual, expected)
+}
+
+func cloneHashidxSessionStateCASBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]byte, len(value))
+	copy(cloned, value)
+	return cloned
 }
 
 // Exists checks if session exists.

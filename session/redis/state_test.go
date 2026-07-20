@@ -19,6 +19,112 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
 
+func TestRedisService_CompareAndSwapSessionState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode CompatMode
+	}{
+		{name: "hashidx", mode: CompatModeNone},
+		{name: "zset", mode: CompatModeTransition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			redisURL, cleanup := setupTestRedis(t)
+			defer cleanup()
+			service, err := NewService(
+				WithRedisClientURL(redisURL),
+				WithCompatMode(tc.mode),
+			)
+			require.NoError(t, err)
+			defer service.Close()
+			ctx := context.Background()
+			key := session.Key{AppName: "app", UserID: "user", SessionID: "cas-" + tc.name}
+			_, err = service.CreateSession(ctx, key, session.StateMap{"other": []byte("keep")})
+			require.NoError(t, err)
+
+			swapped, err := service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Desired:  session.SessionStateCASValue{Exists: true, Value: []byte("owner-a")},
+			})
+			require.NoError(t, err)
+			require.True(t, swapped)
+
+			swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Expected: session.SessionStateCASValue{Exists: true, Value: []byte("stale")},
+				Desired:  session.SessionStateCASValue{Exists: true, Value: []byte("owner-b")},
+			})
+			require.NoError(t, err)
+			require.False(t, swapped)
+
+			swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Expected: session.SessionStateCASValue{Exists: true, Value: []byte("owner-a")},
+			})
+			require.NoError(t, err)
+			require.True(t, swapped)
+
+			swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Desired:  session.SessionStateCASValue{Exists: true, Value: nil},
+			})
+			require.NoError(t, err)
+			require.True(t, swapped)
+			swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Expected: session.SessionStateCASValue{Exists: true, Value: []byte{}},
+			})
+			require.NoError(t, err)
+			require.False(t, swapped)
+			swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+				StateKey: "lease",
+				Expected: session.SessionStateCASValue{Exists: true, Value: nil},
+			})
+			require.NoError(t, err)
+			require.True(t, swapped)
+
+			contender, err := NewService(
+				WithRedisClientURL(redisURL),
+				WithCompatMode(tc.mode),
+			)
+			require.NoError(t, err)
+			defer contender.Close()
+			start := make(chan struct{})
+			results := make(chan bool, 16)
+			errors := make(chan error, 16)
+			for i := 0; i < 16; i++ {
+				casService := service
+				if i%2 == 1 {
+					casService = contender
+				}
+				go func(i int, svc *Service) {
+					<-start
+					ok, err := svc.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+						StateKey: "lease",
+						Desired:  session.SessionStateCASValue{Exists: true, Value: []byte("owner")},
+					})
+					results <- ok
+					errors <- err
+				}(i, casService)
+			}
+			close(start)
+			successes := 0
+			for i := 0; i < 16; i++ {
+				if <-results {
+					successes++
+				}
+				require.NoError(t, <-errors)
+			}
+			require.Equal(t, 1, successes)
+
+			sess, err := service.GetSession(ctx, key)
+			require.NoError(t, err)
+			require.NotNil(t, sess)
+			assert.Equal(t, []byte("keep"), sess.State["other"])
+			assert.Equal(t, []byte("owner"), sess.State["lease"])
+		})
+	}
+}
+
 func TestRedisService_ListAppStates(t *testing.T) {
 	redisURL, cleanup := setupTestRedis(t)
 	defer cleanup()

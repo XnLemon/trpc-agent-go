@@ -11,6 +11,7 @@
 package inmemory
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -39,9 +40,10 @@ type sessionWithTTL struct {
 }
 
 var (
-	_ session.Service       = (*SessionService)(nil)
-	_ session.TrackService  = (*SessionService)(nil)
-	_ session.WindowService = (*SessionService)(nil)
+	_ session.Service                = (*SessionService)(nil)
+	_ session.SessionStateCASService = (*SessionService)(nil)
+	_ session.TrackService           = (*SessionService)(nil)
+	_ session.WindowService          = (*SessionService)(nil)
 )
 
 // isExpired checks if the given time has passed.
@@ -693,6 +695,77 @@ func (s *SessionService) UpdateSessionState(ctx context.Context, key session.Key
 	}
 
 	return nil
+}
+
+// CompareAndSwapSessionState atomically compares and replaces one session
+// state key while holding the session storage lock.
+func (s *SessionService) CompareAndSwapSessionState(
+	ctx context.Context,
+	key session.Key,
+	request session.SessionStateCASRequest,
+) (bool, error) {
+	if err := key.CheckSessionKey(); err != nil {
+		return false, err
+	}
+	if request.StateKey == "" {
+		return false, fmt.Errorf("state key is required")
+	}
+	if strings.HasPrefix(request.StateKey, session.StateAppPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateAppState instead", request.StateKey)
+	}
+	if strings.HasPrefix(request.StateKey, session.StateUserPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateUserState instead", request.StateKey)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+	}
+
+	app, ok := s.getAppSessions(key.AppName)
+	if !ok {
+		return false, fmt.Errorf("memory session service compare and swap failed: app not found")
+	}
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	userSessions, ok := app.sessions[key.UserID]
+	if !ok {
+		return false, fmt.Errorf("memory session service compare and swap failed: user not found")
+	}
+	sessWithTTL, ok := userSessions[key.SessionID]
+	if !ok {
+		return false, fmt.Errorf("memory session service compare and swap failed: session not found")
+	}
+	if isExpired(sessWithTTL.expiredAt) {
+		return false, fmt.Errorf("memory session service compare and swap failed: session expired")
+	}
+
+	current, currentExists := sessWithTTL.session.GetState(request.StateKey)
+	if currentExists != request.Expected.Exists ||
+		(currentExists && !equalSessionStateValue(current, request.Expected.Value)) {
+		return false, nil
+	}
+	if request.Desired.Exists {
+		sessWithTTL.session.SetState(request.StateKey, request.Desired.Value)
+	} else {
+		sessWithTTL.session.DeleteState(request.StateKey)
+	}
+	sessWithTTL.session.UpdatedAt = time.Now()
+	if s.opts.sessionTTL > 0 {
+		sessWithTTL.expiredAt = calculateExpiredAt(s.opts.sessionTTL)
+	}
+	return true, nil
+}
+
+func equalSessionStateValue(actual, expected []byte) bool {
+	if expected == nil {
+		return actual == nil
+	}
+	return actual != nil && bytes.Equal(actual, expected)
 }
 
 // DeleteUserState deletes the user state.

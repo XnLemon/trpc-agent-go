@@ -151,3 +151,38 @@ func (s *Service) UpdateSessionState(ctx context.Context, key session.Key, state
 
 	return fmt.Errorf("session not found")
 }
+
+// CompareAndSwapSessionState atomically compares and replaces one session
+// state key in the storage backend that owns the session.
+func (s *Service) CompareAndSwapSessionState(
+	ctx context.Context,
+	key session.Key,
+	request session.SessionStateCASRequest,
+) (bool, error) {
+	if err := key.CheckSessionKey(); err != nil {
+		return false, err
+	}
+	if request.StateKey == "" {
+		return false, fmt.Errorf("state key is required")
+	}
+	if strings.HasPrefix(request.StateKey, session.StateAppPrefix) {
+		return false, fmt.Errorf("redis session service compare and swap failed: %s is not allowed, use UpdateAppState instead", request.StateKey)
+	}
+	if strings.HasPrefix(request.StateKey, session.StateUserPrefix) {
+		return false, fmt.Errorf("redis session service compare and swap failed: %s is not allowed, use UpdateUserState instead", request.StateKey)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	zsetExists, hashidxExists, err := s.checkSessionExists(ctx, key)
+	if err != nil {
+		return false, fmt.Errorf("check session existence failed: %w", err)
+	}
+	if s.compatEnabled() && zsetExists {
+		return s.zsetClient.CompareAndSwapSessionState(ctx, key, request)
+	}
+	if hashidxExists {
+		return s.hashidxClient.CompareAndSwapSessionState(ctx, key, request)
+	}
+	return false, fmt.Errorf("session not found")
+}

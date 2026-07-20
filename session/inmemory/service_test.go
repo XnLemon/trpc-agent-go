@@ -652,6 +652,70 @@ func TestUpdateSessionState(t *testing.T) {
 	})
 }
 
+func TestCompareAndSwapSessionState(t *testing.T) {
+	service := NewSessionService()
+	defer service.Close()
+	ctx := context.Background()
+	key := session.Key{AppName: "app1", UserID: "user1", SessionID: "session-cas"}
+	_, err := service.CreateSession(ctx, key, session.StateMap{"other": []byte("keep")})
+	require.NoError(t, err)
+
+	request := session.SessionStateCASRequest{
+		StateKey: "lease",
+		Desired: session.SessionStateCASValue{
+			Exists: true,
+			Value:  []byte("owner-a"),
+		},
+	}
+	swapped, err := service.CompareAndSwapSessionState(ctx, key, request)
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: "lease",
+		Expected: session.SessionStateCASValue{Exists: true, Value: []byte("stale")},
+		Desired:  session.SessionStateCASValue{Exists: true, Value: []byte("owner-b")},
+	})
+	require.NoError(t, err)
+	require.False(t, swapped)
+
+	swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: "lease",
+		Expected: session.SessionStateCASValue{Exists: true, Value: []byte("owner-a")},
+		Desired:  session.SessionStateCASValue{},
+	})
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: "lease",
+		Desired:  session.SessionStateCASValue{Exists: true, Value: nil},
+	})
+	require.NoError(t, err)
+	require.True(t, swapped)
+	swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: "lease",
+		Expected: session.SessionStateCASValue{Exists: true, Value: []byte{}},
+		Desired:  session.SessionStateCASValue{},
+	})
+	require.NoError(t, err)
+	require.False(t, swapped)
+	swapped, err = service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: "lease",
+		Expected: session.SessionStateCASValue{Exists: true, Value: nil},
+		Desired:  session.SessionStateCASValue{},
+	})
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	sess, err := service.GetSession(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, sess)
+	assert.Equal(t, []byte("keep"), sess.State["other"])
+	_, exists := sess.State["lease"]
+	assert.False(t, exists)
+}
+
 func TestDeleteSession(t *testing.T) {
 	// setup function to create test data for each test case
 	setup := func(t *testing.T, service *SessionService) session.Key {

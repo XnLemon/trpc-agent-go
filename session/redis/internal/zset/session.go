@@ -12,6 +12,7 @@
 package zset
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,8 @@ type SessionState struct {
 	CreatedAt time.Time        `json:"createdAt"`
 	UpdatedAt time.Time        `json:"updatedAt"`
 }
+
+var errSessionStateCASMismatch = errors.New("session state compare and swap mismatch")
 
 func buildListedSession(
 	appName, userID string,
@@ -331,6 +334,69 @@ func (c *Client) UpdateSessionState(ctx context.Context, key session.Key, state 
 		},
 		nil,
 	)
+}
+
+// CompareAndSwapSessionState atomically compares and replaces one session
+// state key using the existing optimistic session-state transaction.
+func (c *Client) CompareAndSwapSessionState(
+	ctx context.Context,
+	key session.Key,
+	request session.SessionStateCASRequest,
+) (bool, error) {
+	if err := key.CheckSessionKey(); err != nil {
+		return false, err
+	}
+	if request.StateKey == "" {
+		return false, fmt.Errorf("state key is required")
+	}
+	if strings.HasPrefix(request.StateKey, session.StateAppPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateAppState instead", request.StateKey)
+	}
+	if strings.HasPrefix(request.StateKey, session.StateUserPrefix) {
+		return false, fmt.Errorf("%s is not allowed, use UpdateUserState instead", request.StateKey)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var swapped bool
+	err := c.updateSessionStateCAS(ctx, key, func(sessState *SessionState) error {
+		current, exists := sessState.State[request.StateKey]
+		if exists != request.Expected.Exists ||
+			(exists && !equalSessionStateCASBytes(current, request.Expected.Value)) {
+			return errSessionStateCASMismatch
+		}
+		if request.Desired.Exists {
+			sessState.State[request.StateKey] = cloneSessionStateCASBytes(request.Desired.Value)
+		} else {
+			delete(sessState.State, request.StateKey)
+		}
+		sessState.UpdatedAt = time.Now()
+		swapped = true
+		return nil
+	}, nil)
+	if errors.Is(err, errSessionStateCASMismatch) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return swapped, nil
+}
+
+func equalSessionStateCASBytes(actual, expected []byte) bool {
+	if expected == nil {
+		return actual == nil
+	}
+	return actual != nil && bytes.Equal(actual, expected)
+}
+
+func cloneSessionStateCASBytes(value []byte) []byte {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]byte, len(value))
+	copy(cloned, value)
+	return cloned
 }
 
 // DeleteSession deletes a session in ZSet.

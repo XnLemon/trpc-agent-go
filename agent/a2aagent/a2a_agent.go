@@ -12,10 +12,13 @@ package a2aagent
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/url"
 	"path"
@@ -53,7 +56,13 @@ const (
 	anonymousUserIDPrefix               = "A2A_ANONYMOUS_"
 	anonymousUserIDCookieStateKeyPrefix = "trpc.agent.a2a.anonymous_user_id_cookie."
 	anonymousUserIDCookieEncodedBytes   = 16
+	anonymousCookieLeaseTTL             = 30 * time.Second
+	anonymousCookieLeaseRenewInterval   = 10 * time.Second
+	anonymousCookieLeasePollInterval    = 20 * time.Millisecond
+	anonymousCookieLeasePollMaxInterval = 500 * time.Millisecond
 )
+
+var errAnonymousCookieLeaseLost = errors.New("a2a anonymous cookie initialization lease lost")
 
 // A2AAgent is an agent that communicates with a remote A2A agent via A2A protocol.
 type A2AAgent struct {
@@ -76,8 +85,9 @@ type A2AAgent struct {
 	a2aClient    *client.A2AClient
 	a2aClientURL string
 
-	anonymousCookieInitMu    sync.Mutex
-	anonymousCookieInitLocks map[anonymousCookieInitScope]*anonymousCookieInitLock
+	anonymousCookieInitMu         sync.Mutex
+	anonymousCookieInitLocks      map[anonymousCookieInitScope]*anonymousCookieInitLock
+	anonymousCookieCASWarningOnce sync.Once
 }
 
 type invocationA2AClient struct {
@@ -193,6 +203,12 @@ func (r *A2AAgent) clientForInvocation(
 		anonymousSessionServiceFromInvocation(invocation),
 		anonymousCookieStateKey(r.a2aClientURL),
 	)
+	if _, ok := anonymousCookie.persistentSessionKey(); ok &&
+		anonymousCookie.sessionService != nil && anonymousCookie.casService == nil {
+		r.anonymousCookieCASWarningOnce.Do(func() {
+			log.Warn("anonymous A2A cookie initialization uses instance-local coordination because the session service does not implement SessionStateCASService")
+		})
+	}
 	a2aClient, err := r.newAnonymousClient(anonymousCookie)
 	if err != nil {
 		return nil, err
@@ -356,7 +372,43 @@ type anonymousCookieState struct {
 	session        *session.Session
 	persistSession *session.Session
 	sessionService session.Service
+	casService     session.SessionStateCASService
 	key            string
+
+	mu           sync.Mutex
+	candidate    string
+	candidateErr error
+	lease        *anonymousCookieLease
+}
+
+type anonymousCookieLeaseRecord struct {
+	Kind      string `json:"kind"`
+	Version   int    `json:"version"`
+	Owner     string `json:"owner"`
+	ExpiresAt int64  `json:"expiresAtUnixNano"`
+}
+
+type anonymousCookiePersistedState struct {
+	raw         []byte
+	exists      bool
+	ready       bool
+	activeLease *anonymousCookieLeaseRecord
+}
+
+type anonymousCookieLease struct {
+	key         session.Key
+	stateKey    string
+	casService  session.SessionStateCASService
+	owner       string
+	requestCtx  context.Context
+	cancelReq   context.CancelCauseFunc
+	renewCtx    context.Context
+	cancelRenew context.CancelFunc
+	done        chan struct{}
+	mu          sync.Mutex
+	expectedRaw []byte
+	expiresAt   time.Time
+	lostErr     error
 }
 
 func newAnonymousCookieState(
@@ -365,10 +417,15 @@ func newAnonymousCookieState(
 	sessionService session.Service,
 	key string,
 ) *anonymousCookieState {
+	var casService session.SessionStateCASService
+	if sessionService != nil {
+		casService, _ = sessionService.(session.SessionStateCASService)
+	}
 	return &anonymousCookieState{
 		session:        sess,
 		persistSession: persistSession,
 		sessionService: sessionService,
+		casService:     casService,
 		key:            key,
 	}
 }
@@ -410,6 +467,25 @@ func (s *anonymousCookieState) load() (string, bool) {
 	return loadAnonymousCookieFromSession(s.session, s.key)
 }
 
+func (s *anonymousCookieState) validateLocalState() error {
+	if s == nil || s.session == nil || s.key == "" {
+		return nil
+	}
+	raw, exists := s.session.GetState(s.key)
+	if !exists {
+		return nil
+	}
+	if raw != nil && isAnonymousUserIDCookieValue(strings.TrimSpace(string(raw))) {
+		return nil
+	}
+	if s.casService != nil {
+		if _, isLease, err := decodeAnonymousCookieLease(raw); err == nil && isLease {
+			return nil
+		}
+	}
+	return errors.New("invalid anonymous A2A cookie state")
+}
+
 func loadAnonymousCookieFromSession(sess *session.Session, key string) (string, bool) {
 	if sess == nil || key == "" {
 		return "", false
@@ -440,9 +516,21 @@ func (s *anonymousCookieState) reload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reload anonymous A2A cookie state: %w", err)
 	}
-	cookieValue, ok := loadAnonymousCookieFromSession(persistedSession, s.key)
-	if !ok {
+	if persistedSession == nil {
 		return nil
+	}
+	raw, exists := persistedSession.GetState(s.key)
+	if !exists {
+		return nil
+	}
+	cookieValue := strings.TrimSpace(string(raw))
+	if !isAnonymousUserIDCookieValue(cookieValue) {
+		if s.casService != nil {
+			if _, isLease, leaseErr := decodeAnonymousCookieLease(raw); leaseErr == nil && isLease {
+				return nil
+			}
+		}
+		return errors.New("reload anonymous A2A cookie state: invalid state")
 	}
 	if s.session != nil {
 		s.session.SetState(s.key, []byte(cookieValue))
@@ -453,7 +541,35 @@ func (s *anonymousCookieState) reload(ctx context.Context) error {
 	return nil
 }
 
-func (s *anonymousCookieState) capture(ctx context.Context, cookieValue string) {
+func (s *anonymousCookieState) loadPersistedRaw(ctx context.Context) ([]byte, bool, error) {
+	if s == nil || s.sessionService == nil {
+		return nil, false, nil
+	}
+	persistentSessionKey, ok := s.persistentSessionKey()
+	if !ok {
+		return nil, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	persistedSession, err := s.sessionService.GetSession(ctx, persistentSessionKey)
+	if err != nil {
+		return nil, false, fmt.Errorf("load anonymous A2A cookie state: %w", err)
+	}
+	if persistedSession == nil {
+		return nil, false, nil
+	}
+	raw, exists := persistedSession.GetState(s.key)
+	if !exists {
+		return nil, false, nil
+	}
+	if raw == nil {
+		return nil, true, nil
+	}
+	return append([]byte(nil), raw...), true, nil
+}
+
+func (s *anonymousCookieState) captureCandidate(cookieValue string) {
 	if s == nil || s.key == "" {
 		return
 	}
@@ -461,10 +577,526 @@ func (s *anonymousCookieState) capture(ctx context.Context, cookieValue string) 
 	if !isAnonymousUserIDCookieValue(cookieValue) {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.candidateErr != nil {
+		return
+	}
+	if s.candidate != "" && s.candidate != cookieValue {
+		s.candidateErr = errors.New("conflicting anonymous A2A cookies in response")
+		return
+	}
+	s.candidate = cookieValue
+}
+
+func (s *anonymousCookieState) captureCookie(cookie *http.Cookie) {
+	if s == nil || s.key == "" || cookie == nil {
+		return
+	}
+	if cookie.MaxAge < 0 ||
+		(!cookie.Expires.IsZero() && !cookie.Expires.After(time.Now())) {
+		s.mu.Lock()
+		if s.candidateErr == nil {
+			s.candidateErr = errors.New("anonymous A2A cookie deletion is not valid identity state")
+		}
+		s.mu.Unlock()
+		return
+	}
+	cookieValue := strings.TrimSpace(cookie.Value)
+	if !isAnonymousUserIDCookieValue(cookieValue) {
+		s.mu.Lock()
+		if s.candidateErr == nil {
+			s.candidateErr = errors.New("invalid anonymous A2A cookie value")
+		}
+		s.mu.Unlock()
+		return
+	}
+	s.captureCandidate(cookieValue)
+}
+
+// capture preserves the pre-coordination helper behavior for callers that
+// construct an anonymousCookieState directly. The HTTP jar uses
+// captureCandidate so persistence happens only after the request completes.
+func (s *anonymousCookieState) capture(ctx context.Context, cookieValue string) {
+	s.captureCandidate(cookieValue)
+	if s == nil || s.currentLease() != nil {
+		return
+	}
+	cookieValue = strings.TrimSpace(cookieValue)
+	if !isAnonymousUserIDCookieValue(cookieValue) {
+		return
+	}
+	s.setReady(cookieValue)
+	s.persist(ctx, cookieValue)
+}
+
+func (s *anonymousCookieState) resetCandidate() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.candidate = ""
+	s.candidateErr = nil
+	s.mu.Unlock()
+}
+
+func (s *anonymousCookieState) currentLease() *anonymousCookieLease {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lease
+}
+
+func (s *anonymousCookieState) setLease(lease *anonymousCookieLease) {
+	s.mu.Lock()
+	s.lease = lease
+	s.mu.Unlock()
+}
+
+func (s *anonymousCookieState) takeInitialization() (*anonymousCookieLease, string, error) {
+	if s == nil {
+		return nil, "", nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lease := s.lease
+	candidate := s.candidate
+	candidateErr := s.candidateErr
+	s.lease = nil
+	s.candidate = ""
+	s.candidateErr = nil
+	return lease, candidate, candidateErr
+}
+
+func (s *anonymousCookieState) setReady(cookieValue string) {
+	if s == nil || !isAnonymousUserIDCookieValue(cookieValue) {
+		return
+	}
 	if s.session != nil {
 		s.session.SetState(s.key, []byte(cookieValue))
 	}
-	s.persist(ctx, cookieValue)
+	if s.persistSession != nil {
+		s.persistSession.SetState(s.key, []byte(cookieValue))
+	}
+}
+
+func (s *anonymousCookieState) acquireDistributed(ctx context.Context) (bool, error) {
+	if s == nil || s.casService == nil {
+		return false, nil
+	}
+	persistentSessionKey, ok := s.persistentSessionKey()
+	if !ok {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pollInterval := anonymousCookieLeasePollInterval
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		observed, err := s.observeDistributedState(ctx)
+		if err != nil {
+			return false, err
+		}
+		if observed.ready {
+			return false, nil
+		}
+		if observed.activeLease != nil {
+			waitInterval, err := jitteredAnonymousCookieLeasePollInterval(pollInterval)
+			if err != nil {
+				return false, err
+			}
+			if err := waitAnonymousCookieLease(ctx, waitInterval); err != nil {
+				return false, err
+			}
+			if pollInterval < anonymousCookieLeasePollMaxInterval {
+				pollInterval *= 2
+				if pollInterval > anonymousCookieLeasePollMaxInterval {
+					pollInterval = anonymousCookieLeasePollMaxInterval
+				}
+			}
+			continue
+		}
+
+		leaseRaw, err := newAnonymousCookieLeaseRaw(time.Now().Add(anonymousCookieLeaseTTL))
+		if err != nil {
+			return false, err
+		}
+		swapped, err := s.casService.CompareAndSwapSessionState(
+			ctx,
+			persistentSessionKey,
+			session.SessionStateCASRequest{
+				StateKey: s.key,
+				Expected: session.SessionStateCASValue{Exists: observed.exists, Value: observed.raw},
+				Desired:  session.SessionStateCASValue{Exists: true, Value: leaseRaw},
+			},
+		)
+		if err != nil {
+			return false, err
+		}
+		if !swapped {
+			continue
+		}
+		lease, err := newAnonymousCookieLease(
+			ctx,
+			persistentSessionKey,
+			s.key,
+			leaseRaw,
+			s.casService,
+		)
+		if err != nil {
+			cleanupCtx, cancel := anonymousCookieCleanupContext(ctx)
+			_, _ = s.casService.CompareAndSwapSessionState(
+				cleanupCtx,
+				persistentSessionKey,
+				session.SessionStateCASRequest{
+					StateKey: s.key,
+					Expected: session.SessionStateCASValue{Exists: true, Value: leaseRaw},
+				},
+			)
+			cancel()
+			return false, err
+		}
+		s.setLease(lease)
+		return true, nil
+	}
+}
+
+func (s *anonymousCookieState) observeDistributedState(
+	ctx context.Context,
+) (anonymousCookiePersistedState, error) {
+	raw, exists, err := s.loadPersistedRaw(ctx)
+	if err != nil {
+		return anonymousCookiePersistedState{}, err
+	}
+	if !exists {
+		return anonymousCookiePersistedState{}, nil
+	}
+	if raw == nil || strings.TrimSpace(string(raw)) == "" {
+		return anonymousCookiePersistedState{}, errors.New("invalid anonymous A2A cookie state")
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if isAnonymousUserIDCookieValue(trimmed) {
+		s.setReady(trimmed)
+		return anonymousCookiePersistedState{
+			raw: raw, exists: true, ready: true,
+		}, nil
+	}
+	record, isLease, err := decodeAnonymousCookieLease(raw)
+	if err != nil {
+		return anonymousCookiePersistedState{}, fmt.Errorf("inspect anonymous A2A cookie state: %w", err)
+	}
+	if !isLease {
+		return anonymousCookiePersistedState{}, errors.New("invalid anonymous A2A cookie state")
+	}
+	now := time.Now()
+	expiresAt := time.Unix(0, record.ExpiresAt)
+	if expiresAt.After(now.Add(2 * anonymousCookieLeaseTTL)) {
+		return anonymousCookiePersistedState{}, errors.New("invalid anonymous A2A cookie lease expiry")
+	}
+	observed := anonymousCookiePersistedState{raw: raw, exists: true}
+	if expiresAt.After(now) {
+		observed.activeLease = &record
+	}
+	return observed, nil
+}
+
+func (s *anonymousCookieState) finishInitialization(ctx context.Context, requestErr error) error {
+	if s == nil {
+		return nil
+	}
+	lease, candidate, candidateErr := s.takeInitialization()
+	if lease != nil {
+		leaseErr := lease.stop()
+		if leaseErr != nil {
+			return leaseErr
+		}
+		if requestErr != nil || candidateErr != nil || candidate == "" {
+			cleanupCtx, cancel := anonymousCookieCleanupContext(ctx)
+			if err := lease.abort(cleanupCtx); err != nil {
+				log.WarnfContext(cleanupCtx, "abort anonymous A2A cookie lease failed: %v", err)
+			}
+			cancel()
+			if candidateErr != nil {
+				return candidateErr
+			}
+			return nil
+		}
+		if err := lease.commit(ctx, candidate); err != nil {
+			return err
+		}
+		s.setReady(candidate)
+		return nil
+	}
+	if candidateErr != nil {
+		return candidateErr
+	}
+	if requestErr == nil {
+		if candidate != "" {
+			if s.session != nil {
+				s.session.SetState(s.key, []byte(candidate))
+			}
+			s.persist(ctx, candidate)
+		}
+	}
+	return nil
+}
+
+func anonymousCookieCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+}
+
+func waitAnonymousCookieLease(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func jitteredAnonymousCookieLeasePollInterval(interval time.Duration) (time.Duration, error) {
+	if interval <= 0 {
+		interval = anonymousCookieLeasePollInterval
+	}
+	if interval > anonymousCookieLeasePollMaxInterval {
+		interval = anonymousCookieLeasePollMaxInterval
+	}
+	// Keep a small non-zero floor so a full-jitter draw cannot turn into a
+	// tight storage polling loop.
+	minimum := time.Millisecond
+	if interval < minimum {
+		minimum = interval
+	}
+	if interval == minimum {
+		return interval, nil
+	}
+	random, err := cryptorand.Int(
+		cryptorand.Reader,
+		big.NewInt(int64(interval-minimum)+1),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("generate anonymous cookie lease poll jitter: %w", err)
+	}
+	return minimum + time.Duration(random.Int64()), nil
+}
+
+func newAnonymousCookieLeaseRaw(expiresAt time.Time) ([]byte, error) {
+	var ownerBytes [16]byte
+	if _, err := cryptorand.Read(ownerBytes[:]); err != nil {
+		return nil, fmt.Errorf("generate anonymous cookie lease owner: %w", err)
+	}
+	return anonymousCookieLeaseRaw(hex.EncodeToString(ownerBytes[:]), expiresAt)
+}
+
+func anonymousCookieLeaseRaw(owner string, expiresAt time.Time) ([]byte, error) {
+	return json.Marshal(anonymousCookieLeaseRecord{
+		Kind:      "trpc_agent_a2a_anonymous_cookie_lease",
+		Version:   1,
+		Owner:     owner,
+		ExpiresAt: expiresAt.UnixNano(),
+	})
+}
+
+func decodeAnonymousCookieLease(raw []byte) (anonymousCookieLeaseRecord, bool, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return anonymousCookieLeaseRecord{}, false, errors.New("invalid anonymous cookie lease: empty state")
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return anonymousCookieLeaseRecord{}, false, errors.New("invalid anonymous cookie lease: unknown state")
+	}
+	var record anonymousCookieLeaseRecord
+	if err := json.Unmarshal([]byte(trimmed), &record); err != nil {
+		return anonymousCookieLeaseRecord{}, false, fmt.Errorf("decode anonymous cookie lease: %w", err)
+	}
+	if record.Kind != "trpc_agent_a2a_anonymous_cookie_lease" ||
+		record.Version != 1 || record.Owner == "" || record.ExpiresAt <= 0 {
+		return anonymousCookieLeaseRecord{}, false, errors.New("invalid anonymous cookie lease")
+	}
+	return record, true, nil
+}
+
+func newAnonymousCookieLease(
+	ctx context.Context,
+	key session.Key,
+	stateKey string,
+	raw []byte,
+	casService session.SessionStateCASService,
+) (*anonymousCookieLease, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	requestCtx, cancelReq := context.WithCancelCause(ctx)
+	renewCtx, cancelRenew := context.WithCancel(ctx)
+	record, ok, err := decodeAnonymousCookieLease(raw)
+	if err != nil || !ok {
+		if err == nil {
+			err = errors.New("invalid anonymous cookie lease")
+		}
+		cancelReq(err)
+		cancelRenew()
+		return nil, err
+	}
+	lease := &anonymousCookieLease{
+		key:         key,
+		stateKey:    stateKey,
+		casService:  casService,
+		owner:       record.Owner,
+		requestCtx:  requestCtx,
+		cancelReq:   cancelReq,
+		renewCtx:    renewCtx,
+		cancelRenew: cancelRenew,
+		done:        make(chan struct{}),
+		expectedRaw: append([]byte(nil), raw...),
+		expiresAt:   time.Unix(0, record.ExpiresAt),
+	}
+	go lease.renewLoop()
+	return lease, nil
+}
+
+func (l *anonymousCookieLease) renewLoop() {
+	ticker := time.NewTicker(anonymousCookieLeaseRenewInterval)
+	defer ticker.Stop()
+	defer close(l.done)
+	for {
+		select {
+		case <-l.renewCtx.Done():
+			return
+		case <-ticker.C:
+			if err := l.renew(); err != nil {
+				if !errors.Is(err, errAnonymousCookieLeaseLost) {
+					err = fmt.Errorf("%w: %v", errAnonymousCookieLeaseLost, err)
+				}
+				l.mu.Lock()
+				l.lostErr = err
+				l.mu.Unlock()
+				l.cancelReq(err)
+				l.cancelRenew()
+				return
+			}
+		}
+	}
+}
+
+func (l *anonymousCookieLease) renew() error {
+	if err := l.renewCtx.Err(); err != nil {
+		return nil
+	}
+	expected, _, err := l.activeExpectedState()
+	if err != nil {
+		return err
+	}
+	renewedExpiry := time.Now().Add(anonymousCookieLeaseTTL)
+	renewed, err := anonymousCookieLeaseRaw(l.owner, renewedExpiry)
+	if err != nil {
+		return err
+	}
+	swapped, err := l.casService.CompareAndSwapSessionState(
+		l.renewCtx,
+		l.key,
+		session.SessionStateCASRequest{
+			StateKey: l.stateKey,
+			Expected: session.SessionStateCASValue{Exists: true, Value: expected},
+			Desired:  session.SessionStateCASValue{Exists: true, Value: renewed},
+		},
+	)
+	if err != nil {
+		if l.renewCtx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("renew anonymous cookie lease: %w", err)
+	}
+	if !swapped {
+		return errAnonymousCookieLeaseLost
+	}
+	l.mu.Lock()
+	l.expectedRaw = renewed
+	l.expiresAt = renewedExpiry
+	l.mu.Unlock()
+	return nil
+}
+
+func (l *anonymousCookieLease) activeExpectedState() ([]byte, time.Time, error) {
+	if l == nil {
+		return nil, time.Time{}, errAnonymousCookieLeaseLost
+	}
+	l.mu.Lock()
+	expected := append([]byte(nil), l.expectedRaw...)
+	expiresAt := l.expiresAt
+	l.mu.Unlock()
+	if expiresAt.IsZero() {
+		record, ok, err := decodeAnonymousCookieLease(expected)
+		if err != nil || !ok {
+			return nil, time.Time{}, errAnonymousCookieLeaseLost
+		}
+		expiresAt = time.Unix(0, record.ExpiresAt)
+	}
+	if !time.Now().Before(expiresAt) {
+		return nil, expiresAt, errAnonymousCookieLeaseLost
+	}
+	return expected, expiresAt, nil
+}
+
+func (l *anonymousCookieLease) stop() error {
+	l.cancelRenew()
+	<-l.done
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lostErr
+}
+
+func (l *anonymousCookieLease) abort(ctx context.Context) error {
+	l.mu.Lock()
+	expected := append([]byte(nil), l.expectedRaw...)
+	l.mu.Unlock()
+	swapped, err := l.casService.CompareAndSwapSessionState(
+		ctx,
+		l.key,
+		session.SessionStateCASRequest{
+			StateKey: l.stateKey,
+			Expected: session.SessionStateCASValue{Exists: true, Value: expected},
+		},
+	)
+	if err != nil {
+		return err
+	}
+	if !swapped {
+		return errAnonymousCookieLeaseLost
+	}
+	return nil
+}
+
+func (l *anonymousCookieLease) commit(ctx context.Context, cookieValue string) error {
+	expected, _, err := l.activeExpectedState()
+	if err != nil {
+		return err
+	}
+	swapped, err := l.casService.CompareAndSwapSessionState(
+		ctx,
+		l.key,
+		session.SessionStateCASRequest{
+			StateKey: l.stateKey,
+			Expected: session.SessionStateCASValue{Exists: true, Value: expected},
+			Desired:  session.SessionStateCASValue{Exists: true, Value: []byte(cookieValue)},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("commit anonymous cookie lease: %w", err)
+	}
+	if !swapped {
+		return errAnonymousCookieLeaseLost
+	}
+	return nil
 }
 
 func (s *anonymousCookieState) persist(ctx context.Context, cookieValue string) {
@@ -526,6 +1158,9 @@ func (h *anonymousCookieHTTPReqHandler) Handle(
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	release, err := h.acquireInitializationIfNeeded(ctx, req.URL)
 	if err != nil {
 		return nil, err
@@ -533,16 +1168,32 @@ func (h *anonymousCookieHTTPReqHandler) Handle(
 	if release != nil {
 		defer release()
 	}
+	if h.cookie != nil {
+		h.cookie.resetCandidate()
+	}
 	// Session state owns anonymous identity; a shared user-supplied Jar must
 	// not replay another local session's remote principal.
 	requestClient := *httpClient
 	requestClient.Jar = &anonymousCookieJar{
-		ctx:    ctx,
 		base:   httpClient.Jar,
 		cookie: h.cookie,
 		scope:  h.scope,
 	}
-	return requestClient.Do(req.Clone(ctx))
+	requestCtx := ctx
+	if h.cookie != nil {
+		if lease := h.cookie.currentLease(); lease != nil {
+			requestCtx = lease.requestCtx
+		}
+	}
+	resp, requestErr := requestClient.Do(req.Clone(requestCtx))
+	finishErr := h.cookie.finishInitialization(ctx, requestErr)
+	if finishErr != nil {
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		return nil, finishErr
+	}
+	return resp, requestErr
 }
 
 func (h *anonymousCookieHTTPReqHandler) acquireInitializationIfNeeded(
@@ -554,6 +1205,9 @@ func (h *anonymousCookieHTTPReqHandler) acquireInitializationIfNeeded(
 		h.acquireInitialization == nil ||
 		!h.scope.matches(u) {
 		return nil, nil
+	}
+	if err := h.cookie.validateLocalState(); err != nil {
+		return nil, err
 	}
 	if _, ok := h.cookie.load(); ok {
 		return nil, nil
@@ -577,11 +1231,21 @@ func (h *anonymousCookieHTTPReqHandler) acquireInitializationIfNeeded(
 		release()
 		return nil, nil
 	}
+	if h.cookie.casService != nil {
+		owner, err := h.cookie.acquireDistributed(ctx)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		if !owner {
+			release()
+			return nil, nil
+		}
+	}
 	return release, nil
 }
 
 type anonymousCookieJar struct {
-	ctx    context.Context
 	base   http.CookieJar
 	cookie *anonymousCookieState
 	scope  anonymousCookieURLScope
@@ -598,7 +1262,7 @@ func (j *anonymousCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 		}
 		if cookie.Name == anonymousUserIDCookieName {
 			if j.cookie != nil && j.scope.matches(u) {
-				j.cookie.capture(j.ctx, cookie.Value)
+				j.cookie.captureCookie(cookie)
 			}
 			continue
 		}
@@ -621,7 +1285,8 @@ func (j *anonymousCookieJar) Cookies(u *url.URL) []*http.Cookie {
 		}
 	}
 	if j.cookie != nil {
-		if cookieValue, ok := j.cookie.load(); ok && j.scope.matches(u) {
+		cookieValue, ok := j.cookie.load()
+		if ok && j.scope.matches(u) {
 			cookies = append(cookies, &http.Cookie{
 				Name:  anonymousUserIDCookieName,
 				Value: cookieValue,

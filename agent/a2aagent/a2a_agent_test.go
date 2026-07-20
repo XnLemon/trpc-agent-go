@@ -748,6 +748,426 @@ func TestA2AAgent_AnonymousCookieInitializationHonorsContextCancellation(t *test
 	releaseThird()
 }
 
+func TestA2AAgent_AnonymousCookiesCoordinateAcrossInstances(t *testing.T) {
+	const cookieName = anonymousUserIDCookieName
+	var (
+		mu              sync.Mutex
+		receivedCookies []string
+		serverURL       string
+	)
+	firstRequestStarted := make(chan struct{})
+	secondRequestObserved := make(chan struct{})
+	releaseFirstRequest := make(chan struct{})
+	handlerErrs := make(chan error, 1)
+	var firstStartedOnce sync.Once
+	var secondObservedOnce sync.Once
+	reportHandlerError := func(err error) {
+		select {
+		case handlerErrs <- err:
+		default:
+		}
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/agent-card.json" {
+			if err := json.NewEncoder(w).Encode(server.AgentCard{
+				Name: "cross-instance-cookie-agent",
+				URL:  serverURL,
+			}); err != nil {
+				reportHandlerError(fmt.Errorf("encode agent card: %w", err))
+			}
+			return
+		}
+		var rpcRequest struct {
+			ID any `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&rpcRequest); err != nil {
+			reportHandlerError(fmt.Errorf("decode request: %w", err))
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		cookieValue := ""
+		if cookie, err := r.Cookie(cookieName); err == nil {
+			cookieValue = cookie.Value
+		}
+		mu.Lock()
+		receivedCookies = append(receivedCookies, cookieValue)
+		requestNumber := len(receivedCookies)
+		mu.Unlock()
+		if requestNumber == 1 {
+			firstStartedOnce.Do(func() { close(firstRequestStarted) })
+			<-releaseFirstRequest
+		} else {
+			secondObservedOnce.Do(func() { close(secondRequestObserved) })
+		}
+		if cookieValue == "" {
+			cookieValue = anonymousTestCookieValue(1)
+		}
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: cookieValue, Path: "/"})
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct {
+			JSONRPC string           `json:"jsonrpc"`
+			ID      any              `json:"id"`
+			Result  protocol.Message `json:"result"`
+		}{
+			JSONRPC: "2.0",
+			ID:      rpcRequest.ID,
+			Result: protocol.Message{
+				Kind:      protocol.KindMessage,
+				MessageID: "response",
+				Role:      protocol.MessageRoleAgent,
+				Parts:     []protocol.Part{protocol.NewTextPart("ok")},
+			},
+		}); err != nil {
+			reportHandlerError(fmt.Errorf("encode response: %w", err))
+		}
+	}))
+	defer srv.Close()
+	serverURL = srv.URL
+
+	agentA, err := New(WithAgentCardURL(serverURL))
+	require.NoError(t, err)
+	agentB, err := New(WithAgentCardURL(serverURL))
+	require.NoError(t, err)
+
+	service := sessionmemory.NewSessionService()
+	defer service.Close()
+	persistent := &session.Session{AppName: "app", UserID: "local-user", ID: "session-a"}
+	_, err = service.CreateSession(context.Background(), session.Key{
+		AppName: "app", UserID: "local-user", SessionID: "session-a",
+	}, session.StateMap{})
+	require.NoError(t, err)
+	baseInvocation := agent.NewInvocation(
+		agent.WithInvocationSession(persistent),
+		agent.WithInvocationSessionService(service),
+	)
+	newAnonymousInvocation := func(id string, sessionService session.Service) *agent.Invocation {
+		return baseInvocation.Clone(
+			agent.WithInvocationID(id),
+			agent.WithInvocationSession(&session.Session{AppName: "app", ID: "session-a"}),
+			agent.WithInvocationSessionService(sessionService),
+			agent.WithInvocationMessage(model.NewUserMessage("hello")),
+		)
+	}
+	run := func(a *A2AAgent, invocation *agent.Invocation) error {
+		events, err := a.Run(context.Background(), invocation)
+		if err != nil {
+			return err
+		}
+		for evt := range events {
+			if evt != nil && evt.Response != nil && evt.Response.Error != nil {
+				return fmt.Errorf("response error: %v", evt.Response.Error)
+			}
+		}
+		return nil
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- run(agentA, newAnonymousInvocation("first", service)) }()
+	select {
+	case <-firstRequestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first cross-instance request did not start")
+	}
+
+	observedLease := make(chan struct{})
+	secondService := &observingAnonymousCookieLeaseService{
+		Service:  service,
+		cas:      service,
+		stateKey: anonymousCookieStateKey(serverURL),
+		observed: observedLease,
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- run(agentB, newAnonymousInvocation("second", secondService)) }()
+	select {
+	case <-secondRequestObserved:
+		close(releaseFirstRequest)
+		t.Fatal("second cross-instance request bypassed persistent lease")
+	case <-observedLease:
+	case <-time.After(time.Second):
+		close(releaseFirstRequest)
+		t.Fatal("second cross-instance request did not observe persistent lease")
+	}
+	select {
+	case <-secondRequestObserved:
+		close(releaseFirstRequest)
+		t.Fatal("second cross-instance request bypassed persistent lease")
+	default:
+	}
+	close(releaseFirstRequest)
+
+	select {
+	case err := <-firstDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("first cross-instance request did not finish")
+	}
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("second cross-instance request did not finish")
+	}
+	select {
+	case err := <-handlerErrs:
+		require.NoError(t, err)
+	default:
+	}
+	mu.Lock()
+	require.Equal(t, []string{"", anonymousTestCookieValue(1)}, receivedCookies)
+	mu.Unlock()
+
+	persisted, err := service.GetSession(context.Background(), session.Key{
+		AppName: "app", UserID: "local-user", SessionID: "session-a",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	cookie, ok := persisted.GetState(anonymousCookieStateKey(serverURL))
+	require.True(t, ok)
+	require.Equal(t, anonymousTestCookieValue(1), string(cookie))
+}
+
+func TestAnonymousCookieDistributedLeaseExpiresAndFencesStaleOwner(t *testing.T) {
+	ctx := context.Background()
+	service := sessionmemory.NewSessionService()
+	defer service.Close()
+	key := session.Key{AppName: "app", UserID: "local-user", SessionID: "session-a"}
+	_, err := service.CreateSession(ctx, key, session.StateMap{})
+	require.NoError(t, err)
+	stateKey := anonymousCookieStateKey("https://remote.example/a2a")
+	expiredLease, err := anonymousCookieLeaseRaw("stale-owner", time.Now().Add(-time.Second))
+	require.NoError(t, err)
+	swapped, err := service.CompareAndSwapSessionState(ctx, key, session.SessionStateCASRequest{
+		StateKey: stateKey,
+		Desired:  session.SessionStateCASValue{Exists: true, Value: expiredLease},
+	})
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	persistent := &session.Session{AppName: key.AppName, UserID: key.UserID, ID: key.SessionID}
+	winnerState := newAnonymousCookieState(
+		&session.Session{AppName: key.AppName, ID: key.SessionID},
+		persistent,
+		service,
+		stateKey,
+	)
+	owner, err := winnerState.acquireDistributed(ctx)
+	require.NoError(t, err)
+	require.True(t, owner)
+	winnerCookie := anonymousTestCookieValue(2)
+	winnerState.captureCandidate(winnerCookie)
+	require.NoError(t, winnerState.finishInitialization(ctx, nil))
+
+	staleLease := &anonymousCookieLease{
+		key:         key,
+		stateKey:    stateKey,
+		casService:  service,
+		expectedRaw: expiredLease,
+	}
+	err = staleLease.commit(ctx, anonymousTestCookieValue(1))
+	require.ErrorIs(t, err, errAnonymousCookieLeaseLost)
+
+	persisted, err := service.GetSession(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	cookie, ok := persisted.GetState(stateKey)
+	require.True(t, ok)
+	require.Equal(t, winnerCookie, string(cookie))
+}
+
+type observingAnonymousCookieLeaseService struct {
+	session.Service
+	cas      session.SessionStateCASService
+	stateKey string
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (s *observingAnonymousCookieLeaseService) GetSession(
+	ctx context.Context,
+	key session.Key,
+	options ...session.Option,
+) (*session.Session, error) {
+	persisted, err := s.Service.GetSession(ctx, key, options...)
+	if err != nil || persisted == nil {
+		return persisted, err
+	}
+	raw, exists := persisted.GetState(s.stateKey)
+	if !exists {
+		return persisted, nil
+	}
+	record, isLease, decodeErr := decodeAnonymousCookieLease(raw)
+	if decodeErr == nil && isLease && record.ExpiresAt > time.Now().UnixNano() {
+		s.once.Do(func() { close(s.observed) })
+	}
+	return persisted, nil
+}
+
+func (s *observingAnonymousCookieLeaseService) CompareAndSwapSessionState(
+	ctx context.Context,
+	key session.Key,
+	request session.SessionStateCASRequest,
+) (bool, error) {
+	return s.cas.CompareAndSwapSessionState(ctx, key, request)
+}
+
+func TestAnonymousCookieDistributedStateFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "plain unknown state", raw: []byte("unknown")},
+		{name: "present nil state", raw: nil},
+		{name: "present empty state", raw: []byte{}},
+		{name: "malformed lease", raw: []byte(`{"kind":`)},
+		{name: "unknown lease kind", raw: []byte(`{"kind":"other","version":1,"owner":"owner","expiresAtUnixNano":1}`)},
+		{name: "missing lease fields", raw: []byte(`{"kind":"trpc_agent_a2a_anonymous_cookie_lease","version":1}`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			service := sessionmemory.NewSessionService()
+			defer service.Close()
+			key := session.Key{AppName: "app", UserID: "local-user", SessionID: "session-a"}
+			stateKey := anonymousCookieStateKey("https://remote.example/a2a")
+			_, err := service.CreateSession(ctx, key, session.StateMap{stateKey: tc.raw})
+			require.NoError(t, err)
+
+			state := newAnonymousCookieState(
+				&session.Session{AppName: key.AppName, ID: key.SessionID},
+				&session.Session{AppName: key.AppName, UserID: key.UserID, ID: key.SessionID},
+				service,
+				stateKey,
+			)
+			owner, err := state.acquireDistributed(ctx)
+			require.Error(t, err)
+			require.False(t, owner)
+
+			persisted, err := service.GetSession(ctx, key)
+			require.NoError(t, err)
+			actual, exists := persisted.GetState(stateKey)
+			require.True(t, exists)
+			require.Equal(t, tc.raw, actual)
+		})
+	}
+}
+
+func TestAnonymousCookieExpiredOwnerCannotRenewOrCommit(t *testing.T) {
+	ctx := context.Background()
+	service := sessionmemory.NewSessionService()
+	defer service.Close()
+	key := session.Key{AppName: "app", UserID: "local-user", SessionID: "session-a"}
+	stateKey := anonymousCookieStateKey("https://remote.example/a2a")
+	expiresAt := time.Now().Add(-time.Second)
+	raw, err := anonymousCookieLeaseRaw("expired-owner", expiresAt)
+	require.NoError(t, err)
+	_, err = service.CreateSession(ctx, key, session.StateMap{stateKey: raw})
+	require.NoError(t, err)
+
+	lease := &anonymousCookieLease{
+		key:         key,
+		stateKey:    stateKey,
+		casService:  service,
+		owner:       "expired-owner",
+		renewCtx:    context.Background(),
+		expectedRaw: raw,
+		expiresAt:   expiresAt,
+	}
+	require.ErrorIs(t, lease.renew(), errAnonymousCookieLeaseLost)
+	require.ErrorIs(
+		t,
+		lease.commit(ctx, anonymousTestCookieValue(1)),
+		errAnonymousCookieLeaseLost,
+	)
+
+	persisted, err := service.GetSession(ctx, key)
+	require.NoError(t, err)
+	actual, exists := persisted.GetState(stateKey)
+	require.True(t, exists)
+	require.Equal(t, raw, actual)
+}
+
+func TestAnonymousCookieDistributedLeaseWaitHonorsCancellation(t *testing.T) {
+	service := sessionmemory.NewSessionService()
+	defer service.Close()
+	key := session.Key{AppName: "app", UserID: "local-user", SessionID: "session-a"}
+	_, err := service.CreateSession(context.Background(), key, session.StateMap{})
+	require.NoError(t, err)
+	stateKey := anonymousCookieStateKey("https://remote.example/a2a")
+	activeLease, err := anonymousCookieLeaseRaw("active-owner", time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	swapped, err := service.CompareAndSwapSessionState(
+		context.Background(),
+		key,
+		session.SessionStateCASRequest{
+			StateKey: stateKey,
+			Desired:  session.SessionStateCASValue{Exists: true, Value: activeLease},
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, swapped)
+
+	state := newAnonymousCookieState(
+		&session.Session{AppName: key.AppName, ID: key.SessionID},
+		&session.Session{AppName: key.AppName, UserID: key.UserID, ID: key.SessionID},
+		service,
+		stateKey,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	owner, err := state.acquireDistributed(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.False(t, owner)
+}
+
+func TestAnonymousCookieDistributedLeaseRenewsOwnedValue(t *testing.T) {
+	ctx := context.Background()
+	service := sessionmemory.NewSessionService()
+	defer service.Close()
+	key := session.Key{AppName: "app", UserID: "local-user", SessionID: "session-a"}
+	_, err := service.CreateSession(ctx, key, session.StateMap{})
+	require.NoError(t, err)
+	stateKey := anonymousCookieStateKey("https://remote.example/a2a")
+	state := newAnonymousCookieState(
+		&session.Session{AppName: key.AppName, ID: key.SessionID},
+		&session.Session{AppName: key.AppName, UserID: key.UserID, ID: key.SessionID},
+		service,
+		stateKey,
+	)
+	owner, err := state.acquireDistributed(ctx)
+	require.NoError(t, err)
+	require.True(t, owner)
+	lease := state.currentLease()
+	require.NotNil(t, lease)
+	lease.mu.Lock()
+	before := append([]byte(nil), lease.expectedRaw...)
+	lease.mu.Unlock()
+	beforeRecord, ok, err := decodeAnonymousCookieLease(before)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, lease.renew())
+	lease.mu.Lock()
+	after := append([]byte(nil), lease.expectedRaw...)
+	lease.mu.Unlock()
+	afterRecord, ok, err := decodeAnonymousCookieLease(after)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, beforeRecord.Owner, afterRecord.Owner)
+	require.GreaterOrEqual(t, afterRecord.ExpiresAt, beforeRecord.ExpiresAt)
+
+	persisted, err := service.GetSession(ctx, key)
+	require.NoError(t, err)
+	raw, exists := persisted.GetState(stateKey)
+	require.True(t, exists)
+	require.Equal(t, after, raw)
+	state.captureCandidate(anonymousTestCookieValue(9))
+	require.NoError(t, state.finishInitialization(ctx, nil))
+	owner, err = state.acquireDistributed(ctx)
+	require.NoError(t, err)
+	require.False(t, owner)
+}
+
 func assertAnonymousCookieNotInEvents(
 	t *testing.T,
 	cookieStateKey string,
@@ -1497,6 +1917,7 @@ func TestAnonymousCookieJarDoesNotReplayOrCaptureOutsideRemoteScope(t *testing.T
 		Name:  anonymousUserIDCookieName,
 		Value: anonymousTestCookieValue(5),
 	}})
+	require.NoError(t, state.finishInitialization(context.Background(), nil))
 	captured, ok := state.load()
 	require.True(t, ok)
 	require.Equal(t, anonymousTestCookieValue(5), captured)
@@ -1584,6 +2005,10 @@ func TestAnonymousCookieJarHandlesCookieBoundaries(t *testing.T) {
 		Name:  anonymousUserIDCookieName,
 		Value: anonymousTestCookieValue(1),
 	}})
+	for _, cookie := range jar.Cookies(remoteURL) {
+		require.NotEqual(t, anonymousUserIDCookieName, cookie.Name)
+	}
+	require.NoError(t, state.finishInitialization(context.Background(), nil))
 	captured, ok := state.load()
 	require.True(t, ok)
 	require.Equal(t, anonymousTestCookieValue(1), captured)
@@ -1612,6 +2037,95 @@ func TestAnonymousCookieJarHandlesCookieBoundaries(t *testing.T) {
 		seen[cookie.Name] = cookie.Value
 	}
 	require.Equal(t, map[string]string{"other_cookie": "updated"}, seen)
+}
+
+func TestAnonymousCookieJarRejectsInvalidIdentityResponses(t *testing.T) {
+	remoteURL, err := url.Parse("https://example.com/a2a")
+	require.NoError(t, err)
+	tests := []struct {
+		name    string
+		cookies []*http.Cookie
+	}{
+		{
+			name: "invalid value",
+			cookies: []*http.Cookie{{
+				Name:  anonymousUserIDCookieName,
+				Value: "invalid",
+			}},
+		},
+		{
+			name: "deletion",
+			cookies: []*http.Cookie{{
+				Name:   anonymousUserIDCookieName,
+				Value:  anonymousTestCookieValue(1),
+				MaxAge: -1,
+			}},
+		},
+		{
+			name: "conflicting values",
+			cookies: []*http.Cookie{
+				{Name: anonymousUserIDCookieName, Value: anonymousTestCookieValue(1)},
+				{Name: anonymousUserIDCookieName, Value: anonymousTestCookieValue(2)},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newAnonymousCookieState(
+				&session.Session{},
+				nil,
+				nil,
+				anonymousCookieStateKey(remoteURL.String()),
+			)
+			jar := &anonymousCookieJar{
+				cookie: state,
+				scope:  anonymousCookieURLScopeFromAgentURL(remoteURL.String()),
+			}
+			jar.SetCookies(remoteURL, tc.cookies)
+			require.Error(t, state.finishInitialization(context.Background(), nil))
+			_, exists := state.session.GetState(state.key)
+			require.False(t, exists)
+		})
+	}
+}
+
+func TestAnonymousCookieCandidateIsNotReplayedDuringRedirect(t *testing.T) {
+	var redirectedCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.SetCookie(w, &http.Cookie{
+				Name:  anonymousUserIDCookieName,
+				Value: anonymousTestCookieValue(7),
+			})
+			http.Redirect(w, r, "/next", http.StatusFound)
+			return
+		}
+		if cookie, err := r.Cookie(anonymousUserIDCookieName); err == nil {
+			redirectedCookie = cookie.Value
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	state := newAnonymousCookieState(
+		&session.Session{},
+		nil,
+		nil,
+		anonymousCookieStateKey(srv.URL),
+	)
+	handler := &anonymousCookieHTTPReqHandler{
+		cookie: state,
+		scope:  anonymousCookieURLScopeFromAgentURL(srv.URL),
+	}
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/start", nil)
+	require.NoError(t, err)
+	resp, err := handler.Handle(context.Background(), &http.Client{}, req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Empty(t, redirectedCookie)
+	cookie, ok := state.load()
+	require.True(t, ok)
+	require.Equal(t, anonymousTestCookieValue(7), cookie)
 }
 
 func TestAnonymousCookieRequestHandlerBoundaries(t *testing.T) {
