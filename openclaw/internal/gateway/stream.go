@@ -331,7 +331,7 @@ func (s *Server) handleMessagesStream(
 	if err := s.decodeJSON(r, &req); err != nil {
 		s.writeError(w, gwproto.APIError{
 			Type:    errTypeInvalidRequest,
-			Message: err.Error(),
+			Message: redactErrorText(err.Error()),
 		}, http.StatusBadRequest)
 		return
 	}
@@ -437,9 +437,10 @@ func (s *Server) streamLocked(
 
 	ctx, runOpts, err := s.resolveRunOptions(ctx, run)
 	if err != nil {
+		errMsg := redactErrorText(err.Error())
 		apiErr := gwproto.APIError{
 			Type:    errTypeInternal,
-			Message: err.Error(),
+			Message: errMsg,
 		}
 		_ = sendStreamEvent(ctx, out, gwproto.StreamEvent{
 			Type:      gwproto.StreamEventTypeRunError,
@@ -449,7 +450,7 @@ func (s *Server) streamLocked(
 		})
 		return streamOutcome{
 			status: traceStatusError,
-			errMsg: err.Error(),
+			errMsg: errMsg,
 		}
 	}
 	recordRuntimeProfile(debugrecorder.TraceFromContext(ctx), ctx)
@@ -461,9 +462,10 @@ func (s *Server) streamLocked(
 		runOpts...,
 	)
 	if err != nil {
+		errMsg := redactErrorText(err.Error())
 		apiErr := gwproto.APIError{
 			Type:    errTypeInternal,
-			Message: err.Error(),
+			Message: errMsg,
 		}
 		_ = sendStreamEvent(ctx, out, gwproto.StreamEvent{
 			Type:      gwproto.StreamEventTypeRunError,
@@ -473,7 +475,7 @@ func (s *Server) streamLocked(
 		})
 		return streamOutcome{
 			status: traceStatusError,
-			errMsg: err.Error(),
+			errMsg: errMsg,
 		}
 	}
 
@@ -642,9 +644,10 @@ func (s *Server) streamLocked(
 				errMsg: context.Canceled.Error(),
 			}
 		}
+		errMsg := redactErrorText(result.Error.Error())
 		apiErr := gwproto.APIError{
 			Type:    errTypeInternal,
-			Message: result.Error.Error(),
+			Message: errMsg,
 		}
 		_ = sendStreamEvent(ctx, out, gwproto.StreamEvent{
 			Type:      gwproto.StreamEventTypeRunError,
@@ -657,7 +660,7 @@ func (s *Server) streamLocked(
 		})
 		return streamOutcome{
 			status: traceStatusError,
-			errMsg: result.Error.Error(),
+			errMsg: errMsg,
 		}
 	}
 
@@ -1777,8 +1780,8 @@ func apiErrorFromEvent(evt *event.Event) *gwproto.APIError {
 		errType = errTypeInternal
 	}
 	return &gwproto.APIError{
-		Type:    errType,
-		Message: evt.Error.Message,
+		Type:    redactErrorText(errType),
+		Message: redactErrorText(evt.Error.Message),
 	}
 }
 

@@ -136,7 +136,7 @@ func (s *Server) ProcessMessage(
 						"session_id": prepared.sessionID,
 						"request_id": resolvedRequestID,
 						"reply":      reply,
-						"warning":    err.Error(),
+						"warning":    redactErrorText(err.Error()),
 					},
 				)
 			}
@@ -149,14 +149,14 @@ func (s *Server) ProcessMessage(
 				debugrecorder.KindGatewayRsp,
 				map[string]any{
 					"status": http.StatusInternalServerError,
-					"error":  err.Error(),
+					"error":  redactErrorText(err.Error()),
 				},
 			)
 		}
 		return gwproto.MessageResponse{
 			Error: &gwproto.APIError{
 				Type:    errTypeInternal,
-				Message: err.Error(),
+				Message: redactErrorText(err.Error()),
 			},
 		}, http.StatusInternalServerError
 	}
@@ -203,7 +203,7 @@ func (s *Server) prepareMessageRun(
 		rsp := gwproto.MessageResponse{
 			Error: &gwproto.APIError{
 				Type:    errTypeInvalidRequest,
-				Message: err.Error(),
+				Message: redactErrorText(err.Error()),
 			},
 		}
 		return preparedMessageRun{}, &rsp, http.StatusBadRequest
@@ -264,7 +264,7 @@ func (s *Server) prepareMessageRun(
 			rsp := gwproto.MessageResponse{
 				Error: &gwproto.APIError{
 					Type:    errTypeInvalidRequest,
-					Message: err.Error(),
+					Message: redactErrorText(err.Error()),
 				},
 			}
 			return preparedMessageRun{}, &rsp, http.StatusBadRequest

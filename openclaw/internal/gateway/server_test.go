@@ -2063,7 +2063,7 @@ func TestServer_ProcessMessage_SessionIDFuncError(t *testing.T) {
 func TestServer_ProcessMessage_RunError(t *testing.T) {
 	t.Parallel()
 
-	r := &staticRunner{err: errors.New("runner boom")}
+	r := &staticRunner{err: errors.New(sensitiveGatewayErrorMessage())}
 	srv, err := New(r)
 	require.NoError(t, err)
 
@@ -2078,6 +2078,7 @@ func TestServer_ProcessMessage_RunError(t *testing.T) {
 	require.NotNil(t, rsp.Error)
 	require.Equal(t, errTypeInternal, rsp.Error.Type)
 	require.Contains(t, rsp.Error.Message, "runner boom")
+	requireGatewayErrorMessageRedacted(t, rsp.Error.Message)
 }
 
 func TestServer_New_RequireMentionWithoutPatterns(t *testing.T) {
@@ -3113,7 +3114,7 @@ func TestServer_StreamMessage_Success(t *testing.T) {
 func TestServer_StreamMessage_RunError(t *testing.T) {
 	t.Parallel()
 
-	srv, err := New(&staticRunner{err: errors.New("boom")})
+	srv, err := New(&staticRunner{err: errors.New(sensitiveGatewayErrorMessage())})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(
@@ -3152,7 +3153,8 @@ func TestServer_StreamMessage_RunError(t *testing.T) {
 		events[2].Type,
 	)
 	require.NotNil(t, events[2].Error)
-	require.Equal(t, "boom", events[2].Error.Message)
+	require.Contains(t, events[2].Error.Message, "runner boom")
+	requireGatewayErrorMessageRedacted(t, events[2].Error.Message)
 }
 
 func TestServer_StreamMessage_RunOptionResolverError(t *testing.T) {
@@ -5407,7 +5409,7 @@ func TestServer_StreamMessage_APIErrorEvent(t *testing.T) {
 			Response: &model.Response{
 				Error: &model.ResponseError{
 					Type:    errTypeUnauthorized,
-					Message: "no access",
+					Message: sensitiveGatewayErrorMessage(),
 				},
 			},
 			RequestID: "req-1",
@@ -5431,7 +5433,22 @@ func TestServer_StreamMessage_APIErrorEvent(t *testing.T) {
 	)
 	require.NotNil(t, events[2].Error)
 	require.Equal(t, errTypeUnauthorized, events[2].Error.Type)
-	require.Equal(t, "no access", events[2].Error.Message)
+	require.Contains(t, events[2].Error.Message, "runner boom")
+	requireGatewayErrorMessageRedacted(t, events[2].Error.Message)
+}
+
+func sensitiveGatewayErrorMessage() string {
+	return "runner boom Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie"
+}
+
+func requireGatewayErrorMessageRedacted(t *testing.T, message string) {
+	t.Helper()
+	require.NotContains(t, message, "raw-token")
+	require.NotContains(t, message, "sk-testsecret")
+	require.NotContains(t, message, "raw-secret")
+	require.NotContains(t, message, "raw-password")
+	require.NotContains(t, message, "raw-cookie")
+	require.Contains(t, message, "****")
 }
 
 func TestServer_StreamLocked_SendFailures(t *testing.T) {

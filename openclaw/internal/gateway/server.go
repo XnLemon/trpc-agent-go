@@ -376,7 +376,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if err := s.decodeJSON(r, &req); err != nil {
 		s.writeError(w, gwproto.APIError{
 			Type:    errTypeInvalidRequest,
-			Message: err.Error(),
+			Message: redactErrorText(err.Error()),
 		}, http.StatusBadRequest)
 		return
 	}
@@ -402,7 +402,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if err := s.decodeJSON(r, &req); err != nil {
 		s.writeError(w, gwproto.APIError{
 			Type:    errTypeInvalidRequest,
-			Message: err.Error(),
+			Message: redactErrorText(err.Error()),
 		}, http.StatusBadRequest)
 		return
 	}
@@ -480,9 +480,13 @@ func (s *Server) writeError(
 ) {
 	s.writeJSON(
 		w,
-		gwproto.MessageResponse{Error: &err},
+		gwproto.MessageResponse{Error: ptrAPIError(redactGatewayAPIError(err))},
 		status,
 	)
+}
+
+func ptrAPIError(err gwproto.APIError) *gwproto.APIError {
+	return &err
 }
 
 func (s *Server) run(
@@ -555,7 +559,7 @@ func (s *Server) runLocked(
 		if trace != nil {
 			_ = trace.RecordError(result.Error)
 		}
-		return "", result.RequestID, cloneGatewayUsage(result.Usage), result.Error
+		return "", result.RequestID, cloneGatewayUsage(result.Usage), errors.New(redactErrorText(result.Error.Error()))
 	}
 	if result.Text == "" {
 		if trace != nil {

@@ -506,7 +506,7 @@ func formatError(err error, errorType string) *openAIError {
 	}
 	return &openAIError{
 		Error: openAIErrorDetail{
-			Message: err.Error(),
+			Message: redactErrorText(err.Error()),
 			Type:    errorType,
 		},
 	}
