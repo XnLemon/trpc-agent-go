@@ -12,6 +12,7 @@ package externalization
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -633,6 +634,10 @@ func TestAppendEventFailureKeepsSavedArtifactsWhenPersistenceUnknown(t *testing.
 func TestWrapPreservesOptionalInterfaces(t *testing.T) {
 	inner := sessionmem.NewSessionService()
 	wrapped := Wrap(inner, artifactmem.NewService(), Config{Enabled: true})
+	stateInitializer, ok := wrapped.(session.StateInitializationService)
+	if !ok {
+		t.Fatal("wrapped inmemory service does not implement StateInitializationService")
+	}
 	if _, ok := wrapped.(session.TrackService); !ok {
 		t.Fatal("wrapped inmemory service does not implement TrackService")
 	}
@@ -645,9 +650,28 @@ func TestWrapPreservesOptionalInterfaces(t *testing.T) {
 
 	ctx := context.Background()
 	key := session.Key{AppName: "app", UserID: "user", SessionID: "sess"}
+	if _, err := wrapped.CreateSession(ctx, key, nil); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	value, didInitialize, err := stateInitializer.LoadOrInitializeSessionState(
+		ctx,
+		key,
+		"principal",
+		func(context.Context) ([]byte, error) { return []byte("principal-1"), nil },
+	)
+	if err != nil {
+		t.Fatalf("LoadOrInitializeSessionState() error = %v", err)
+	}
+	if !didInitialize || string(value) != "principal-1" {
+		t.Fatalf(
+			"LoadOrInitializeSessionState() = (%q, %v), want (principal-1, true)",
+			value,
+			didInitialize,
+		)
+	}
 	artifacts := artifactmem.NewService()
 	const artifactName = "sessionpart_search.png"
-	_, err := artifacts.SaveArtifact(ctx, artifactSessionInfo(key), artifactName, &artifact.Artifact{
+	_, err = artifacts.SaveArtifact(ctx, artifactSessionInfo(key), artifactName, &artifact.Artifact{
 		Data:     []byte("search-image"),
 		MimeType: "image/png",
 	})
@@ -678,6 +702,9 @@ func TestWrapPreservesOptionalInterfaces(t *testing.T) {
 	}
 	if _, ok := searchWrapped.(session.TrackService); ok {
 		t.Fatal("wrapped search-only service unexpectedly implements TrackService")
+	}
+	if _, ok := searchWrapped.(session.StateInitializationService); ok {
+		t.Fatal("wrapped search-only service unexpectedly implements StateInitializationService")
 	}
 	results, err := searchable.SearchEvents(ctx, session.EventSearchRequest{
 		UserKey: session.UserKey{AppName: key.AppName, UserID: key.UserID},
@@ -799,6 +826,153 @@ func TestWrapOptionalInterfaceCombinationMethods(t *testing.T) {
 				if err := track.AppendTrackEvent(ctx, &session.Session{}, &session.TrackEvent{Track: "trace"}); err != nil {
 					t.Fatalf("AppendTrackEvent() error = %v", err)
 				}
+			}
+		})
+	}
+}
+
+func TestWrapPreservesStateInitializationInterfaceCombinations(t *testing.T) {
+	base := sessionmem.NewSessionService()
+	t.Cleanup(func() {
+		if err := base.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+	stateInitializer := session.StateInitializationService(base)
+	searchable := session.SearchableService(&searchOnlyService{Service: base})
+	window := session.WindowService(base)
+	track := session.TrackService(base)
+
+	tests := []struct {
+		name       string
+		inner      session.Service
+		wantSearch bool
+		wantWindow bool
+		wantTrack  bool
+	}{
+		{
+			name: "state initialization",
+			inner: &struct {
+				session.Service
+				session.StateInitializationService
+			}{base, stateInitializer},
+		},
+		{
+			name:       "search state initialization",
+			wantSearch: true,
+			inner: &struct {
+				session.Service
+				session.SearchableService
+				session.StateInitializationService
+			}{base, searchable, stateInitializer},
+		},
+		{
+			name:       "window state initialization",
+			wantWindow: true,
+			inner: &struct {
+				session.Service
+				session.WindowService
+				session.StateInitializationService
+			}{base, window, stateInitializer},
+		},
+		{
+			name:      "track state initialization",
+			wantTrack: true,
+			inner: &struct {
+				session.Service
+				session.TrackService
+				session.StateInitializationService
+			}{base, track, stateInitializer},
+		},
+		{
+			name:       "search window state initialization",
+			wantSearch: true,
+			wantWindow: true,
+			inner: &struct {
+				session.Service
+				session.SearchableService
+				session.WindowService
+				session.StateInitializationService
+			}{base, searchable, window, stateInitializer},
+		},
+		{
+			name:       "search track state initialization",
+			wantSearch: true,
+			wantTrack:  true,
+			inner: &struct {
+				session.Service
+				session.SearchableService
+				session.TrackService
+				session.StateInitializationService
+			}{base, searchable, track, stateInitializer},
+		},
+		{
+			name:       "window track state initialization",
+			wantWindow: true,
+			wantTrack:  true,
+			inner: &struct {
+				session.Service
+				session.WindowService
+				session.TrackService
+				session.StateInitializationService
+			}{base, window, track, stateInitializer},
+		},
+		{
+			name:       "all optional interfaces",
+			wantSearch: true,
+			wantWindow: true,
+			wantTrack:  true,
+			inner: &struct {
+				session.Service
+				session.SearchableService
+				session.WindowService
+				session.TrackService
+				session.StateInitializationService
+			}{base, searchable, window, track, stateInitializer},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := Wrap(tt.inner, artifactmem.NewService(), Config{Enabled: true})
+			initializer, ok := wrapped.(session.StateInitializationService)
+			if !ok {
+				t.Fatal("wrapped service does not implement StateInitializationService")
+			}
+			if _, ok := wrapped.(session.SearchableService); ok != tt.wantSearch {
+				t.Fatalf("SearchableService ok = %v, want %v", ok, tt.wantSearch)
+			}
+			if _, ok := wrapped.(session.WindowService); ok != tt.wantWindow {
+				t.Fatalf("WindowService ok = %v, want %v", ok, tt.wantWindow)
+			}
+			if _, ok := wrapped.(session.TrackService); ok != tt.wantTrack {
+				t.Fatalf("TrackService ok = %v, want %v", ok, tt.wantTrack)
+			}
+
+			key := session.Key{
+				AppName:   "optional-app",
+				UserID:    "optional-user",
+				SessionID: fmt.Sprintf("optional-session-%d", i),
+			}
+			if _, err := wrapped.CreateSession(context.Background(), key, nil); err != nil {
+				t.Fatalf("CreateSession() error = %v", err)
+			}
+			value, didInitialize, err := initializer.LoadOrInitializeSessionState(
+				context.Background(),
+				key,
+				"principal",
+				func(context.Context) ([]byte, error) { return []byte(tt.name), nil },
+			)
+			if err != nil {
+				t.Fatalf("LoadOrInitializeSessionState() error = %v", err)
+			}
+			if !didInitialize || string(value) != tt.name {
+				t.Fatalf(
+					"LoadOrInitializeSessionState() = (%q, %v), want (%q, true)",
+					value,
+					didInitialize,
+					tt.name,
+				)
 			}
 		})
 	}

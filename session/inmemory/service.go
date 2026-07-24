@@ -39,9 +39,10 @@ type sessionWithTTL struct {
 }
 
 var (
-	_ session.Service       = (*SessionService)(nil)
-	_ session.TrackService  = (*SessionService)(nil)
-	_ session.WindowService = (*SessionService)(nil)
+	_ session.Service                    = (*SessionService)(nil)
+	_ session.StateInitializationService = (*SessionService)(nil)
+	_ session.TrackService               = (*SessionService)(nil)
+	_ session.WindowService              = (*SessionService)(nil)
 )
 
 // isExpired checks if the given time has passed.
@@ -179,14 +180,16 @@ func newAppSessions() *appSessions {
 
 // SessionService provides an in-memory implementation of SessionService.
 type SessionService struct {
-	mu            sync.RWMutex
-	apps          map[string]*appSessions
-	opts          serviceOpts
-	cleanupTicker *time.Ticker
-	cleanupDone   chan struct{}
-	cleanupOnce   sync.Once
-	asyncWorker   *isummary.AsyncSummaryWorker
-	once          sync.Once // ensure Close is called only once
+	mu                    sync.RWMutex
+	apps                  map[string]*appSessions
+	stateInitializationMu sync.Mutex
+	stateInitializations  map[stateInitializationKey]*stateInitialization
+	opts                  serviceOpts
+	cleanupTicker         *time.Ticker
+	cleanupDone           chan struct{}
+	cleanupOnce           sync.Once
+	asyncWorker           *isummary.AsyncSummaryWorker
+	once                  sync.Once // ensure Close is called only once
 }
 
 // NewSessionService creates a new in-memory session service.
@@ -204,9 +207,10 @@ func NewSessionService(options ...ServiceOpt) *SessionService {
 	}
 
 	s := &SessionService{
-		apps:        make(map[string]*appSessions),
-		opts:        opts,
-		cleanupDone: make(chan struct{}),
+		apps:                 make(map[string]*appSessions),
+		stateInitializations: make(map[stateInitializationKey]*stateInitialization),
+		opts:                 opts,
+		cleanupDone:          make(chan struct{}),
 	}
 
 	// Start automatic cleanup if cleanup interval is configured and auto cleanup is not disabled

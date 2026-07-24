@@ -1044,6 +1044,46 @@ type WindowService interface {
 	) (*EventWindow, error)
 }
 
+// StateInitializationService is an optional capability implemented by session
+// services that coordinate initialization of individual session-state values.
+// Coordination applies to callers sharing the same backing store.
+type StateInitializationService interface {
+	// LoadOrInitializeSessionState returns the persisted value for stateKey.
+	//
+	// If stateKey is already present, initialize is not called and
+	// didInitialize is false. If stateKey is absent, the service coordinates
+	// concurrent calls so that only the current owner calls initialize. Other
+	// calls wait for a persisted value or until they can become the owner after
+	// an unsuccessful initialization. Each call invokes initialize at most once.
+	//
+	// The service calls initialize outside storage transactions and locks that
+	// block unrelated operations. A successful return guarantees that value is
+	// persisted. didInitialize is true only when this call produced and
+	// committed value. Implementations must not retain the callback's byte slice
+	// and must return a caller-owned byte slice. A present nil or empty value is
+	// already initialized, and a nil or empty value returned by initialize is
+	// persisted as a present value.
+	//
+	// The context passed to initialize is derived from ctx and is valid only for
+	// the callback. If initialize returns an error or context cancellation is
+	// observed before commit, the service does not write the value. If a call
+	// runs initialize but loses the right to commit, it returns an error instead
+	// of retrying initialize or returning a competing value. A panic from
+	// initialize is propagated after the service releases the initialization
+	// ownership. Remote or other external side effects caused by initialize are
+	// not guaranteed to occur exactly once.
+	//
+	// initialize must not be nil. stateKey follows the same key rules as
+	// Service.UpdateSessionState. initialize must not recursively initialize the
+	// same session and state key through this service.
+	LoadOrInitializeSessionState(
+		ctx context.Context,
+		key Key,
+		stateKey string,
+		initialize func(context.Context) ([]byte, error),
+	) (value []byte, didInitialize bool, err error)
+}
+
 // Service is the interface that all session services must implement.
 type Service interface {
 	// CreateSession creates a new session.
