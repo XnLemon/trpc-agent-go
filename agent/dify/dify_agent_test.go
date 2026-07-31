@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/cloudernative/dify-sdk-go"
@@ -535,7 +536,12 @@ func TestDifyAgent_SendErrorEvent(t *testing.T) {
 	}
 
 	eventChan := make(chan *event.Event, 1)
-	difyAgent.sendErrorEvent(context.Background(), eventChan, invocation, "test error message")
+	difyAgent.sendErrorEvent(
+		context.Background(),
+		eventChan,
+		invocation,
+		"request failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+	)
 	close(eventChan)
 
 	evt := <-eventChan
@@ -548,14 +554,82 @@ func TestDifyAgent_SendErrorEvent(t *testing.T) {
 	if evt.Response.Error == nil {
 		t.Fatal("expected error in response")
 	}
-	if evt.Response.Error.Message != "test error message" {
-		t.Errorf("expected error message 'test error message', got: %s", evt.Response.Error.Message)
+	message := evt.Response.Error.Message
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		if strings.Contains(message, secret) {
+			t.Errorf("expected error message to redact %q, got: %s", secret, message)
+		}
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		if !strings.Contains(message, redacted) {
+			t.Errorf("expected error message to contain %q, got: %s", redacted, message)
+		}
 	}
 	if evt.Author != "test-agent" {
 		t.Errorf("expected author 'test-agent', got: %s", evt.Author)
 	}
 	if evt.InvocationID != "test-inv" {
 		t.Errorf("expected invocation ID 'test-inv', got: %s", evt.InvocationID)
+	}
+}
+
+func TestDifyAgent_SendErrorEvent_RedactsSecretFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    string
+		secret     string
+		redacted   string
+		shouldKeep string
+	}{
+		{
+			name:     "token",
+			message:  "provider failed token=raw-token",
+			secret:   "raw-token",
+			redacted: "token=****",
+		},
+		{
+			name:     "secret",
+			message:  "provider failed secret=sk-secret-value",
+			secret:   "sk-secret-value",
+			redacted: "secret=****",
+		},
+		{
+			name:     "password",
+			message:  "provider failed password=plain",
+			secret:   "plain",
+			redacted: "password=****",
+		},
+		{
+			name:       "benign token text",
+			message:    "token limit exceeded",
+			shouldKeep: "token limit exceeded",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			difyAgent := &DifyAgent{name: "test-agent"}
+			invocation := &agent.Invocation{InvocationID: "test-inv"}
+			eventChan := make(chan *event.Event, 1)
+
+			difyAgent.sendErrorEvent(context.Background(), eventChan, invocation, tt.message)
+			close(eventChan)
+
+			evt := <-eventChan
+			if evt == nil || evt.Response == nil || evt.Response.Error == nil {
+				t.Fatal("expected response error")
+			}
+			message := evt.Response.Error.Message
+			if tt.secret != "" && strings.Contains(message, tt.secret) {
+				t.Errorf("expected error message to redact %q, got: %s", tt.secret, message)
+			}
+			if tt.redacted != "" && !strings.Contains(message, tt.redacted) {
+				t.Errorf("expected error message to contain %q, got: %s", tt.redacted, message)
+			}
+			if tt.shouldKeep != "" && message != tt.shouldKeep {
+				t.Errorf("expected error message %q, got: %s", tt.shouldKeep, message)
+			}
+		})
 	}
 }
 
@@ -1129,7 +1203,12 @@ func TestDifyAgent_HelperFunctions(t *testing.T) {
 
 		eventChan := make(chan *event.Event, 1)
 
-		difyAgent.sendErrorEvent(context.Background(), eventChan, invocation, "test error message")
+		difyAgent.sendErrorEvent(
+			context.Background(),
+			eventChan,
+			invocation,
+			"request failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def",
+		)
 		close(eventChan)
 
 		evt := <-eventChan
@@ -1139,8 +1218,16 @@ func TestDifyAgent_HelperFunctions(t *testing.T) {
 		if evt.Response == nil || evt.Response.Error == nil {
 			t.Error("Expected error in response")
 		}
-		if evt.Response.Error.Message != "test error message" {
-			t.Errorf("Expected error message 'test error message', got: %s", evt.Response.Error.Message)
+		message := evt.Response.Error.Message
+		for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+			if strings.Contains(message, secret) {
+				t.Errorf("expected error message to redact %q, got: %s", secret, message)
+			}
+		}
+		for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+			if !strings.Contains(message, redacted) {
+				t.Errorf("expected error message to contain %q, got: %s", redacted, message)
+			}
 		}
 	})
 }
