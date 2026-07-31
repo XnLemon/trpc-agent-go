@@ -33,6 +33,7 @@ import (
 	itrace "trpc.group/trpc-go/trpc-agent-go/internal/trace"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -155,6 +156,7 @@ func (r *A2AAgent) sendErrorEvent(
 	err error,
 ) *model.ResponseError {
 	respErr := model.ResponseErrorFromError(err, model.ErrorTypeRunError)
+	redactAgentResponseError(respErr)
 	agent.EmitEvent(ctx, invocation, eventChan, event.New(
 		invocation.InvocationID,
 		r.name,
@@ -164,6 +166,17 @@ func (r *A2AAgent) sendErrorEvent(
 		}),
 	))
 	return respErr
+}
+
+func redactAgentResponseError(respErr *model.ResponseError) {
+	if respErr == nil {
+		return
+	}
+	redactor, err := platform.NewRedactor()
+	if err != nil {
+		return
+	}
+	respErr.Message = redactor.Redact(respErr.Message)
 }
 
 // validateA2ARequestOptions validates that all A2A request options are of the correct type

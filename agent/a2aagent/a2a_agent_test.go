@@ -2914,6 +2914,33 @@ func TestA2AAgent_sendErrorEvent_UsesRunErrorType(t *testing.T) {
 	require.Equal(t, evt.Response.Error, respErr)
 }
 
+func TestA2AAgent_sendErrorEvent_RedactsSensitiveMessage(t *testing.T) {
+	a := &A2AAgent{name: "remote-agent"}
+	eventCh := make(chan *event.Event, 1)
+	invocation := &agent.Invocation{InvocationID: "inv-test"}
+
+	respErr := a.sendErrorEvent(
+		context.Background(),
+		eventCh,
+		invocation,
+		fmt.Errorf("request failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"),
+	)
+
+	require.NotNil(t, respErr)
+	require.Equal(t, model.ErrorTypeRunError, respErr.Type)
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, respErr.Message, secret)
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		require.Contains(t, respErr.Message, redacted)
+	}
+
+	evt := <-eventCh
+	require.NotNil(t, evt)
+	require.NotNil(t, evt.Response)
+	require.Equal(t, respErr, evt.Response.Error)
+}
+
 func TestA2AAgent_aggregateEventContent_IgnoresErrorResponses(t *testing.T) {
 	a := &A2AAgent{name: "remote-agent"}
 	builder := &strings.Builder{}
