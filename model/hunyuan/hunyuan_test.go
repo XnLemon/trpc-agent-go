@@ -12,6 +12,7 @@ package hunyuan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1125,6 +1126,26 @@ func TestHandleErrorResponse(t *testing.T) {
 	if !got.Done {
 		t.Error("Expected Done to be true")
 	}
+}
+
+func TestSendErrorResponseRedactsSensitiveMessage(t *testing.T) {
+	m := New("hunyuan-test")
+	ch := make(chan *model.Response, 1)
+	m.sendErrorResponse(context.Background(), ch, model.ErrorTypeAPIError, errors.New(
+		"test error: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
+	))
+
+	resp := <-ch
+	require.NotNil(t, resp.Error)
+	assert.Contains(t, resp.Error.Message, "test error")
+	assert.NotContains(t, resp.Error.Message, "raw-token")
+	assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+	assert.NotContains(t, resp.Error.Message, "raw-secret")
+	assert.NotContains(t, resp.Error.Message, "raw-password")
+	assert.NotContains(t, resp.Error.Message, "raw-cookie")
+	assert.Contains(t, resp.Error.Message, "****")
+	assert.Equal(t, model.ErrorTypeAPIError, resp.Error.Type)
+	assert.True(t, resp.Done)
 }
 
 func TestWithTokenTailoring(t *testing.T) {

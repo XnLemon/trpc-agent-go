@@ -1475,9 +1475,17 @@ func Test_sendErrorResponse(t *testing.T) {
 	m := New("claude-test")
 	ctx := context.Background()
 	ch := make(chan *model.Response, 1)
-	m.sendErrorResponse(ctx, ch, model.ErrorTypeAPIError, fmt.Errorf("boom"))
+	m.sendErrorResponse(ctx, ch, model.ErrorTypeAPIError, fmt.Errorf(
+		"request failed: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
+	))
 	resp := <-ch
 	assert.NotNil(t, resp.Error)
+	assert.NotContains(t, resp.Error.Message, "raw-token")
+	assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+	assert.NotContains(t, resp.Error.Message, "raw-secret")
+	assert.NotContains(t, resp.Error.Message, "raw-password")
+	assert.NotContains(t, resp.Error.Message, "raw-cookie")
+	assert.Contains(t, resp.Error.Message, "****")
 	assert.Equal(t, model.ErrorTypeAPIError, resp.Error.Type)
 	assert.True(t, resp.Done)
 }

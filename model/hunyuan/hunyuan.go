@@ -27,6 +27,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model/hunyuan/internal/hunyuan"
 	imodel "trpc.group/trpc-go/trpc-agent-go/model/internal/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/internal/modeltailoring"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -454,7 +455,7 @@ func (m *Model) handleStreamingResponse(
 func (m *Model) sendErrorResponse(ctx context.Context, responseChan chan<- *model.Response, errType string, err error) {
 	errorResponse := &model.Response{
 		Error: &model.ResponseError{
-			Message: err.Error(),
+			Message: redactErrorMessage(err),
 			Type:    errType,
 		},
 		Timestamp: time.Now(),
@@ -464,6 +465,17 @@ func (m *Model) sendErrorResponse(ctx context.Context, responseChan chan<- *mode
 	case responseChan <- errorResponse:
 	case <-ctx.Done():
 	}
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(err.Error())
 }
 
 // convertChatResponse converts Hunyuan chat response to model response.
