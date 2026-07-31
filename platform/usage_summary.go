@@ -40,6 +40,12 @@ func SummarizeUsage(records []UsageRecord, filter UsageSummaryFilter) (UsageSumm
 	if tenantID == "" {
 		return UsageSummary{}, ErrTenantIDRequired
 	}
+	if err := validateAuditRedactedFields(
+		safeTextField{"tenant_id", tenantID},
+		safeTextField{"app_id", appID},
+	); err != nil {
+		return UsageSummary{}, err
+	}
 	summary := UsageSummary{
 		TenantID: tenantID,
 		AppID:    appID,

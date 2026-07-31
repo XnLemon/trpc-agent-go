@@ -91,6 +91,26 @@ func TestSummarizeUsageRequiresTenant(t *testing.T) {
 	}
 }
 
+func TestSummarizeUsageRejectsUnsafeFilterValues(t *testing.T) {
+	tests := map[string]UsageSummaryFilter{
+		"tenant_id": {
+			TenantID: "tenant Authorization: Bearer raw-token",
+		},
+		"app_id": {
+			TenantID: "tenant",
+			AppID:    "app api_key=sk-1234567890abcdef",
+		},
+	}
+	for name, filter := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := SummarizeUsage(nil, filter)
+			if err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("expected unsafe %s filter rejection, got %v", name, err)
+			}
+		})
+	}
+}
+
 func TestSummarizeUsageRejectsInvalidMatchingRecord(t *testing.T) {
 	record := usageRecordForSummary("tenant", "app", 10, 5, 0, 0.1, 0.2, 0.3)
 	record.TotalCost = math.Inf(1)
