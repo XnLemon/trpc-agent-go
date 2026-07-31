@@ -106,6 +106,13 @@ func TestQueryAuditRequiresTenant(t *testing.T) {
 	}
 }
 
+func TestQueryAuditRejectsUnsafeTenantFilter(t *testing.T) {
+	_, err := QueryAudit(nil, AuditQueryFilter{TenantID: "tenant Authorization: Bearer raw-token"})
+	if err == nil || !strings.Contains(err.Error(), "tenant_id") {
+		t.Fatalf("expected unsafe tenant filter rejection, got %v", err)
+	}
+}
+
 func TestQueryAuditRejectsUnsafeFilterValues(t *testing.T) {
 	_, err := QueryAudit(nil, AuditQueryFilter{
 		TenantID: "tenant",
