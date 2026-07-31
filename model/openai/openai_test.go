@@ -9613,13 +9613,15 @@ func TestExtractEmbeddedErrorResponse(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		completion  *openaigo.ChatCompletion
-		wantNil     bool
-		wantMessage string
-		wantType    string
-		wantCode    string
-		wantParam   string
+		name             string
+		completion       *openaigo.ChatCompletion
+		wantNil          bool
+		wantMessage      string
+		wantType         string
+		wantCode         string
+		wantParam        string
+		wantRedacted     bool
+		wantNoSubstrings []string
 	}{
 		{
 			name:       "nil completion",
@@ -9670,16 +9672,18 @@ func TestExtractEmbeddedErrorResponse(t *testing.T) {
 			name: "empty completion with embedded error containing ret_code",
 			completion: mustCompletion(t, `{
 				"error": {
-					"message": "API key exceeded rate limit",
+					"message": "API key exceeded rate limit: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
 					"type": "requestAuthError",
 					"code": "rate_limited",
 					"ret_code": -2000
 				}
 			}`),
-			wantNil:     false,
-			wantMessage: "API key exceeded rate limit",
-			wantType:    model.ErrorTypeAPIError,
-			wantCode:    "rate_limited",
+			wantNil:          false,
+			wantMessage:      "API key exceeded rate limit",
+			wantType:         model.ErrorTypeAPIError,
+			wantCode:         "rate_limited",
+			wantRedacted:     true,
+			wantNoSubstrings: []string{"raw-token", "sk-testsecret", "raw-secret", "raw-password", "raw-cookie"},
 		},
 		{
 			name: "empty completion with error message only, type defaults to api_error",
@@ -9759,7 +9763,13 @@ func TestExtractEmbeddedErrorResponse(t *testing.T) {
 			}
 			require.NotNil(t, resp, "expected non-nil error response")
 			require.NotNil(t, resp.Error, "expected Error field")
-			assert.Equal(t, tt.wantMessage, resp.Error.Message)
+			assert.Contains(t, resp.Error.Message, tt.wantMessage)
+			for _, forbidden := range tt.wantNoSubstrings {
+				assert.NotContains(t, resp.Error.Message, forbidden)
+			}
+			if tt.wantRedacted {
+				assert.Contains(t, resp.Error.Message, "****")
+			}
 			assert.Equal(t, tt.wantType, resp.Error.Type)
 			assert.True(t, resp.Done, "error response must be Done")
 			if tt.wantCode != "" {
@@ -9784,7 +9794,7 @@ func TestModel_GenerateContent_EmbeddedErrorHTTP200(t *testing.T) {
 		// Simulate a provider returning HTTP 200 with an error body.
 		fmt.Fprint(w, `{
 			"error": {
-				"message": "When using tool_choice, 'tools' must be set.",
+				"message": "When using tool_choice, 'tools' must be set. Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie",
 				"type": "invalid_request_error",
 				"ret_code": -1000
 			}
@@ -9815,7 +9825,13 @@ func TestModel_GenerateContent_EmbeddedErrorHTTP200(t *testing.T) {
 	require.Len(t, responses, 1, "expected exactly one response")
 	resp := responses[0]
 	require.NotNil(t, resp.Error, "response must carry an error")
-	assert.Equal(t, "When using tool_choice, 'tools' must be set.", resp.Error.Message)
+	assert.Contains(t, resp.Error.Message, "When using tool_choice, 'tools' must be set.")
+	assert.NotContains(t, resp.Error.Message, "raw-token")
+	assert.NotContains(t, resp.Error.Message, "sk-testsecret")
+	assert.NotContains(t, resp.Error.Message, "raw-secret")
+	assert.NotContains(t, resp.Error.Message, "raw-password")
+	assert.NotContains(t, resp.Error.Message, "raw-cookie")
+	assert.Contains(t, resp.Error.Message, "****")
 	assert.Equal(t, model.ErrorTypeAPIError, resp.Error.Type)
 	assert.True(t, resp.Done)
 	assert.Empty(t, resp.Choices, "error response should have no choices")

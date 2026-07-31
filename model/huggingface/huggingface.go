@@ -26,6 +26,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	imodel "trpc.group/trpc-go/trpc-agent-go/model/internal/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/internal/modeltailoring"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 )
 
 // Model implements the model.Model interface for HuggingFace API.
@@ -215,7 +216,7 @@ func (m *Model) handleNonStreamingRequest(
 	if err != nil {
 		responseChan <- &model.Response{
 			Error: &model.ResponseError{
-				Message: fmt.Sprintf("failed to make request: %v", err),
+				Message: redactErrorMessage(fmt.Errorf("failed to make request: %w", err)),
 			},
 		}
 		return
@@ -248,7 +249,7 @@ func (m *Model) handleStreamingRequest(
 		streamErr = err
 		terminalResponse = &model.Response{
 			Error: &model.ResponseError{
-				Message: fmt.Sprintf("failed to make streaming request: %v", err),
+				Message: redactErrorMessage(fmt.Errorf("failed to make streaming request: %w", err)),
 			},
 		}
 	} else {
@@ -266,7 +267,7 @@ func (m *Model) handleStreamingRequest(
 				streamErr = err
 				terminalResponse = &model.Response{
 					Error: &model.ResponseError{
-						Message: fmt.Sprintf("error reading stream: %v", err),
+						Message: redactErrorMessage(fmt.Errorf("error reading stream: %w", err)),
 					},
 				}
 				break
@@ -307,6 +308,17 @@ func (m *Model) handleStreamingRequest(
 	if terminalResponse != nil {
 		responseChan <- terminalResponse
 	}
+}
+
+func redactErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	redactor, redactorErr := platform.NewRedactor()
+	if redactorErr != nil {
+		return "redacted error detail unavailable"
+	}
+	return redactor.Redact(err.Error())
 }
 
 // makeRequest makes a non-streaming HTTP request to the HuggingFace API.
