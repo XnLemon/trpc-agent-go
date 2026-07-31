@@ -499,13 +499,14 @@ func TestExecutionErrorCollector_EmptyOptionsKeepDefaults(t *testing.T) {
 func TestNewExecutionError_NilCallbackContext(t *testing.T) {
 	record := NewExecutionError(
 		nil,
-		errors.New("boom"),
+		errors.New(sensitiveGraphErrorMessage()),
 		ExecutionErrorSeverityFatal,
 	)
 
 	require.Equal(t, ExecutionErrorSeverityFatal, record.Severity)
 	require.NotNil(t, record.Error)
-	require.Equal(t, "boom", record.Error.Message)
+	require.Contains(t, record.Error.Message, "boom")
+	requireGraphErrorMessageRedacted(t, record.Error.Message)
 	require.Empty(t, record.NodeID)
 	require.Empty(t, record.NodeName)
 }

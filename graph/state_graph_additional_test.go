@@ -677,8 +677,14 @@ func TestEmitFastModelResponseEvent_DisablesPartialMetadata(t *testing.T) {
 	})
 
 	t.Run("response error is surfaced", func(t *testing.T) {
+		code := "api_key=sk-testsecret"
+		param := "Authorization: Bearer raw-token"
 		resp := &model.Response{
-			Error: &model.ResponseError{Message: "api boom"},
+			Error: &model.ResponseError{
+				Message: sensitiveGraphErrorMessage(),
+				Code:    &code,
+				Param:   &param,
+			},
 		}
 
 		ev, err := emitFastModelResponseEvent(
@@ -694,9 +700,16 @@ func TestEmitFastModelResponseEvent_DisablesPartialMetadata(t *testing.T) {
 			false,
 			&event.Event{},
 		)
-		require.ErrorContains(t, err, "model API error: api boom")
+		require.ErrorContains(t, err, "model API error: boom")
+		requireGraphErrorMessageRedacted(t, err.Error())
 		require.NotNil(t, ev)
-		require.Same(t, resp, ev.Response)
+		require.NotSame(t, resp, ev.Response)
+		require.Same(t, resp.Error, resp.Error)
+		requireGraphErrorMessageRedacted(t, ev.Response.Error.Message)
+		require.NotNil(t, ev.Response.Error.Code)
+		requireGraphErrorMessageRedacted(t, *ev.Response.Error.Code)
+		require.NotNil(t, ev.Response.Error.Param)
+		requireGraphErrorMessageRedacted(t, *ev.Response.Error.Param)
 	})
 
 	t.Run("partial response uses event creation time by default", func(t *testing.T) {

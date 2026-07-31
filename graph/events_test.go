@@ -274,6 +274,96 @@ func TestNewToolAndModelEvents(t *testing.T) {
 	require.Equal(t, "resp-1", mmeta.ResponseID)
 }
 
+func TestGraphErrorEventsRedactSensitiveMessages(t *testing.T) {
+	raw := sensitiveGraphErrorMessage()
+
+	nodeEvent := NewNodeErrorEvent(
+		WithNodeEventInvocationID("inv"),
+		WithNodeEventNodeID("node"),
+		WithNodeEventNodeType(NodeTypeFunction),
+		WithNodeEventError(raw),
+	)
+	require.NotNil(t, nodeEvent.Response)
+	require.NotNil(t, nodeEvent.Response.Error)
+	require.Contains(t, nodeEvent.Response.Error.Message, "boom")
+	requireGraphErrorMessageRedacted(t, nodeEvent.Response.Error.Message)
+	var nodeMeta NodeExecutionMetadata
+	require.NoError(t, json.Unmarshal(nodeEvent.StateDelta[MetadataKeyNode], &nodeMeta))
+	requireGraphErrorMessageRedacted(t, nodeMeta.Error)
+
+	code := "E_AUTH"
+	param := "Authorization: Bearer raw-token"
+	nodeWithResponseError := NewNodeErrorEvent(
+		WithNodeEventInvocationID("inv"),
+		WithNodeEventNodeID("node"),
+		WithNodeEventNodeType(NodeTypeFunction),
+		WithNodeEventResponseError(&model.ResponseError{
+			Type:    model.ErrorTypeFlowError,
+			Message: raw,
+			Code:    &code,
+			Param:   &param,
+		}),
+	)
+	require.NotNil(t, nodeWithResponseError.Response)
+	require.NotNil(t, nodeWithResponseError.Response.Error)
+	requireGraphErrorMessageRedacted(t, nodeWithResponseError.Response.Error.Message)
+	require.NotNil(t, nodeWithResponseError.Response.Error.Code)
+	require.Equal(t, code, *nodeWithResponseError.Response.Error.Code)
+	require.NotNil(t, nodeWithResponseError.Response.Error.Param)
+	requireGraphErrorMessageRedacted(t, *nodeWithResponseError.Response.Error.Param)
+
+	toolEvent := NewToolExecutionEvent(
+		WithToolEventInvocationID("inv"),
+		WithToolEventNodeID("node"),
+		WithToolEventToolID("tool-call"),
+		WithToolEventToolName("tool"),
+		WithToolEventError(errors.New(raw)),
+		WithToolEventIncludeResponse(true),
+	)
+	require.NotNil(t, toolEvent.Response)
+	require.NotNil(t, toolEvent.Response.Error)
+	requireGraphErrorMessageRedacted(t, toolEvent.Response.Error.Message)
+	var toolMeta ToolExecutionMetadata
+	require.NoError(t, json.Unmarshal(toolEvent.StateDelta[MetadataKeyTool], &toolMeta))
+	requireGraphErrorMessageRedacted(t, toolMeta.Error)
+
+	modelEvent := NewModelExecutionEvent(
+		WithModelEventInvocationID("inv"),
+		WithModelEventNodeID("node"),
+		WithModelEventModelName("model"),
+		WithModelEventError(errors.New(raw)),
+	)
+	var modelMeta ModelExecutionMetadata
+	require.NoError(t, json.Unmarshal(modelEvent.StateDelta[MetadataKeyModel], &modelMeta))
+	requireGraphErrorMessageRedacted(t, modelMeta.Error)
+
+	pregelEvent := NewPregelErrorEvent(
+		WithPregelEventInvocationID("inv"),
+		WithPregelEventStepNumber(1),
+		WithPregelEventError(raw),
+	)
+	require.NotNil(t, pregelEvent.Response)
+	require.NotNil(t, pregelEvent.Response.Error)
+	requireGraphErrorMessageRedacted(t, pregelEvent.Response.Error.Message)
+	var pregelMeta PregelStepMetadata
+	require.NoError(t, json.Unmarshal(pregelEvent.StateDelta[MetadataKeyPregel], &pregelMeta))
+	requireGraphErrorMessageRedacted(t, pregelMeta.Error)
+}
+
+func sensitiveGraphErrorMessage() string {
+	return "boom: Authorization: Bearer raw-token api_key=sk-testsecret token=raw-token secret: raw-secret password=raw-password Cookie: session=raw-cookie"
+}
+
+func requireGraphErrorMessageRedacted(t *testing.T, message string) {
+	t.Helper()
+	require.NotContains(t, message, "raw-token")
+	require.NotContains(t, message, "sk-testsecret")
+	require.NotContains(t, message, "raw-secret")
+	require.NotContains(t, message, "raw-password")
+	require.NotContains(t, message, "raw-cookie")
+	require.Contains(t, message, "****")
+}
+
 func TestNewPregelAndChannelStateEvents(t *testing.T) {
 	start := time.Now().UTC()
 	end := start.Add(5 * time.Millisecond)

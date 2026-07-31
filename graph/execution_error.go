@@ -305,7 +305,7 @@ func NewExecutionError(
 	err error,
 	severity ExecutionErrorSeverity,
 ) ExecutionError {
-	respErr := model.ResponseErrorFromError(err, model.ErrorTypeFlowError)
+	respErr := redactedResponseErrorFromError(err, model.ErrorTypeFlowError)
 	record := ExecutionError{
 		Severity:  severity,
 		Timestamp: time.Now(),
@@ -386,7 +386,7 @@ func (c *ExecutionErrorCollector) afterNode(
 	}
 	record := NewExecutionError(callbackCtx, nodeErr, severity)
 	if policy.ResponseError != nil {
-		record.Error = cloneResponseError(policy.ResponseError)
+		record.Error = redactResponseError(policy.ResponseError)
 	}
 
 	update := State{
