@@ -198,7 +198,7 @@ func TestClaudeCodeAgent_Run_CommandError(t *testing.T) {
 
 	runner := &scriptedRunner{
 		run: func(cmd command) ([]byte, []byte, error) {
-			return nil, []byte("boom\n"), errors.New("exit 2")
+			return nil, []byte("boom Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), errors.New("exit 2")
 		},
 	}
 
@@ -214,8 +214,10 @@ func TestClaudeCodeAgent_Run_CommandError(t *testing.T) {
 	require.Len(t, events, 1)
 	require.True(t, events[0].IsFinalResponse())
 	require.NotNil(t, events[0].Error)
-	require.Equal(t, "boom", events[0].Error.Message)
-	require.Equal(t, "boom", events[0].Choices[0].Message.Content)
+	require.Contains(t, events[0].Error.Message, "boom")
+	require.Contains(t, events[0].Choices[0].Message.Content, "boom")
+	assertRedactedAgentErrorMessage(t, events[0].Error.Message)
+	assertRedactedAgentErrorMessage(t, events[0].Choices[0].Message.Content)
 }
 
 func TestClaudeCodeAgent_Run_RawOutputHook(t *testing.T) {
@@ -233,7 +235,7 @@ func TestClaudeCodeAgent_Run_RawOutputHook(t *testing.T) {
 	transcript := `[{"type":"result","result":"hello"}]`
 	runner := &scriptedRunner{
 		run: func(cmd command) ([]byte, []byte, error) {
-			return []byte(transcript), []byte("warn\n"), nil
+			return []byte(transcript), []byte("warn Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), nil
 		},
 	}
 
@@ -285,7 +287,7 @@ func TestClaudeCodeAgent_Run_RawOutputHookError(t *testing.T) {
 		},
 	}
 
-	hookErr := errors.New("hook failed")
+	hookErr := errors.New("hook failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def")
 	var called bool
 	ag, err := New(
 		WithBin("claude"),
@@ -309,8 +311,22 @@ func TestClaudeCodeAgent_Run_RawOutputHookError(t *testing.T) {
 	require.Equal(t, model.ErrorTypeFlowError, events[0].Error.Type)
 	require.Contains(t, events[0].Error.Message, "raw output hook")
 	require.Contains(t, events[0].Error.Message, "hook failed")
+	assertRedactedAgentErrorMessage(t, events[0].Error.Message)
 	require.Contains(t, events[0].Choices[0].Message.Content, transcript)
 	require.Contains(t, events[0].Choices[0].Message.Content, "warn")
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, events[0].Choices[0].Message.Content, secret)
+	}
+}
+
+func assertRedactedAgentErrorMessage(t *testing.T, message string) {
+	t.Helper()
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, message, secret)
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		require.Contains(t, message, redacted)
+	}
 }
 
 func TestClaudeCodeAgent_InfoAndRunnerArgs(t *testing.T) {

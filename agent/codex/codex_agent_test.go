@@ -185,7 +185,7 @@ func TestCodexAgent_Run_ResumeAndCreateErrorsReturnRunError(t *testing.T) {
 			if len(cmd.args) > 1 && cmd.args[1] == "resume" {
 				return nil, []byte("resume unavailable"), errors.New("resume exit 1")
 			}
-			return nil, []byte("create unavailable"), errors.New("create exit 1")
+			return nil, []byte("create failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), errors.New("create exit 1")
 		},
 	}
 	ag, err := New(withCommandRunner(runner))
@@ -196,7 +196,10 @@ func TestCodexAgent_Run_ResumeAndCreateErrorsReturnRunError(t *testing.T) {
 	require.Len(t, events, 1)
 	require.NotNil(t, events[0].Error)
 	require.Equal(t, model.ErrorTypeRunError, events[0].Error.Type)
-	require.Equal(t, "create unavailable", events[0].Error.Message)
+	require.Contains(t, events[0].Error.Message, "create failed")
+	require.Contains(t, events[0].Choices[0].Message.Content, "create failed")
+	assertRedactedAgentErrorMessage(t, events[0].Error.Message)
+	assertRedactedAgentErrorMessage(t, events[0].Choices[0].Message.Content)
 	calls := runner.Calls()
 	require.Len(t, calls, 2)
 	require.Equal(t, []string{"exec", "resume", "--json", "thread-1"}, calls[0].args)
@@ -250,7 +253,7 @@ func TestCodexAgent_Run_RawOutputHookReceivesCommandError(t *testing.T) {
 	runErr := errors.New("exit 1")
 	runner := &scriptedRunner{
 		run: func(cmd command) ([]byte, []byte, error) {
-			return []byte("stdout text"), []byte("stderr text"), runErr
+			return []byte("stdout text"), []byte("stderr Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), runErr
 		},
 	}
 	var got RawOutputHookArgs
@@ -269,11 +272,15 @@ func TestCodexAgent_Run_RawOutputHookReceivesCommandError(t *testing.T) {
 	require.ErrorIs(t, got.Error, runErr)
 	require.Equal(t, "--help", got.Prompt)
 	require.Equal(t, "stdout text", string(got.Stdout))
-	require.Equal(t, "stderr text", string(got.Stderr))
+	require.Equal(t, "stderr Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def", string(got.Stderr))
 	require.NotNil(t, events[0].Error)
 	require.Equal(t, model.ErrorTypeRunError, events[0].Error.Type)
-	require.Equal(t, "stdout text\nstderr text", events[0].Error.Message)
-	require.Equal(t, "stdout text\nstderr text", events[0].Choices[0].Message.Content)
+	require.Contains(t, events[0].Error.Message, "stdout text")
+	require.Contains(t, events[0].Error.Message, "stderr")
+	require.Contains(t, events[0].Choices[0].Message.Content, "stdout text")
+	require.Contains(t, events[0].Choices[0].Message.Content, "stderr")
+	assertRedactedAgentErrorMessage(t, events[0].Error.Message)
+	assertRedactedAgentErrorMessage(t, events[0].Choices[0].Message.Content)
 	calls := runner.Calls()
 	require.Len(t, calls, 1)
 	require.Equal(t, []string{"exec", "--json"}, calls[0].args)
@@ -284,10 +291,10 @@ func TestCodexAgent_Run_RawOutputHookError(t *testing.T) {
 	ctx := context.Background()
 	sess := session.NewSession("app", "user", "sess-hook-2")
 	inv := newTestInvocation("inv-hook-2", sess, "Hi.")
-	hookErr := errors.New("hook failed")
+	hookErr := errors.New("hook failed Authorization: Bearer raw-token\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def")
 	runner := &scriptedRunner{
 		run: func(cmd command) ([]byte, []byte, error) {
-			return []byte(codexTranscript("thread-hook-2", "hello")), []byte("warn\n"), nil
+			return []byte(codexTranscript("thread-hook-2", "hello")), []byte("warn\napi_key=sk-1234567890abcdef\nCookie: session=abc; sid=def"), nil
 		},
 	}
 	ag, err := New(
@@ -307,8 +314,24 @@ func TestCodexAgent_Run_RawOutputHookError(t *testing.T) {
 	require.Equal(t, model.ErrorTypeFlowError, events[0].Error.Type)
 	require.Contains(t, events[0].Error.Message, "raw output hook")
 	require.Contains(t, events[0].Error.Message, "hook failed")
+	assertRedactedAgentErrorMessage(t, events[0].Error.Message)
 	require.Contains(t, events[0].Choices[0].Message.Content, "thread-hook-2")
 	require.Contains(t, events[0].Choices[0].Message.Content, "warn")
+	require.NotContains(t, events[0].Choices[0].Message.Content, "sk-1234567890abcdef")
+	require.NotContains(t, events[0].Choices[0].Message.Content, "session=abc")
+	require.NotContains(t, events[0].Choices[0].Message.Content, "sid=def")
+	require.Contains(t, events[0].Choices[0].Message.Content, "api_key=****")
+	require.Contains(t, events[0].Choices[0].Message.Content, "Cookie: ****")
+}
+
+func assertRedactedAgentErrorMessage(t *testing.T, message string) {
+	t.Helper()
+	for _, secret := range []string{"raw-token", "sk-1234567890abcdef", "session=abc", "sid=def"} {
+		require.NotContains(t, message, secret)
+	}
+	for _, redacted := range []string{"Authorization: ****", "api_key=****", "Cookie: ****"} {
+		require.Contains(t, message, redacted)
+	}
 }
 
 func TestCodexAgent_InfoAndRunnerArgs(t *testing.T) {
