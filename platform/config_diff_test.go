@@ -96,6 +96,100 @@ func TestDiffAppConfigVersionsRejectsInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestDiffAppConfigVersionsRedactsSensitiveNamedBundleChanges(t *testing.T) {
+	from := validAppConfigVersion()
+	from.ConfigBundleJSON = `{
+		"api_key_ref":"secret://model/old",
+		"channel":{"token_ref":"secret://im/old"},
+		"headers":{"authorization_ref":"secret://header/old"},
+		"nested":{"cookie_ref":"secret://cookie/old"},
+		"safe_value":"old"
+	}`
+	to := validAppConfigVersion()
+	to.Version = "v2"
+	to.Checksum = "sha256:2222"
+	to.ConfigBundleJSON = `{
+		"api_key_ref":"secret://model/new",
+		"channel":{"token_ref":"secret://im/new"},
+		"headers":{"authorization_ref":"secret://header/new"},
+		"nested":{"cookie_ref":"secret://cookie/new"},
+		"password_ref":"secret://db/new",
+		"safe_value":"new"
+	}`
+
+	diff, err := DiffAppConfigVersions(from, to)
+	if err != nil {
+		t.Fatalf("diff sensitive named config bundle changes: %v", err)
+	}
+	assertConfigDiffChange(t, diff, "/config_bundle_json/api_key_ref", AppConfigVersionDiffChanged, redactedConfigBundleDiffValue, redactedConfigBundleDiffValue)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/channel/token_ref", AppConfigVersionDiffChanged, redactedConfigBundleDiffValue, redactedConfigBundleDiffValue)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/headers/authorization_ref", AppConfigVersionDiffChanged, redactedConfigBundleDiffValue, redactedConfigBundleDiffValue)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/nested/cookie_ref", AppConfigVersionDiffChanged, redactedConfigBundleDiffValue, redactedConfigBundleDiffValue)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/password_ref", AppConfigVersionDiffAdded, "", redactedConfigBundleDiffValue)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/safe_value", AppConfigVersionDiffChanged, `"old"`, `"new"`)
+
+	serialized := strings.Join(configDiffChangeValues(diff), " ")
+	for _, secret := range []string{
+		"secret://model/old",
+		"secret://model/new",
+		"secret://im/old",
+		"secret://im/new",
+		"secret://header/old",
+		"secret://header/new",
+		"secret://cookie/old",
+		"secret://cookie/new",
+		"secret://db/new",
+	} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("diff leaked sensitive config value %q in %s", secret, serialized)
+		}
+	}
+}
+
+func TestDiffAppConfigVersionsRedactsNestedSensitiveBundleChanges(t *testing.T) {
+	from := validAppConfigVersion()
+	from.ConfigBundleJSON = `{
+		"removed_parent":{
+			"label":"old",
+			"channel":{"token_ref":"secret://im/old"}
+		},
+		"changed_parent":{
+			"label":"old",
+			"credentials":[{"api_key_ref":"secret://model/old"}]
+		}
+	}`
+	to := validAppConfigVersion()
+	to.Version = "v2"
+	to.Checksum = "sha256:2222"
+	to.ConfigBundleJSON = `{
+		"added_parent":{
+			"label":"new",
+			"channel":{"token_ref":"secret://im/new"}
+		},
+		"changed_parent":"manual-override"
+	}`
+
+	diff, err := DiffAppConfigVersions(from, to)
+	if err != nil {
+		t.Fatalf("diff nested sensitive config bundle changes: %v", err)
+	}
+
+	assertConfigDiffChange(t, diff, "/config_bundle_json/added_parent", AppConfigVersionDiffAdded, "", `{"channel":{"token_ref":"***REDACTED***"},"label":"new"}`)
+	assertConfigDiffChange(t, diff, "/config_bundle_json/removed_parent", AppConfigVersionDiffRemoved, `{"channel":{"token_ref":"***REDACTED***"},"label":"old"}`, "")
+	assertConfigDiffChange(t, diff, "/config_bundle_json/changed_parent", AppConfigVersionDiffChanged, `{"credentials":"***REDACTED***","label":"old"}`, `"manual-override"`)
+
+	serialized := strings.Join(configDiffChangeValues(diff), " ")
+	for _, secret := range []string{
+		"secret://im/old",
+		"secret://im/new",
+		"secret://model/old",
+	} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("diff leaked nested sensitive config value %q in %s", secret, serialized)
+		}
+	}
+}
+
 func TestDecodeConfigBundleRejectsTrailingJSON(t *testing.T) {
 	_, err := decodeConfigBundle(`{"model_profile_id":"model"} {"tool_policy_id":"tools"}`)
 
@@ -164,4 +258,12 @@ func assertConfigDiffChange(
 		return
 	}
 	t.Fatalf("missing change %s in %+v", path, diff.Changes)
+}
+
+func configDiffChangeValues(diff AppConfigVersionDiff) []string {
+	values := make([]string, 0, len(diff.Changes)*2)
+	for _, change := range diff.Changes {
+		values = append(values, change.Before, change.After)
+	}
+	return values
 }

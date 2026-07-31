@@ -31,6 +31,8 @@ const (
 	AppConfigVersionDiffChanged AppConfigVersionDiffKind = "changed"
 )
 
+const redactedConfigBundleDiffValue = `"***REDACTED***"`
+
 // AppConfigVersionDiffChange is one safe, displayable config version difference.
 type AppConfigVersionDiffChange struct {
 	// Path is a metadata field name or a JSON Pointer-style config bundle path.
@@ -119,7 +121,7 @@ func diffConfigBundleValue(path string, before, after any, changes *[]AppConfigV
 		*changes = append(*changes, AppConfigVersionDiffChange{
 			Path:  path,
 			Kind:  AppConfigVersionDiffAdded,
-			After: formatConfigBundleValue(after),
+			After: formatConfigBundleDiffValue(path, after),
 		})
 		return
 	}
@@ -127,7 +129,7 @@ func diffConfigBundleValue(path string, before, after any, changes *[]AppConfigV
 		*changes = append(*changes, AppConfigVersionDiffChange{
 			Path:   path,
 			Kind:   AppConfigVersionDiffRemoved,
-			Before: formatConfigBundleValue(before),
+			Before: formatConfigBundleDiffValue(path, before),
 		})
 		return
 	}
@@ -176,8 +178,8 @@ func diffConfigBundleValue(path string, before, after any, changes *[]AppConfigV
 	*changes = append(*changes, AppConfigVersionDiffChange{
 		Path:   path,
 		Kind:   AppConfigVersionDiffChanged,
-		Before: formatConfigBundleValue(before),
-		After:  formatConfigBundleValue(after),
+		Before: formatConfigBundleDiffValue(path, before),
+		After:  formatConfigBundleDiffValue(path, after),
 	})
 }
 
@@ -208,4 +210,79 @@ func formatConfigBundleValue(value any) string {
 		return fmt.Sprint(value)
 	}
 	return string(encoded)
+}
+
+func formatConfigBundleDiffValue(path string, value any) string {
+	if configBundleDiffPathSensitive(path) {
+		return redactedConfigBundleDiffValue
+	}
+	return formatConfigBundleValue(redactConfigBundleDiffValue(path, value))
+}
+
+func redactConfigBundleDiffValue(path string, value any) any {
+	if configBundleDiffPathSensitive(path) {
+		return "***REDACTED***"
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(typed))
+		for key, child := range typed {
+			redacted[key] = redactConfigBundleDiffValue(path+"/"+escapeConfigPathSegment(key), child)
+		}
+		return redacted
+	case []any:
+		redacted := make([]any, len(typed))
+		for i, child := range typed {
+			redacted[i] = redactConfigBundleDiffValue(fmt.Sprintf("%s/%d", path, i), child)
+		}
+		return redacted
+	default:
+		return value
+	}
+}
+
+func configBundleDiffPathSensitive(path string) bool {
+	segments := strings.Split(path, "/")
+	for _, segment := range segments {
+		segment = strings.TrimSpace(unescapeConfigPathSegment(segment))
+		if segment == "" {
+			continue
+		}
+		if configBundleDiffSegmentSensitive(strings.ToLower(segment)) {
+			return true
+		}
+	}
+	return false
+}
+
+func configBundleDiffSegmentSensitive(segment string) bool {
+	if strings.HasSuffix(segment, "_ref") {
+		return true
+	}
+	switch segment {
+	case "api_key", "apikey", "authorization", "cookie", "credential", "credentials",
+		"password", "secret", "secrets", "token":
+		return true
+	}
+	for _, suffix := range []string{
+		"_api_key",
+		"_apikey",
+		"_authorization",
+		"_cookie",
+		"_credential",
+		"_credentials",
+		"_password",
+		"_secret",
+		"_token",
+	} {
+		if strings.HasSuffix(segment, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func unescapeConfigPathSegment(segment string) string {
+	segment = strings.ReplaceAll(segment, "~1", "/")
+	return strings.ReplaceAll(segment, "~0", "~")
 }
