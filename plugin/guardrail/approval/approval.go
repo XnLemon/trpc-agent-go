@@ -13,9 +13,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/platform"
 	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/approval/review"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -28,6 +30,9 @@ type Plugin struct {
 	defaultToolPolicy ToolPolicy
 	toolPolicies      map[string]ToolPolicy
 	tokenCounter      model.TokenCounter
+	auditSink         platform.AuditSink
+	approverUserID    string
+	now               func() time.Time
 }
 
 // New creates a new approval plugin.
@@ -47,12 +52,18 @@ func New(options ...Option) (*Plugin, error) {
 	if requiresReviewer(opts) && opts.reviewer == nil {
 		return nil, fmt.Errorf("newing approval plugin: reviewer is nil")
 	}
+	if opts.auditSink != nil && requiresReviewer(opts) && strings.TrimSpace(opts.approverUserID) == "" {
+		return nil, fmt.Errorf("newing approval plugin: approver user id is required when approval audit is enabled")
+	}
 	return &Plugin{
 		name:              opts.name,
 		reviewer:          opts.reviewer,
 		defaultToolPolicy: opts.defaultToolPolicy,
 		toolPolicies:      opts.toolPolicies,
 		tokenCounter:      model.NewSimpleTokenCounter(),
+		auditSink:         opts.auditSink,
+		approverUserID:    strings.TrimSpace(opts.approverUserID),
+		now:               opts.now,
 	}, nil
 }
 
@@ -95,6 +106,23 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 					CustomResult: fmt.Sprintf("approval review failed for tool %q: %v", args.ToolName, err),
 				}, nil
 			}
+			if err := p.writeApprovalAudit(
+				ctx,
+				args,
+				platform.ToolApprovalDecisionRequested,
+				approvalAuditDecisionReason(platform.ToolApprovalDecisionRequested),
+				"",
+			); err != nil {
+				log.ErrorfContext(
+					ctx,
+					"Automatic approval review denied: approval audit failed for tool %q: %v",
+					args.ToolName,
+					err,
+				)
+				return &tool.BeforeToolResult{
+					CustomResult: fmt.Sprintf("approval audit failed for tool %q: %v", args.ToolName, err),
+				}, nil
+			}
 			decision, err := p.reviewer.Review(ctx, req)
 			if err != nil {
 				log.ErrorfContext(
@@ -122,6 +150,23 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 			riskLevel := strings.TrimSpace(decision.RiskLevel)
 			reason := strings.TrimSpace(decision.Reason)
 			if decision.Approved {
+				if err := p.writeApprovalAudit(
+					ctx,
+					args,
+					platform.ToolApprovalDecisionApproved,
+					approvalAuditDecisionReason(platform.ToolApprovalDecisionApproved),
+					p.auditApproverUserID(),
+				); err != nil {
+					log.ErrorfContext(
+						ctx,
+						"Automatic approval review denied: approval audit failed for tool %q: %v",
+						args.ToolName,
+						err,
+					)
+					return &tool.BeforeToolResult{
+						CustomResult: fmt.Sprintf("approval audit failed for tool %q: %v", args.ToolName, err),
+					}, nil
+				}
 				log.InfofContext(
 					ctx,
 					"Automatic approval review approved (risk: %s): %s",
@@ -135,6 +180,23 @@ func (p *Plugin) beforeTool() tool.BeforeToolCallbackStructured {
 				riskLevel,
 				reason,
 			)
+			if err := p.writeApprovalAudit(
+				ctx,
+				args,
+				platform.ToolApprovalDecisionRejected,
+				approvalAuditDecisionReason(platform.ToolApprovalDecisionRejected),
+				p.auditApproverUserID(),
+			); err != nil {
+				log.ErrorfContext(
+					ctx,
+					"Automatic approval review denied: approval audit failed for tool %q: %v",
+					args.ToolName,
+					err,
+				)
+				return &tool.BeforeToolResult{
+					CustomResult: fmt.Sprintf("approval audit failed for tool %q: %v", args.ToolName, err),
+				}, nil
+			}
 			log.WarnContext(ctx, denyMessage)
 			return &tool.BeforeToolResult{
 				CustomResult: denyMessage,
