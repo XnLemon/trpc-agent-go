@@ -37,7 +37,6 @@ var serverUserIDHeader = "X-User-ID"
 const anonymousUserIDPrefix = "A2A_ANONYMOUS_"
 const anonymousUserIDCookie = "trpc_agent_a2a_anon"
 
-const anonymousAuthProvenanceClaim = "trpc_agent_a2a_builtin_anonymous"
 const anonymousUserIDScopeSeparator = "_"
 
 var anonymousRandRead = rand.Read
@@ -131,9 +130,8 @@ type defaultAuthProvider struct {
 // whether pre-auth middleware supplied a replacement authenticated user.
 type preAuthIdentityKey struct{}
 
-// anonymousAuthProvenanceKey stores whether built-in anonymous authentication
-// produced the current request identity. The marker is independent of the
-// auth.User pointer so post-auth middleware can clone or enrich that user.
+// anonymousAuthProvenanceKey records that the built-in provider established the
+// anonymous identity before caller-provided post-auth middleware runs.
 type anonymousAuthProvenanceKey struct{}
 
 type preAuthIdentityMiddleware struct {
@@ -195,16 +193,17 @@ type anonymousUserCookieResponseMiddleware struct {
 	cookieScope  string
 }
 
-type anonymousAuthUserMiddleware struct{}
+type anonymousAuthUserMiddleware struct {
+	cookieScope string
+}
 
-func (anonymousAuthUserMiddleware) Wrap(next http.Handler) http.Handler {
+func (m anonymousAuthUserMiddleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		state, _ := r.Context().Value(anonymousCookieStateKey{}).(*anonymousCookieState)
 		user, _ := r.Context().Value(auth.AuthUserKey).(*auth.User)
-		ctx := context.WithValue(
-			r.Context(),
-			anonymousAuthProvenanceKey{},
-			isBuiltInAnonymousAuthUser(user),
-		)
+		builtInAnonymous := state != nil && user != nil &&
+			user.ID == state.userID && isAnonymousUserIDForScope(user.ID, m.cookieScope)
+		ctx := context.WithValue(r.Context(), anonymousAuthProvenanceKey{}, builtInAnonymous)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -220,9 +219,9 @@ func (m anonymousUserCookieResponseMiddleware) Wrap(next http.Handler) http.Hand
 			http.Error(w, "authenticated user ID is empty", http.StatusUnauthorized)
 			return
 		}
-		// The context marker survives post-auth user clones; the claim check
-		// preserves the rule that custom auth providers cannot forge this cookie.
-		if state != nil && builtInAnonymous && isBuiltInAnonymousAuthUser(user) &&
+		// Authentication provenance is kept in private request context so caller
+		// middleware may clone or enrich auth.User without suppressing continuity.
+		if state != nil && builtInAnonymous &&
 			user.ID == state.userID && isAnonymousUserIDForScope(user.ID, m.cookieScope) {
 			http.SetCookie(w, &http.Cookie{
 				Name:     anonymousUserIDCookie,
@@ -262,12 +261,7 @@ func (d *defaultAuthProvider) Authenticate(r *http.Request) (*auth.User, error) 
 				"that transfers user info.",
 			d.userIDHeader,
 		)
-		return &auth.User{
-			ID: userID,
-			Claims: map[string]any{
-				anonymousAuthProvenanceClaim: true,
-			},
-		}, nil
+		return &auth.User{ID: userID}, nil
 	}
 	return &auth.User{ID: userID}, nil
 }
@@ -324,14 +318,6 @@ func isAnonymousUserIDForScope(userID, cookieScope string) bool {
 	encoded := strings.TrimPrefix(userID, anonymousUserIDPrefix)
 	parts := strings.Split(encoded, anonymousUserIDScopeSeparator)
 	return len(parts) == 2 && strings.EqualFold(parts[0], cookieScope)
-}
-
-func isBuiltInAnonymousAuthUser(user *auth.User) bool {
-	if user == nil || user.Claims == nil {
-		return false
-	}
-	marked, ok := user.Claims[anonymousAuthProvenanceClaim].(bool)
-	return ok && marked
 }
 
 func newAnonymousUserIDForScope(cookieScope string) (string, error) {

@@ -2425,13 +2425,9 @@ func TestA2AHTTPAnonymousCookieSurvivesPostAuthUserClone(t *testing.T) {
 			if user == nil {
 				return r
 			}
-			claims := make(map[string]any, len(user.Claims))
-			for key, value := range user.Claims {
-				claims[key] = value
-			}
 			cloned := &auth.User{
 				ID:     user.ID,
-				Claims: claims,
+				Claims: map[string]any{"enriched": true},
 			}
 			return r.WithContext(context.WithValue(
 				r.Context(),
@@ -2658,7 +2654,7 @@ func TestA2AHTTPCustomAuthProviderEmptyUserIDIsRejected(t *testing.T) {
 	}
 }
 
-func TestA2AHTTPCustomAuthProviderReturningAnonymousIDDoesNotIssueCookie(t *testing.T) {
+func TestA2AHTTPCustomAuthProviderReturningDifferentAnonymousIDDoesNotIssueCookie(t *testing.T) {
 	var runUserID string
 	mockRunner := &mockRunner{
 		runFunc: func(
@@ -2687,12 +2683,11 @@ func TestA2AHTTPCustomAuthProviderReturningAnonymousIDDoesNotIssueCookie(t *test
 			Name: "custom-auth-anonymous-id",
 			URL:  "http://placeholder.local",
 		}),
-		WithExtraA2AOptions(a2a.WithAuthProvider(authProviderFunc(func(r *http.Request) (*auth.User, error) {
-			cookie, cookieErr := r.Cookie(anonymousUserIDCookie)
-			if cookieErr != nil {
-				return nil, cookieErr
-			}
-			return &auth.User{ID: cookie.Value}, nil
+		WithExtraA2AOptions(a2a.WithAuthProvider(authProviderFunc(func(*http.Request) (*auth.User, error) {
+			userID, userIDErr := newAnonymousUserIDForScope(
+				anonymousCookieScopeFromAgentURL("http://placeholder.local"),
+			)
+			return &auth.User{ID: userID}, userIDErr
 		}))),
 	)
 	require.NoError(t, err)

@@ -232,7 +232,7 @@ func buildA2AServer(options *options) (*a2a.A2AServer, error) {
 			userIDHeader: userIDHeader,
 			cookieScope:  cookieScope,
 		}),
-		a2a.WithMiddleWare(anonymousAuthUserMiddleware{}),
+		a2a.WithMiddleWare(anonymousAuthUserMiddleware{cookieScope: cookieScope}),
 	)
 	// Keep caller-provided middleware after built-in authentication so it
 	// continues to observe the final auth.AuthUserKey value.
